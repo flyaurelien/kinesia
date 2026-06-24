@@ -11,10 +11,10 @@
 //     left, m/s on the right, ...). Best for comparing a few same-family signals.
 //
 // All strips share the time x-axis and a synced cursor; a playhead line tracks
-// the current frame; clicking/dragging seeks. Masked gaps and FoG annotation /
-// ground-truth segments are shaded behind the curves. onPlotBox reports the
-// canvas plotting area (left + width in CSS px, relative to the component) so
-// sibling timeline tracks can pixel-align to the exact same x-axis.
+// the current frame; clicking/dragging seeks. Masked gaps are shaded behind the
+// curves. onPlotBox reports the canvas plotting area (left + width in CSS px,
+// relative to the component) so sibling timeline tracks can pixel-align to the
+// exact same x-axis.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import uPlot from "uplot";
@@ -23,8 +23,6 @@ import type { RunSignal } from "../lib/types";
 
 // Canvas plotting area in CSS px, relative to the component (for track alignment).
 export type PlotBox = { left: number; width: number };
-// A contiguous, frame-indexed span shaded behind the curves (annotation/ground truth).
-type Seg = { startFrameIndex: number; endFrameIndex: number; source?: string };
 
 type Props = {
   signals: RunSignal[];
@@ -32,11 +30,8 @@ type Props = {
   fps: number;
   frameCount: number;
   mode?: "stacked" | "overlay";
-  // Shared zoom/scroll window (in frames). When set, the x-axis is locked to it
-  // so the plot scrolls in sync with the annotation/ground-truth tracks.
+  // Shared zoom/scroll window (in frames). When set, the x-axis is locked to it.
   viewWindow?: { start: number; end: number } | null;
-  annotationSegments?: Seg[];
-  goldSegments?: Seg[];
   maskedRanges?: Array<[number, number]>;
   colorForId?: (id: string, index: number) => string;
   onFrameSelect?: (frameIndex: number) => void;
@@ -112,8 +107,6 @@ export function KinematicsPlot({
   frameCount,
   mode = "stacked",
   viewWindow,
-  annotationSegments,
-  goldSegments,
   maskedRanges,
   colorForId,
   onFrameSelect,
@@ -125,8 +118,8 @@ export function KinematicsPlot({
 
   // Latest props for the canvas plugins (they read these at draw time so we can
   // redraw without rebuilding the chart).
-  const overlaysRef = useRef({ annotationSegments, goldSegments, maskedRanges, fps });
-  overlaysRef.current = { annotationSegments, goldSegments, maskedRanges, fps };
+  const overlaysRef = useRef({ maskedRanges, fps });
+  overlaysRef.current = { maskedRanges, fps };
   const seekRef = useRef(onFrameSelect);
   seekRef.current = onFrameSelect;
   const plotBoxRef = useRef(onPlotBox);
@@ -154,25 +147,14 @@ export function KinematicsPlot({
   // conversion, so a stale fps would mis-map clicks and the playhead.
   const signalKey = signals.map((s) => s.id).join("|") + "::" + mode + "::" + frameCount + "::" + Math.round(safeFps * 100);
 
-  // Shade masked gaps + annotation/ground-truth segments behind the series.
+  // Shade masked gaps behind the series.
   const drawBands = useCallback((u: uPlot) => {
     const ctx = u.ctx;
-    const { annotationSegments: ann, goldSegments: gold, maskedRanges: masked, fps: f } = overlaysRef.current;
+    const { maskedRanges: masked, fps: f } = overlaysRef.current;
     const sf = Math.max(1, f || 30);
     const top = u.bbox.top;
     const height = u.bbox.height;
     const xToPx = (frame: number) => Math.round(u.valToPos(frame / sf, "x", true));
-    const paint = (segs: Seg[] | undefined, fill: string) => {
-      if (!segs) return;
-      ctx.save();
-      ctx.fillStyle = fill;
-      for (const s of segs) {
-        const x1 = xToPx(s.startFrameIndex);
-        const x2 = xToPx(s.endFrameIndex + 1);
-        ctx.fillRect(x1, top, Math.max(1, x2 - x1), height);
-      }
-      ctx.restore();
-    };
     if (masked) {
       ctx.save();
       ctx.fillStyle = "rgba(148, 163, 184, 0.10)";
@@ -183,8 +165,6 @@ export function KinematicsPlot({
       }
       ctx.restore();
     }
-    paint(gold, "rgba(250, 204, 21, 0.10)");
-    paint(ann, "rgba(56, 189, 248, 0.12)");
   }, []);
 
   // (Re)build the uPlot instances.
@@ -381,7 +361,7 @@ export function KinematicsPlot({
     }
 
     // Lock the x-axis to the shared zoom/scroll window right away (no full-range
-    // flash) so the plot lines up with the annotation/ground-truth tracks.
+    // flash) so the plot lines up with the timeline navigator.
     {
       const win = viewWindowRef.current;
       const xmin = win ? win.start / safeFps : xFull[0];
@@ -526,10 +506,10 @@ export function KinematicsPlot({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signalKey]);
 
-  // Redraw bands when overlay data (or fps, which maps frames→x) changes.
+  // Redraw bands when the masked ranges (or fps, which maps frames→x) change.
   useEffect(() => {
     for (const u of plotsRef.current) u.redraw(false, false);
-  }, [annotationSegments, goldSegments, maskedRanges, safeFps]);
+  }, [maskedRanges, safeFps]);
 
   // Cleanup on unmount.
   useEffect(() => {

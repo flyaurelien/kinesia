@@ -1,47 +1,28 @@
-// Structured multi-file export ("Export folder").
+// Structured kinematics export ("Export folder").
 //
 // One user action produces a single ZIP that unpacks to a folder named
 //   <video>_<YYYYMMDD-HHMMSS>/
-// containing up to four sibling files, each named after the folder with a
-// channel suffix and the user's chosen extension:
+// containing the per-joint kinematics file and, optionally, the rendered
+// tracking-box MP4:
 //   <base>_kinematics.{csv|json}
-//   <base>_fogprobability.{csv|json}
-//   <base>_annotation.{csv|json|eaf}
-//   <base>_groundtruth.{csv|json|eaf}   (only when ground truth exists)
+//   <base>_trackingbox.mp4        (added by downloadBundle when present)
 //
 // The ZIP is written here in pure TypeScript (STORE / no compression) so the
 // feature has no runtime dependency and works fully offline. Everything in this
 // module except downloadBundle() is DOM-free and unit-testable in Node.
 
 import type { RunDetail } from "./types";
-import { buildEaf, buildKinematicsCsv, jointLabel, maxJointCount, safeFileName, segmentsToEpisodes, type EafTier } from "./export";
+import { buildKinematicsCsv, jointLabel, maxJointCount, safeFileName } from "./export";
 
-// Per-frame channels can be CSV or JSON; interval channels add ELAN .eaf.
+// Per-frame channels can be CSV or JSON.
 export type FrameFormat = "csv" | "json";
-export type IntervalFormat = "csv" | "json" | "eaf";
 
 export type ChannelFormats = {
   kinematics: FrameFormat;
-  fogProbability: FrameFormat;
-  annotation: IntervalFormat;
-  groundTruth: IntervalFormat;
 };
 
 export const DEFAULT_CHANNEL_FORMATS: ChannelFormats = {
   kinematics: "csv",
-  fogProbability: "csv",
-  annotation: "json",
-  groundTruth: "json",
-};
-
-// A FoG interval as exported / re-imported (parseAnnotationsFile reads these).
-export type ExportInterval = {
-  startSec: number;
-  endSec: number;
-  startFrameIndex?: number;
-  endFrameIndex?: number;
-  label?: string;
-  source?: string;
 };
 
 export type BundleInputs = {
@@ -52,110 +33,19 @@ export type BundleInputs = {
   dateIso: string;
   // Kinematics source (frames + signals + fps).
   runDetail: RunDetail;
-  // Per-frame FoG probability series (raw + smoothed), aligned to runDetail.frames.
-  fogScores: Array<number | null>;
-  fogScoresSmooth: Array<number | null>;
-  threshold: number | null;
-  // Human FoG layer as a per-frame boolean mask (kinematics CSV round-trip).
-  annotatedMask: boolean[];
-  // Interval tracks.
-  annotationSegments: ExportInterval[];
-  groundTruthSegments: ExportInterval[];
 };
 
 // One file ready to drop into the ZIP.
 export type BundleFile = { name: string; text: string };
-
-// ── Small numeric/text helpers (shared CSV conventions with lib/export) ──────-
-function numCell(v: number | null | undefined): string {
-  if (v == null || !Number.isFinite(v)) return "";
-  return Number.isInteger(v) ? String(v) : Number(v).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-}
-
-function csvField(v: string, delimiter: string): string {
-  const needsQuote = v.includes('"') || v.includes("\n") || v.includes("\r") || v.includes(delimiter);
-  return needsQuote ? `"${v.replace(/"/g, '""')}"` : v;
-}
 
 function timestampMs(videoFrame: number, index: number, fps: number): number {
   const safeFps = Math.max(1, fps || 30);
   return Math.round((Number.isFinite(videoFrame) ? videoFrame : index) / safeFps * 1000);
 }
 
-// ── FoG probability ─────────────────────────────────────────────────────────-
-export function buildFogProbabilityCsv(inputs: BundleInputs): string {
-  const { runDetail, fogScores, fogScoresSmooth, threshold } = inputs;
-  const { frames, fps } = runDetail;
-  const thr = typeof threshold === "number" && Number.isFinite(threshold) ? threshold : null;
-  const header = [
-    "frame_index",
-    "video_frame",
-    "timestamp_ms",
-    "fog_score",
-    "fog_score_smooth",
-    "fog_detected",
-    "threshold",
-  ];
-  const lines = [header.join(",")];
-  for (let i = 0; i < frames.length; i += 1) {
-    const f = frames[i];
-    const videoFrame = f.videoFrame ?? i;
-    const score = fogScores[i];
-    const smooth = fogScoresSmooth[i];
-    // Prefer the run's own boolean when present, else threshold the raw score.
-    const detected = typeof f.fogDetected === "boolean"
-      ? f.fogDetected
-      : thr != null && typeof score === "number" && Number.isFinite(score)
-        ? score >= thr
-        : false;
-    lines.push([
-      String(i),
-      String(videoFrame),
-      String(timestampMs(videoFrame, i, fps)),
-      numCell(score),
-      numCell(smooth),
-      detected ? "1" : "0",
-      thr != null ? numCell(thr) : "",
-    ].join(","));
-  }
-  return lines.join("\n");
-}
-
-export function buildFogProbabilityJson(inputs: BundleInputs): string {
-  const { runDetail, fogScores, fogScoresSmooth, threshold, runId } = inputs;
-  const { frames, fps } = runDetail;
-  const thr = typeof threshold === "number" && Number.isFinite(threshold) ? threshold : null;
-  const payload = {
-    schema: "kinesia.fog_probability.v1",
-    runId,
-    fps,
-    frameCount: frames.length,
-    threshold: thr,
-    frames: frames.map((f, i) => {
-      const videoFrame = f.videoFrame ?? i;
-      const score = fogScores[i];
-      const smooth = fogScoresSmooth[i];
-      const detected = typeof f.fogDetected === "boolean"
-        ? f.fogDetected
-        : thr != null && typeof score === "number" && Number.isFinite(score)
-          ? score >= thr
-          : false;
-      return {
-        index: i,
-        videoFrame,
-        timestampMs: timestampMs(videoFrame, i, fps),
-        score: typeof score === "number" && Number.isFinite(score) ? score : null,
-        scoreSmooth: typeof smooth === "number" && Number.isFinite(smooth) ? smooth : null,
-        detected,
-      };
-    }),
-  };
-  return JSON.stringify(payload, null, 2);
-}
-
 // ── Kinematics ──────────────────────────────────────────────────────────────-
 export function buildKinematicsJson(inputs: BundleInputs): string {
-  const { runDetail, annotatedMask, runId } = inputs;
+  const { runDetail, runId } = inputs;
   const { frames, signals, fps } = runDetail;
   // Full per-joint 3D positions (camera space) so the export is a COMPLETE kinematics.
   const jc = maxJointCount(frames);
@@ -183,8 +73,6 @@ export function buildKinematicsJson(inputs: BundleInputs): string {
         index: i,
         videoFrame,
         timestampMs: timestampMs(videoFrame, i, fps),
-        fogDetected: Boolean(f.fogDetected),
-        fogAnnotated: Boolean(annotatedMask[i]),
         values,
         joints,
       };
@@ -193,111 +81,21 @@ export function buildKinematicsJson(inputs: BundleInputs): string {
   return JSON.stringify(payload, null, 2);
 }
 
-// ── Interval tracks (annotation + ground truth) ──────────────────────────────-
-export function buildIntervalsCsv(intervals: ExportInterval[]): string {
-  const header = ["start_sec", "end_sec", "start_frame", "end_frame", "label", "source"];
-  const lines = [header.join(",")];
-  for (const seg of intervals) {
-    lines.push([
-      numCell(seg.startSec),
-      numCell(seg.endSec),
-      seg.startFrameIndex != null ? String(seg.startFrameIndex) : "",
-      seg.endFrameIndex != null ? String(seg.endFrameIndex) : "",
-      csvField(seg.label || "fog", ","),
-      csvField(seg.source || "", ","),
-    ].join(","));
-  }
-  return lines.join("\n");
-}
-
-export function buildIntervalsJson(
-  inputs: BundleInputs,
-  intervals: ExportInterval[],
-  schema: string,
-): string {
-  const payload = {
-    schema,
-    // Canonical label-file marker so the file re-imports as ground truth.
-    schema_version: "kinesia.labels.v1",
-    runId: inputs.runId,
-    fps: inputs.runDetail.fps,
-    frameCount: inputs.runDetail.frames.length,
-    labels: intervals.map((s) => ({
-      startSec: s.startSec,
-      endSec: s.endSec,
-      startFrameIndex: s.startFrameIndex,
-      endFrameIndex: s.endFrameIndex,
-      label: s.label || "fog",
-      source: s.source,
-    })),
-    episodes: segmentsToEpisodes(intervals),
-  };
-  return JSON.stringify(payload, null, 2);
-}
-
-function buildIntervalsEaf(inputs: BundleInputs, intervals: ExportInterval[], tierId: string): string {
-  const tiers: EafTier[] = [
-    {
-      id: tierId,
-      segments: intervals.map((s) => ({ startSec: s.startSec, endSec: s.endSec, label: s.label || "fog" })),
-    },
-  ];
-  return buildEaf({
-    runId: inputs.runId,
-    videoFileName: inputs.videoFileName ?? `${inputs.runId}.mp4`,
-    mediaUrl: inputs.videoFileName ?? `${inputs.runId}.mp4`,
-    fps: inputs.runDetail.fps,
-    tiers,
-    dateIso: inputs.dateIso,
-  });
-}
-
 // ── Assemble the file list for the bundle ────────────────────────────────────-
 const FRAME_EXT: Record<FrameFormat, string> = { csv: "csv", json: "json" };
-const INTERVAL_EXT: Record<IntervalFormat, string> = { csv: "csv", json: "json", eaf: "eaf" };
 
 export function buildBundleFiles(inputs: BundleInputs, formats: ChannelFormats): BundleFile[] {
   const base = inputs.baseName;
   const path = (channel: string, ext: string) => `${base}/${base}_${channel}.${ext}`;
   const files: BundleFile[] = [];
 
-  // Kinematics — always included.
+  // Per-joint kinematics (the tracking-box MP4 is added separately by downloadBundle).
   files.push({
     name: path("kinematics", FRAME_EXT[formats.kinematics]),
     text: formats.kinematics === "json"
       ? buildKinematicsJson(inputs)
-      : buildKinematicsCsv(inputs.runDetail, { annotatedMask: inputs.annotatedMask }),
+      : buildKinematicsCsv(inputs.runDetail),
   });
-
-  // FoG probability — always included.
-  files.push({
-    name: path("fogprobability", FRAME_EXT[formats.fogProbability]),
-    text: formats.fogProbability === "json"
-      ? buildFogProbabilityJson(inputs)
-      : buildFogProbabilityCsv(inputs),
-  });
-
-  // Annotation track — always included (may be empty).
-  files.push({
-    name: path("annotation", INTERVAL_EXT[formats.annotation]),
-    text: formats.annotation === "json"
-      ? buildIntervalsJson(inputs, inputs.annotationSegments, "kinesia.annotation_track.v1")
-      : formats.annotation === "eaf"
-        ? buildIntervalsEaf(inputs, inputs.annotationSegments, "FoG (annotated)")
-        : buildIntervalsCsv(inputs.annotationSegments),
-  });
-
-  // Ground truth — only when present.
-  if (inputs.groundTruthSegments.length > 0) {
-    files.push({
-      name: path("groundtruth", INTERVAL_EXT[formats.groundTruth]),
-      text: formats.groundTruth === "json"
-        ? buildIntervalsJson(inputs, inputs.groundTruthSegments, "kinesia.ground_truth.v1")
-        : formats.groundTruth === "eaf"
-          ? buildIntervalsEaf(inputs, inputs.groundTruthSegments, "FoG (ground truth)")
-          : buildIntervalsCsv(inputs.groundTruthSegments),
-    });
-  }
 
   return files;
 }
