@@ -693,13 +693,10 @@ button:disabled {
   background: #eaf0f8;
   display: flex;
   flex-direction: column;
-  /* Let the FoG settings popover open upward over the 3D without being clipped
-     (the 3D canvas is bounded by .three-host, so it doesn't overflow). */
-  overflow: visible;
+  overflow: hidden;
 }
 
-/* 3D fills the top of the right column; a small FoG-probability strip sits
-   underneath it. */
+/* The 3D reconstruction fills the whole pane — it is the dominant view. */
 .three-host {
   position: relative;
   flex: 1 1 0;
@@ -712,23 +709,6 @@ button:disabled {
   width: 100%;
   height: 100%;
   min-height: 0;
-}
-
-.fog-under-three {
-  position: relative;
-  flex: 0 0 auto;
-  border-top: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(5, 9, 21, 0.92);
-  padding: 4px 8px 6px;
-  overflow: visible;
-}
-.fog-under-three .fog-probability {
-  padding: 5px 8px;
-  border-radius: 5px;
-  gap: 4px;
-}
-.fog-under-three .fog-probability-bar-wrap {
-  height: 34px;
 }
 
 /* Vertical divider between the left media pane and the 3D pane. */
@@ -1704,6 +1684,80 @@ button:disabled {
   color: #8190ac;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+/* Kinematics export control (pushed to the right of the plot settings bar). */
+.plot-export {
+  position: relative;
+  margin-left: auto;
+}
+.plot-export-toggle {
+  border: 1px solid var(--line-strong);
+  background: #0d1424;
+  color: #cdd7e8;
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.plot-export-toggle:disabled {
+  opacity: 0.5;
+}
+.plot-export-toggle.active {
+  color: #021018;
+  background: var(--cyan);
+  border-color: var(--cyan);
+}
+.plot-export-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: #0d1424;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  box-shadow: 0 10px 30px rgba(2, 6, 18, 0.55);
+  min-width: 210px;
+}
+.plot-export-menu label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #cdd7e8;
+  font-size: 12px;
+  font-weight: 700;
+}
+.plot-export-menu select {
+  background: #050915;
+  color: #cdd7e8;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.plot-export-check {
+  justify-content: flex-start !important;
+}
+.plot-export-check input {
+  accent-color: var(--cyan);
+}
+.plot-export-download {
+  margin-top: 2px;
+  border: 1px solid var(--cyan);
+  background: var(--cyan);
+  color: #021018;
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.plot-export-download:disabled {
+  opacity: 0.5;
 }
 
 .gold-truth-empty {

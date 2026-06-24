@@ -17,14 +17,13 @@ import type { RunDetail, RunSignal, RunSummary } from "../lib/types";
 import { ThreeSpaceViewer, preloadRunAssets, type RunAssetPreloadProgress } from "./viewer-three";
 import { KinematicsPlot } from "./kinematics-plot";
 import { VideoTrackingOverlay } from "./video-overlay";
-import { parseAnnotationsFile } from "../lib/export";
 import {
   bundleBaseName,
   buildBundleFiles,
   downloadBundle,
   DEFAULT_CHANNEL_FORMATS,
   type ChannelFormats,
-  type ExportInterval,
+  type FrameFormat,
 } from "../lib/export-bundle";
 import { WizardPanel } from "./wizard/wizard-shell";
 import { useWizard, type WizardActions } from "./wizard/state";
@@ -59,56 +58,6 @@ type SubjectPreview = {
 };
 type CameraStatus = "idle" | "starting" | "ready" | "recording" | "error";
 type VideoEditTool = "subject" | "crop";
-type AnnotationDragMode = "create" | "move" | "resize-start" | "resize-end";
-type AnnotationDragState = {
-  mode: AnnotationDragMode;
-  segmentIndex: number | null;
-  startFrame: number;
-  originalStart: number;
-  originalEnd: number;
-} | null;
-type FogAnnotationSource = "auto_predicted" | "auto_corrected" | "manual";
-type FogAnnotationSegment = {
-  startFrameIndex: number;
-  endFrameIndex: number;
-  startVideoFrame: number;
-  endVideoFrame: number;
-  startSec: number;
-  endSec: number;
-  label: "fog";
-  source: FogAnnotationSource;
-  createdAt: string;
-  // Original model-predicted frame range (post-processing applied) carried
-  // through edits so we can render "what the model said" vs "what the human
-  // changed". Undefined for segments created entirely by a human.
-  predictedStartFrameIndex?: number;
-  predictedEndFrameIndex?: number;
-};
-type GoldTruthSegment = {
-  startFrameIndex: number;
-  endFrameIndex: number;
-  startSec: number;
-  endSec: number;
-  label: string;
-  datasetId: string;
-  split: "tuning" | "holdout";
-  labelEventsPath: string | null;
-  // Provenance carried over from an imported file (e.g. manual / auto_corrected
-  // / auto_predicted, an ELAN tier id, or "csv"). Undefined for dataset gold.
-  source?: string;
-};
-type BenchmarkMetrics = {
-  precision: number | null;
-  recall: number | null;
-  f1: number | null;
-};
-type DeletedFogPrediction = FogAnnotationSegment & {
-  deletedAt: string;
-  deletedAtFrameIndex: number;
-  originalSource: Extract<FogAnnotationSource, "auto_predicted" | "auto_corrected">;
-};
-type DraftAnnotation = { start: number; end: number } | null;
-type FogHistorySnapshot = { manual: FogAnnotationSegment[]; deleted: DeletedFogPrediction[] };
 
 type GenerationJob = {
   id: string;
@@ -132,14 +81,7 @@ type RunLoadState = RunAssetPreloadProgress & {
 };
 
 const PLOT_COLORS = ["#38bdf8", "#fb923c", "#22c55e", "#f43f5e", "#a78bfa", "#facc15", "#14b8a6", "#f97316"];
-const MANUAL_FOG_STORAGE_KEY = "kinesia.manualFogAnnotations.v1";
-const DELETED_AUTO_FOG_STORAGE_KEY = "kinesia.deletedAutoFogAnnotations.v1";
-const FOG_THRESHOLD_STORAGE_KEY = "kinesia.fogThresholdByRun.v1";
-const FOG_POSTPROCESS_STORAGE_KEY = "kinesia.fogPostProcessSettings.v1";
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "m4v", "avi", "mkv", "webm"]);
-const DEFAULT_FOG_MIN_DURATION_SEC = 0.4;
-const DEFAULT_FOG_MERGE_GAP_SEC = 0.6;
-const DEFAULT_FOG_THRESHOLD = 0.37;
 const MIN_TRIM_GAP_SEC = 0.1;
 const DIRECT_UPLOAD_LIMIT_BYTES = 16 * 1024 * 1024;
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -719,215 +661,6 @@ async function filesFromDrop(dataTransfer: DataTransfer): Promise<File[]> {
 }
 
 
-// Build a FoG annotation segment from a start/end frame range, clamping to the
-// run and carrying along the original model-predicted range when provided.
-function annotationSegmentFromFrames(
-  runDetail: RunDetail,
-  start: number,
-  end: number,
-  source: FogAnnotationSegment["source"],
-  createdAt?: string,
-  predictedRange?: { start: number; end: number } | null,
-): FogAnnotationSegment | null {
-  if (runDetail.frames.length === 0) {
-    return null;
-  }
-  const startFrameIndex = clamp(Math.min(start, end), 0, runDetail.frames.length - 1);
-  const endFrameIndex = clamp(Math.max(start, end), 0, runDetail.frames.length - 1);
-  const startFrame = runDetail.frames[startFrameIndex];
-  const endFrame = runDetail.frames[endFrameIndex];
-  let predictedStartFrameIndex: number | undefined;
-  let predictedEndFrameIndex: number | undefined;
-  if (predictedRange) {
-    const lastFrame = Math.max(0, runDetail.frames.length - 1);
-    predictedStartFrameIndex = clamp(Math.min(predictedRange.start, predictedRange.end), 0, lastFrame);
-    predictedEndFrameIndex = clamp(Math.max(predictedRange.start, predictedRange.end), 0, lastFrame);
-  }
-  return {
-    startFrameIndex,
-    endFrameIndex,
-    startVideoFrame: startFrame?.videoFrame ?? startFrameIndex,
-    endVideoFrame: endFrame?.videoFrame ?? endFrameIndex,
-    startSec: currentVideoTime(runDetail, startFrameIndex),
-    endSec: currentVideoTime(runDetail, endFrameIndex),
-    label: "fog",
-    source,
-    createdAt: createdAt ?? new Date().toISOString(),
-    predictedStartFrameIndex,
-    predictedEndFrameIndex,
-  };
-}
-
-// Per-frame FoG probability series, preferring the requested score signal and
-// falling back to "fog.score" then each frame's own fogScore field.
-function fogScoreValues(runDetail: RunDetail, scoreSignalId = "fog.score"): Array<number | null> {
-  const scoreSignal =
-    runDetail.signals.find((signal) => signal.id === scoreSignalId) ??
-    runDetail.signals.find((signal) => signal.id === "fog.score");
-  return runDetail.frames.map((frame, index) => {
-    const value = scoreSignal?.values[index] ?? frame.fogScore;
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-  });
-}
-
-// Derive the model's predicted FoG segments: prefer the run's summary segments
-// when no override threshold is set, else threshold the per-frame score series
-// (falling back to the boolean fogDetected flags).
-function predictedFogSegments(runDetail: RunDetail, threshold: number | null, scoreSignalId = "fog.score"): FogAnnotationSegment[] {
-  if (typeof threshold !== "number" || !Number.isFinite(threshold)) {
-    const fromSummary = runDetail.fog?.segments
-      .map((segment) =>
-        annotationSegmentFromFrames(
-          runDetail,
-          segment.startFrameIndex,
-          segment.endFrameIndex,
-          "auto_predicted",
-          "model",
-          { start: segment.startFrameIndex, end: segment.endFrameIndex },
-        ),
-      )
-      .filter((segment): segment is FogAnnotationSegment => Boolean(segment)) ?? [];
-    if (fromSummary.length > 0) {
-      return fromSummary;
-    }
-  }
-
-  const scores = fogScoreValues(runDetail, scoreSignalId);
-  const decisionThreshold = typeof threshold === "number" && Number.isFinite(threshold)
-    ? threshold
-    : runDetail.fog?.threshold ?? DEFAULT_FOG_THRESHOLD;
-  if (scores.some((value) => value !== null)) {
-    return segmentsFromBooleanSeries(
-      runDetail,
-      scores.map((value) => value !== null && value >= decisionThreshold),
-    );
-  }
-
-  const fromFrames = segmentsFromBooleanSeries(runDetail, runDetail.frames.map((frame) => Boolean(frame.fogDetected)));
-  if (fromFrames.length > 0) {
-    return fromFrames;
-  }
-  return [];
-}
-
-// Clean up raw predicted segments by merging segments closer than mergeGapSec
-// and dropping any shorter than minDurationSec; results are tagged auto_corrected.
-function postProcessFogSegments(
-  runDetail: RunDetail,
-  segments: FogAnnotationSegment[],
-  minDurationSec: number,
-  mergeGapSec: number,
-): FogAnnotationSegment[] {
-  if (segments.length === 0 || runDetail.frames.length === 0) {
-    return [];
-  }
-  const fps = Math.max(1, runDetail.fps || 30);
-  const minFrames = Math.max(1, Math.round(Math.max(0, minDurationSec) * fps));
-  const mergeGapFrames = Math.max(0, Math.round(Math.max(0, mergeGapSec) * fps));
-  const sorted = [...segments]
-    .map((segment) => ({
-      start: Math.max(0, Math.min(segment.startFrameIndex, segment.endFrameIndex)),
-      end: Math.min(runDetail.frames.length - 1, Math.max(segment.startFrameIndex, segment.endFrameIndex)),
-    }))
-    .sort((a, b) => a.start - b.start);
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const segment of sorted) {
-    const previous = merged.at(-1);
-    if (previous && segment.start - previous.end - 1 <= mergeGapFrames) {
-      previous.end = Math.max(previous.end, segment.end);
-    } else {
-      merged.push({ ...segment });
-    }
-  }
-  return merged
-    .filter((segment) => segment.end - segment.start + 1 >= minFrames)
-    .map((segment) =>
-      annotationSegmentFromFrames(
-        runDetail,
-        segment.start,
-        segment.end,
-        "auto_corrected",
-        "postprocess",
-        { start: segment.start, end: segment.end },
-      ),
-    )
-    .filter((segment): segment is FogAnnotationSegment => Boolean(segment));
-}
-
-// True for segments produced by the model/post-processing (never human-edited),
-// so they can be regenerated rather than preserved when predictions change.
-function isAutoGeneratedAnnotation(segment: FogAnnotationSegment): boolean {
-  return segment.source === "auto_predicted" || (segment.source === "auto_corrected" && segment.createdAt === "postprocess");
-}
-
-// Shallow equality of two annotation lists by frame span and source (used to
-// skip redundant state updates).
-function annotationListsEqual(a: FogAnnotationSegment[], b: FogAnnotationSegment[]): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  return a.every((left, index) => {
-    const right = b[index];
-    return (
-      left.startFrameIndex === right.startFrameIndex &&
-      left.endFrameIndex === right.endFrameIndex &&
-      left.source === right.source
-    );
-  });
-}
-
-// Frame-level precision/recall/F1 of predicted vs gold FoG segments, comparing
-// the two per-frame masks.
-function frameBenchmarkMetrics(
-  predicted: Array<{ startFrameIndex: number; endFrameIndex: number }>,
-  gold: Array<{ startFrameIndex: number; endFrameIndex: number }>,
-  frameCount: number,
-): BenchmarkMetrics {
-  const predictedMask = segmentFrameMask(predicted, frameCount);
-  const goldMask = segmentFrameMask(gold, frameCount);
-  let truePositive = 0;
-  let falsePositive = 0;
-  let falseNegative = 0;
-  for (let index = 0; index < frameCount; index += 1) {
-    if (predictedMask[index] && goldMask[index]) {
-      truePositive += 1;
-    } else if (predictedMask[index]) {
-      falsePositive += 1;
-    } else if (goldMask[index]) {
-      falseNegative += 1;
-    }
-  }
-  const precision = truePositive + falsePositive > 0 ? truePositive / (truePositive + falsePositive) : null;
-  const recall = truePositive + falseNegative > 0 ? truePositive / (truePositive + falseNegative) : null;
-  const f1 = truePositive + falsePositive + falseNegative > 0
-    ? (2 * truePositive) / (2 * truePositive + falsePositive + falseNegative)
-    : null;
-  return { precision, recall, f1 };
-}
-
-// Rasterize segments into a per-frame boolean mask of "is FoG" frames.
-function segmentFrameMask(
-  segments: Array<{ startFrameIndex: number; endFrameIndex: number }>,
-  frameCount: number,
-): boolean[] {
-  if (frameCount <= 0) {
-    return [];
-  }
-  const mask = new Array(frameCount).fill(false);
-  for (const segment of segments) {
-    const start = clamp(Math.min(segment.startFrameIndex, segment.endFrameIndex), 0, frameCount - 1);
-    const end = clamp(Math.max(segment.startFrameIndex, segment.endFrameIndex), 0, frameCount - 1);
-    for (let index = start; index <= end; index += 1) {
-      mask[index] = true;
-    }
-  }
-  return mask;
-}
-
-// Render a 0..1 metric as a whole-percent string, or "n/a" when undefined.
-function fmtMetric(value: number | null): string {
-  return value === null ? "n/a" : `${Math.round(value * 100)}%`;
-}
 
 // Human-readable duration: 125s -> "2min5s", 45s -> "45s", 3661s -> "1h1min".
 function formatHumanDuration(totalSec: number): string {
@@ -1018,116 +751,6 @@ function ProcessingState({ job }: { job: GenerationJob }) {
   );
 }
 
-// Convert a per-frame boolean FoG series into contiguous auto_predicted segments.
-function segmentsFromBooleanSeries(runDetail: RunDetail, values: boolean[]): FogAnnotationSegment[] {
-  const segments: FogAnnotationSegment[] = [];
-  let start: number | null = null;
-  for (let index = 0; index <= values.length; index += 1) {
-    const active = Boolean(values[index]);
-    if (active && start === null) {
-      start = index;
-    } else if (!active && start !== null) {
-      const end = index - 1;
-      const segment = annotationSegmentFromFrames(
-        runDetail,
-        start,
-        end,
-        "auto_predicted",
-        "model",
-        { start, end },
-      );
-      if (segment) {
-        segments.push(segment);
-      }
-      start = null;
-    }
-  }
-  return segments;
-}
-
-type AnnotationBandKind = "predicted" | "manual";
-type AnnotationBand = { start: number; end: number; kind: AnnotationBandKind };
-
-// Build an SVG path for a rectangle with independently rounded left and
-// right ends (top + bottom rounded together on each side). When two bands
-// sit next to each other we use rl=0 on the inner edges so they meet flush.
-function bandRectPath(x: number, y: number, w: number, h: number, rl: number, rr: number): string {
-  const left = x;
-  const right = x + w;
-  const top = y;
-  const bottom = y + h;
-  const radiusLeft = Math.max(0, Math.min(rl, h / 2, w / 2));
-  const radiusRight = Math.max(0, Math.min(rr, h / 2, w / 2));
-  const parts: string[] = [];
-  parts.push(`M ${left + radiusLeft} ${top}`);
-  parts.push(`L ${right - radiusRight} ${top}`);
-  if (radiusRight > 0) parts.push(`Q ${right} ${top} ${right} ${top + radiusRight}`);
-  parts.push(`L ${right} ${bottom - radiusRight}`);
-  if (radiusRight > 0) parts.push(`Q ${right} ${bottom} ${right - radiusRight} ${bottom}`);
-  parts.push(`L ${left + radiusLeft} ${bottom}`);
-  if (radiusLeft > 0) parts.push(`Q ${left} ${bottom} ${left} ${bottom - radiusLeft}`);
-  parts.push(`L ${left} ${top + radiusLeft}`);
-  if (radiusLeft > 0) parts.push(`Q ${left} ${top} ${left + radiusLeft} ${top}`);
-  parts.push("Z");
-  return parts.join(" ");
-}
-
-// Split a segment into colored bands so the UI can show how much of a
-// segment is "what the model predicted" (blue) vs "what a human added or
-// extended" (green). The order of returned bands is always left → right
-// along the timeline.
-function segmentBands(segment: FogAnnotationSegment): AnnotationBand[] {
-  const curStart = segment.startFrameIndex;
-  const curEnd = segment.endFrameIndex;
-  if (
-    segment.predictedStartFrameIndex === undefined ||
-    segment.predictedEndFrameIndex === undefined
-  ) {
-    return [{ start: curStart, end: curEnd, kind: "manual" }];
-  }
-  const predStart = segment.predictedStartFrameIndex;
-  const predEnd = segment.predictedEndFrameIndex;
-  const overlapStart = Math.max(curStart, predStart);
-  const overlapEnd = Math.min(curEnd, predEnd);
-  if (overlapEnd < overlapStart) {
-    // The segment has been moved entirely outside its original predicted
-    // range — treat it as a fully manual band.
-    return [{ start: curStart, end: curEnd, kind: "manual" }];
-  }
-  const bands: AnnotationBand[] = [];
-  if (curStart < overlapStart) {
-    bands.push({ start: curStart, end: overlapStart - 1, kind: "manual" });
-  }
-  bands.push({ start: overlapStart, end: overlapEnd, kind: "predicted" });
-  if (curEnd > overlapEnd) {
-    bands.push({ start: overlapEnd + 1, end: curEnd, kind: "manual" });
-  }
-  return bands;
-}
-
-// Type guard: segment originated from the model (predicted or post-corrected).
-function isAutomaticAnnotation(
-  segment: FogAnnotationSegment,
-): segment is FogAnnotationSegment & { source: Extract<FogAnnotationSource, "auto_predicted" | "auto_corrected"> } {
-  return segment.source === "auto_predicted" || segment.source === "auto_corrected";
-}
-
-// Two segments cover the exact same frame range.
-function sameFrameSpan(a: FogAnnotationSegment, b: FogAnnotationSegment): boolean {
-  return a.startFrameIndex === b.startFrameIndex && a.endFrameIndex === b.endFrameIndex;
-}
-
-// Provenance of a merged segment: any human touch wins, then auto_corrected,
-// else auto_predicted.
-function mergedAnnotationSource(a: FogAnnotationSource, b: FogAnnotationSource): FogAnnotationSource {
-  if (a === "manual" || b === "manual") {
-    return "manual";
-  }
-  if (a === "auto_corrected" || b === "auto_corrected") {
-    return "auto_corrected";
-  }
-  return "auto_predicted";
-}
 
 // React hook: track an element's pixel size via ResizeObserver, returning a ref
 // callback plus the current width/height (used to size the SVG timelines).
@@ -1176,441 +799,11 @@ function useResponsiveSize(
   return { ref: setRef, width: size.width, height: size.height };
 }
 
-// Coerce a possibly missing FoG score to a finite value clamped to [0, 1].
-function evidenceScore(score: number | null | undefined): number {
-  if (typeof score !== "number" || !Number.isFinite(score)) {
-    return 0;
-  }
-  return clamp(score, 0, 1);
-}
-
-// The thin FoG-probability strip under the 3D view: draws the per-frame score
-// curve with the decision threshold, lets the user scrub the playhead, and hosts
-// the detection-settings popover (threshold / cleanup gaps / score source).
-function FogProbabilityPanel({
-  runDetail,
-  frameIndex,
-  threshold,
-  cleanupMinDurationSec,
-  cleanupMergeGapSec,
-  settingsOpen,
-  onCleanupMinDurationChange,
-  onCleanupMergeGapChange,
-  onSettingsOpenChange,
-  onThresholdChange,
-  onFrameSelect,
-  scoreSignalId,
-  onScoreSignalChange,
-}: {
-  runDetail: RunDetail;
-  frameIndex: number;
-  threshold: number | null;
-  cleanupMinDurationSec: number;
-  cleanupMergeGapSec: number;
-  settingsOpen: boolean;
-  onCleanupMinDurationChange: (value: number) => void;
-  onCleanupMergeGapChange: (value: number) => void;
-  onSettingsOpenChange: (open: boolean) => void;
-  onThresholdChange: (threshold: number) => void;
-  onFrameSelect: (index: number) => void;
-  scoreSignalId: "fog.score" | "fog.score_smooth";
-  onScoreSignalChange: (id: "fog.score" | "fog.score_smooth") => void;
-}) {
-  const { ref: containerRef, width, height } = useResponsiveSize(1120, 46);
-  // Close the settings popover when clicking anywhere outside it (or pressing
-  // Escape). The gear toggle is excluded so its own onClick keeps working.
-  const popoverRef = useRef<HTMLDivElement>(null);
-  const gearRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!settingsOpen) return;
-    function handlePointerDown(event: globalThis.PointerEvent) {
-      const target = event.target as Node;
-      if (popoverRef.current?.contains(target)) return;
-      if (gearRef.current?.contains(target)) return;
-      onSettingsOpenChange(false);
-    }
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") onSettingsOpenChange(false);
-    }
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [settingsOpen, onSettingsOpenChange]);
-  // The FoG-probability card (.fog-probability) is itself inset ~13px from the
-  // panel content box, so internal margins of 44 / 6 place its data area at
-  // [panel + 56, panel - 18] — pixel-matching the annotation / ground-truth
-  // tracks (CSS margin 56/18) and the uPlot kinematics plot (left axis 56,
-  // right pad 18). All four share one time axis.
-  const margin = { top: 6, right: 6, bottom: 4, left: 44 };
-  const innerW = Math.max(20, width - margin.left - margin.right);
-  const innerH = Math.max(20, height - margin.top - margin.bottom);
-  const frameCount = runDetail.frames.length;
-  const maskedRanges = useMemo<Array<[number, number]>>(() => {
-    const out: Array<[number, number]> = [];
-    let start = -1;
-    for (let i = 0; i < runDetail.frames.length; i += 1) {
-      const isMasked = runDetail.frames[i]?.inferenceStatus === "masked";
-      if (isMasked && start < 0) {
-        start = i;
-      } else if (!isMasked && start >= 0) {
-        out.push([start, i - 1]);
-        start = -1;
-      }
-    }
-    if (start >= 0) out.push([start, runDetail.frames.length - 1]);
-    return out;
-  }, [runDetail.frames]);
-  const bins = Math.min(720, Math.max(1, Math.min(frameCount, Math.round(innerW * 1.5))));
-  const signalMap = useMemo(() => new Map(runDetail.signals.map((signal) => [signal.id, signal])), [runDetail.signals]);
-  const hasSmoothScore = signalMap.has("fog.score_smooth");
-  const scoreSignal = signalMap.get(scoreSignalId) ?? signalMap.get("fog.score");
-  const samples = useMemo(() => {
-    return Array.from({ length: bins }, (_, bin) => {
-      const start = Math.floor((bin * frameCount) / bins);
-      const end = Math.max(start + 1, Math.floor(((bin + 1) * frameCount) / bins));
-      let maxScore = 0;
-      for (let index = start; index < Math.min(end, frameCount); index += 1) {
-        maxScore = Math.max(
-          maxScore,
-          evidenceScore(scoreSignal?.values[index] ?? runDetail.frames[index]?.fogScore),
-        );
-      }
-      return maxScore;
-    });
-  }, [bins, frameCount, runDetail.frames, scoreSignal?.values]);
-  const xForSample = useCallback(
-    (idx: number) => margin.left + (innerW * idx) / Math.max(1, samples.length - 1),
-    [innerW, margin.left, samples.length],
-  );
-  const yForScore = useCallback(
-    (score: number) => margin.top + innerH - clamp(score, 0, 1) * innerH,
-    [innerH, margin.top],
-  );
-  const curvePath = useMemo(() => {
-    if (samples.length === 0) {
-      return "";
-    }
-    return samples
-      .map((score, index) => `${index === 0 ? "M" : "L"} ${xForSample(index).toFixed(2)} ${yForScore(score).toFixed(2)}`)
-      .join(" ");
-  }, [samples, xForSample, yForScore]);
-  const areaPath = curvePath
-    ? `${curvePath} L ${(margin.left + innerW).toFixed(2)} ${(margin.top + innerH).toFixed(2)} L ${margin.left.toFixed(2)} ${(margin.top + innerH).toFixed(2)} Z`
-    : "";
-  const cursorX = frameCount > 1
-    ? margin.left + (clamp(frameIndex, 0, frameCount - 1) / (frameCount - 1)) * innerW
-    : margin.left;
-  const currentScore = evidenceScore(scoreSignal?.values[frameIndex] ?? runDetail.frames[frameIndex]?.fogScore);
-  const activeThreshold = threshold ?? runDetail.fog?.threshold ?? DEFAULT_FOG_THRESHOLD;
-  const thresholdPercent = Math.round(clamp(activeThreshold, 0.01, 0.99) * 100);
-  const thresholdY = yForScore(clamp(activeThreshold, 0, 1));
-  const yPercentTicks = [0, 50, 100];
-  // Translate a pointer x within the SVG into a frame index and select it.
-  function selectFromClientX(clientX: number, currentTarget: SVGSVGElement): void {
-    const rect = currentTarget.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const scale = width / rect.width;
-    const localX = (clientX - rect.left) * scale - margin.left;
-    const ratio = clamp(localX / Math.max(1, innerW), 0, 1);
-    onFrameSelect(Math.round(ratio * Math.max(0, frameCount - 1)));
-  }
-
-  return (
-    <div className="fog-probability">
-      <div className="fog-probability-header">
-        <div>
-          <span>FoG probability</span>
-        </div>
-        <div className="fog-readout">
-          <strong>{Math.round(currentScore * 100)}%</strong>
-          <button
-            ref={gearRef}
-            type="button"
-            className={`fog-gear ${settingsOpen ? "active" : ""}`}
-            onClick={() => onSettingsOpenChange(!settingsOpen)}
-            title="Detection settings"
-            aria-label="Detection settings"
-            aria-expanded={settingsOpen}
-          >
-            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Zm8.94-2.5a7.9 7.9 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.9 7.9 0 0 0-1.7-1l-.4-2.5H10l-.4 2.5a7.9 7.9 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.9 7.9 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.8 1.7 1l.4 2.5h4l.4-2.5c.6-.2 1.2-.6 1.7-1l2.4 1 2-3.4-2-1.6Z"
-              />
-            </svg>
-          </button>
-        </div>
-      </div>
-      <div ref={containerRef} className="fog-probability-bar-wrap">
-        <svg
-          className="fog-probability-bar"
-          viewBox={`0 0 ${width} ${height}`}
-          role="slider"
-          aria-label="FoG probability timeline"
-          aria-valuemin={0}
-          aria-valuemax={Math.max(0, frameCount - 1)}
-          aria-valuenow={frameIndex}
-          onPointerDown={(event) => {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            selectFromClientX(event.clientX, event.currentTarget);
-          }}
-          onPointerMove={(event) => {
-            if (event.buttons === 1) {
-              selectFromClientX(event.clientX, event.currentTarget);
-            }
-          }}
-        >
-          <rect x={0} y={0} width={width} height={height} className="fog-density-bg" />
-          {maskedRanges.map(([s, e], i) => {
-            const x1 = margin.left + (clamp(s, 0, Math.max(0, frameCount - 1)) / Math.max(1, frameCount - 1)) * innerW;
-            const x2 = margin.left + (clamp(e, 0, Math.max(0, frameCount - 1)) / Math.max(1, frameCount - 1)) * innerW;
-            const w = Math.max(1.5, x2 - x1);
-            return (
-              <g key={`masked-${i}`} pointerEvents="none">
-                <rect x={x1} y={margin.top} width={w} height={innerH} fill="rgba(245,158,11,0.1)" stroke="rgba(245,158,11,0.4)" strokeDasharray="3 3" />
-                {w > 40 ? (
-                  <text x={x1 + w / 2} y={margin.top + 10} fill="rgba(245,158,11,0.95)" fontSize="9" textAnchor="middle">masked</text>
-                ) : null}
-              </g>
-            );
-          })}
-          {yPercentTicks.map((tick) => {
-            const y = yForScore(tick / 100);
-            return (
-              <line
-                key={`fp-grid-${tick}`}
-                x1={margin.left}
-                x2={margin.left + innerW}
-                y1={y}
-                y2={y}
-                className="fog-score-grid"
-                vectorEffect="non-scaling-stroke"
-              />
-            );
-          })}
-          <line
-            x1={margin.left}
-            x2={margin.left + innerW}
-            y1={thresholdY}
-            y2={thresholdY}
-            className="fog-threshold-line"
-            vectorEffect="non-scaling-stroke"
-          />
-          {areaPath ? <path d={areaPath} className="fog-score-area" /> : null}
-          {curvePath ? (
-            <path d={curvePath} className="fog-score-curve" vectorEffect="non-scaling-stroke" />
-          ) : null}
-
-          <line
-            x1={margin.left}
-            x2={margin.left}
-            y1={margin.top}
-            y2={margin.top + innerH}
-            className="plot-axis"
-            vectorEffect="non-scaling-stroke"
-          />
-          <line
-            x1={margin.left}
-            x2={margin.left + innerW}
-            y1={margin.top + innerH}
-            y2={margin.top + innerH}
-            className="plot-axis"
-            vectorEffect="non-scaling-stroke"
-          />
-
-          {yPercentTicks.map((tick) => {
-            const y = yForScore(tick / 100);
-            return (
-              <g key={`fp-ytick-${tick}`}>
-                <line
-                  x1={margin.left - 3}
-                  x2={margin.left}
-                  y1={y}
-                  y2={y}
-                  className="plot-tick"
-                  vectorEffect="non-scaling-stroke"
-                />
-                <text x={margin.left - 6} y={y + 3} textAnchor="end" className="plot-tick-label">
-                  {tick}%
-                </text>
-              </g>
-            );
-          })}
-
-          <text x={margin.left + innerW - 4} y={Math.max(10, thresholdY - 4)} textAnchor="end" className="fog-threshold-label">
-            threshold {thresholdPercent}%
-          </text>
-
-          <line
-            x1={cursorX}
-            x2={cursorX}
-            y1={margin.top}
-            y2={margin.top + innerH}
-            className="fog-density-cursor"
-            vectorEffect="non-scaling-stroke"
-          />
-        </svg>
-      </div>
-      {settingsOpen ? (
-        <div ref={popoverRef} className="fog-settings-popover" role="dialog" aria-label="FoG detection">
-          <div className="fog-settings-head">
-            <span>Detection settings</span>
-            <button type="button" className="fog-settings-close" onClick={() => onSettingsOpenChange(false)} aria-label="Close">
-              ✕
-            </button>
-          </div>
-          <div className="fog-settings-row">
-            <span>Source</span>
-            <div className="fog-score-toggle" role="group" aria-label="Probability source">
-              <button
-                type="button"
-                className={scoreSignalId === "fog.score" ? "active" : ""}
-                onClick={() => onScoreSignalChange("fog.score")}
-                title="Raw per-frame probability"
-              >
-                Raw
-              </button>
-              <button
-                type="button"
-                className={scoreSignalId === "fog.score_smooth" ? "active" : ""}
-                onClick={() => onScoreSignalChange("fog.score_smooth")}
-                disabled={!hasSmoothScore}
-                title={hasSmoothScore ? "Temporally smoothed probability" : "No smoothed probability for this run"}
-              >
-                Smoothed
-              </button>
-            </div>
-          </div>
-          <label>
-            <span>Threshold</span>
-            <input
-              type="range"
-              min={35}
-              max={95}
-              step={1}
-              value={thresholdPercent}
-              onChange={(event) => onThresholdChange(Number(event.target.value) / 100)}
-            />
-            <strong>{thresholdPercent}%</strong>
-          </label>
-          <label>
-            <span>Ignore &lt;</span>
-            <input
-              type="range"
-              min={0}
-              max={30}
-              step={1}
-              value={Math.round(cleanupMinDurationSec * 10)}
-              onChange={(event) => onCleanupMinDurationChange(Number(event.target.value) / 10)}
-            />
-            <strong>{cleanupMinDurationSec.toFixed(1)}s</strong>
-          </label>
-          <label>
-            <span>Merge gaps &lt;</span>
-            <input
-              type="range"
-              min={0}
-              max={50}
-              step={1}
-              value={Math.round(cleanupMergeGapSec * 10)}
-              onChange={(event) => onCleanupMergeGapChange(Number(event.target.value) / 10)}
-            />
-            <strong>{cleanupMergeGapSec.toFixed(1)}s</strong>
-          </label>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// Sort, order endpoints, and merge overlapping/adjacent annotation segments,
-// unioning their predicted ranges and provenance so band rendering stays correct.
-function normalizeAnnotationSegments(segments: FogAnnotationSegment[]): FogAnnotationSegment[] {
-  const sorted = [...segments].sort((a, b) => a.startFrameIndex - b.startFrameIndex);
-  const merged: FogAnnotationSegment[] = [];
-  for (const segment of sorted) {
-    const start = Math.min(segment.startFrameIndex, segment.endFrameIndex);
-    const end = Math.max(segment.startFrameIndex, segment.endFrameIndex);
-    const normalized = { ...segment, startFrameIndex: start, endFrameIndex: end };
-    const previous = merged.at(-1);
-    if (previous && normalized.startFrameIndex <= previous.endFrameIndex + 1) {
-      previous.endFrameIndex = Math.max(previous.endFrameIndex, normalized.endFrameIndex);
-      previous.endVideoFrame = Math.max(previous.endVideoFrame, normalized.endVideoFrame);
-      previous.endSec = Math.max(previous.endSec, normalized.endSec);
-      previous.source = mergedAnnotationSource(previous.source, normalized.source);
-      // Union the predicted ranges so band rendering covers the model's
-      // contribution from either side of the merge.
-      const prevPredStart = previous.predictedStartFrameIndex;
-      const prevPredEnd = previous.predictedEndFrameIndex;
-      const nextPredStart = normalized.predictedStartFrameIndex;
-      const nextPredEnd = normalized.predictedEndFrameIndex;
-      if (prevPredStart !== undefined && prevPredEnd !== undefined) {
-        if (nextPredStart !== undefined && nextPredEnd !== undefined) {
-          previous.predictedStartFrameIndex = Math.min(prevPredStart, nextPredStart);
-          previous.predictedEndFrameIndex = Math.max(prevPredEnd, nextPredEnd);
-        }
-        // else: keep previous predicted range (next is fully manual contributor)
-      } else if (nextPredStart !== undefined && nextPredEnd !== undefined) {
-        previous.predictedStartFrameIndex = nextPredStart;
-        previous.predictedEndFrameIndex = nextPredEnd;
-      }
-    } else {
-      merged.push(normalized);
-    }
-  }
-  return merged;
-}
-
-// Flatten the run's dataset-provided labeled FoG episodes into gold-truth
-// segments (preferring processed datasets, de-duped by label+frame span).
-function goldTruthSegments(runDetail: RunDetail): GoldTruthSegment[] {
-  const frameCount = runDetail.frames.length;
-  const fps = Math.max(1, runDetail.fps || 30);
-  const segments: GoldTruthSegment[] = [];
-  const datasets = [...(runDetail.datasets ?? [])].sort((a, b) => {
-    const aProcessed = a.datasetId.includes("processed") ? 0 : 1;
-    const bProcessed = b.datasetId.includes("processed") ? 0 : 1;
-    return aProcessed - bProcessed || a.datasetId.localeCompare(b.datasetId);
-  });
-  const seen = new Set<string>();
-  for (const dataset of datasets) {
-    for (const episode of dataset.labeledEpisodes ?? []) {
-      const label = episode.label || "fog";
-      const startFrame = episode.startFrameIndex ?? Math.round((episode.startMs / 1000) * fps);
-      const endFrame = episode.endFrameIndex ?? Math.round((episode.endMs / 1000) * fps);
-      const start = clamp(Math.min(startFrame, endFrame), 0, Math.max(0, frameCount - 1));
-      const end = clamp(Math.max(startFrame, endFrame), 0, Math.max(0, frameCount - 1));
-      if (end < start || frameCount === 0) {
-        continue;
-      }
-      const key = `${label}:${start}:${end}`;
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      segments.push({
-        startFrameIndex: start,
-        endFrameIndex: end,
-        startSec: episode.startMs / 1000,
-        endSec: episode.endMs / 1000,
-        label,
-        datasetId: dataset.datasetId,
-        split: dataset.split,
-        labelEventsPath: dataset.labelEventsPath,
-      });
-    }
-  }
-  return segments.sort((a, b) => a.startFrameIndex - b.startFrameIndex);
-}
-
-// Horizontal navigator (overview scrollbar) for the labelling tracks. Shows the
-// whole timeline with a draggable/resizable window; dragging the window body
-// pans, dragging an edge zooms. Drives the SHARED view window so the annotation,
-// ground-truth and kinematics tracks all scroll in lockstep — essential on long
-// videos where the full clip is too compressed to label precisely.
+// Horizontal navigator (overview scrollbar) for the kinematics timeline. Shows
+// the whole clip with a draggable/resizable window; dragging the window body
+// pans, dragging an edge zooms. Drives the shared view window so the kinematics
+// plot scrolls in lockstep — essential on long videos where the full clip is
+// too compressed to inspect precisely.
 function TimelineNavigator({
   frameCount,
   frameIndex,
@@ -1703,613 +896,11 @@ function TimelineNavigator({
   );
 }
 
-// The editable FoG annotation track: renders annotation segments (with model vs
-// human bands), tombstones for deleted predictions, and the draft box, and
-// handles pointer create/move/resize plus the zoom-window handle. All editing is
-// delegated to the callbacks supplied by ViewerShell.
-function ManualFogAnnotationBar({
-  runDetail,
-  frameIndex,
-  segments,
-  deletedSegments,
-  draft,
-  viewWindow,
-  onDraftChange,
-  onCommit,
-  selectedSegmentIndex,
-  onSelectSegment,
-  onUpdateSegment,
-  onDeleteSelected,
-  onSplitSelected,
-  onFrameSelect,
-  onClear,
-  onExportBundle,
-  hasGroundTruth,
-  onUndo,
-  onRedo,
-  canUndo,
-  canRedo,
-  onResetToPrediction,
-  predictionCount,
-}: {
-  runDetail: RunDetail;
-  frameIndex: number;
-  segments: FogAnnotationSegment[];
-  deletedSegments: DeletedFogPrediction[];
-  draft: DraftAnnotation;
-  viewWindow: { start: number; end: number } | null;
-  onDraftChange: (draft: DraftAnnotation) => void;
-  onCommit: (start: number, end: number) => void;
-  selectedSegmentIndex: number | null;
-  onSelectSegment: (index: number | null) => void;
-  onUpdateSegment: (index: number, start: number, end: number) => void;
-  onDeleteSelected: () => void;
-  onSplitSelected: () => void;
-  onFrameSelect: (index: number) => void;
-  onClear: () => void;
-  onExportBundle: (formats: ChannelFormats, includeTrackingVideo: boolean) => void | Promise<void>;
-  hasGroundTruth: boolean;
-  onUndo: () => void;
-  onRedo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
-  onResetToPrediction: () => void;
-  predictionCount: number;
-}) {
-  const width = 1120;
-  const height = 46;
-  const frameCount = runDetail.frames.length;
-  const dragStateRef = useRef<AnnotationDragState>(null);
-  // Single Export control: one button opens a panel where each channel's file
-  // format is chosen independently, then everything downloads as one folder
-  // (.zip). Closes on outside-click / Escape.
-  const [exportMenuOpen, setExportMenuOpen] = useState(false);
-  const [bundleFormats, setBundleFormats] = useState<ChannelFormats>(DEFAULT_CHANNEL_FORMATS);
-  const [includeTrackingVideo, setIncludeTrackingVideo] = useState(true);
-  const [bundleBusy, setBundleBusy] = useState(false);
-  const exportMenuRef = useRef<HTMLDivElement>(null);
-  const exportBtnRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (!exportMenuOpen) return;
-    function handlePointerDown(event: globalThis.PointerEvent) {
-      const target = event.target as Node;
-      if (exportMenuRef.current?.contains(target)) return;
-      if (exportBtnRef.current?.contains(target)) return;
-      setExportMenuOpen(false);
-    }
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") setExportMenuOpen(false);
-    }
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [exportMenuOpen]);
-  const viewStart = viewWindow?.start ?? 0;
-  const viewEnd = viewWindow?.end ?? Math.max(0, frameCount - 1);
-  const viewSpan = Math.max(1, viewEnd - viewStart);
-  const cursorX = ((clamp(frameIndex, viewStart, viewEnd) - viewStart) / viewSpan) * width;
-  const visibleSegments = segments.filter(
-    (segment) => segment.endFrameIndex >= viewStart && segment.startFrameIndex <= viewEnd,
-  );
-  const visibleDeleted = deletedSegments.filter(
-    (segment) => segment.endFrameIndex >= viewStart && segment.startFrameIndex <= viewEnd,
-  );
-
-  // Frame index under a pointer x, mapped through the current zoom window.
-  function frameFromClientX(clientX: number, currentTarget: SVGSVGElement): number {
-    const rect = currentTarget.getBoundingClientRect();
-    const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-    return Math.round(viewStart + ratio * viewSpan);
-  }
-
-  // Pixel x/width of a frame range within the current zoom window (min 5px wide).
-  function segmentRect(startFrame: number, endFrame: number): { x: number; width: number } {
-    const start = clamp(Math.min(startFrame, endFrame), viewStart, viewEnd);
-    const end = clamp(Math.max(startFrame, endFrame), viewStart, viewEnd);
-    const x = ((start - viewStart) / viewSpan) * width;
-    const x2 = ((end - viewStart) / viewSpan) * width;
-    return { x, width: Math.max(5, x2 - x) };
-  }
-
-  return (
-    <div className="manual-fog">
-      <div className="fog-density-meta">
-        <div className="annotation-track-title">
-          <span>Annotation</span>
-        </div>
-        <div className="manual-fog-actions">
-          <button className="icon-btn" type="button" onClick={onUndo} disabled={!canUndo} title="Undo (Cmd/Ctrl+Z)" aria-label="Undo">
-            <ActionIcon name="undo" />
-          </button>
-          <button className="icon-btn" type="button" onClick={onRedo} disabled={!canRedo} title="Redo (Cmd/Ctrl+Shift+Z)" aria-label="Redo">
-            <ActionIcon name="redo" />
-          </button>
-          <button
-            className="icon-btn"
-            type="button"
-            onClick={onResetToPrediction}
-            disabled={predictionCount === 0}
-            title="Restore model predictions"
-            aria-label="Restore model predictions"
-          >
-            <ActionIcon name="restore" />
-          </button>
-          <button className="icon-btn" type="button" onClick={onSplitSelected} disabled={selectedSegmentIndex === null} title="Split segment" aria-label="Split">
-            <ActionIcon name="split" />
-          </button>
-          <button className="icon-btn" type="button" onClick={onDeleteSelected} disabled={selectedSegmentIndex === null} title="Delete segment" aria-label="Delete">
-            <ActionIcon name="delete" />
-          </button>
-          <button className="icon-btn" type="button" onClick={onClear} disabled={segments.length === 0} title="Clear all" aria-label="Clear all">
-            <ActionIcon name="clear" />
-          </button>
-          <span className="manual-fog-sep" aria-hidden="true" />
-          <div className="export-menu-wrap">
-            <button
-              ref={exportBtnRef}
-              className={`export-btn ${exportMenuOpen ? "active" : ""}`}
-              type="button"
-              onClick={() => setExportMenuOpen((open) => !open)}
-              aria-haspopup="dialog"
-              aria-expanded={exportMenuOpen}
-              title="Export all channels as a folder (.zip)"
-            >
-              <ActionIcon name="download" />
-              Export
-            </button>
-            {exportMenuOpen ? (
-              <div ref={exportMenuRef} className="export-panel" role="dialog" aria-label="Export options">
-                <div className="export-panel-head">
-                  <span className="export-panel-title">Export folder</span>
-                  <span className="export-panel-sub">One .zip, one file per channel</span>
-                </div>
-                <label className="export-row">
-                  <span className="export-row-label">Kinematics</span>
-                  <select
-                    className="export-row-select"
-                    value={bundleFormats.kinematics}
-                    onChange={(e) => setBundleFormats((f) => ({ ...f, kinematics: e.target.value as ChannelFormats["kinematics"] }))}
-                  >
-                    <option value="csv">CSV</option>
-                    <option value="json">JSON</option>
-                  </select>
-                </label>
-                <label className="export-row">
-                  <span className="export-row-label">FoG probability</span>
-                  <select
-                    className="export-row-select"
-                    value={bundleFormats.fogProbability}
-                    onChange={(e) => setBundleFormats((f) => ({ ...f, fogProbability: e.target.value as ChannelFormats["fogProbability"] }))}
-                  >
-                    <option value="csv">CSV</option>
-                    <option value="json">JSON</option>
-                  </select>
-                </label>
-                <label className="export-row">
-                  <span className="export-row-label">Annotation track</span>
-                  <select
-                    className="export-row-select"
-                    value={bundleFormats.annotation}
-                    onChange={(e) => setBundleFormats((f) => ({ ...f, annotation: e.target.value as ChannelFormats["annotation"] }))}
-                  >
-                    <option value="json">JSON</option>
-                    <option value="csv">CSV</option>
-                    <option value="eaf">ELAN (.eaf)</option>
-                  </select>
-                </label>
-                <label className={`export-row ${hasGroundTruth ? "" : "is-disabled"}`}>
-                  <span className="export-row-label">
-                    Ground truth
-                    {hasGroundTruth ? null : <span className="export-row-note">none</span>}
-                  </span>
-                  <select
-                    className="export-row-select"
-                    value={bundleFormats.groundTruth}
-                    disabled={!hasGroundTruth}
-                    onChange={(e) => setBundleFormats((f) => ({ ...f, groundTruth: e.target.value as ChannelFormats["groundTruth"] }))}
-                  >
-                    <option value="json">JSON</option>
-                    <option value="csv">CSV</option>
-                    <option value="eaf">ELAN (.eaf)</option>
-                  </select>
-                </label>
-                <label className="export-row">
-                  <span className="export-row-label">
-                    Tracking-box video
-                    <span className="export-row-note">.mp4</span>
-                  </span>
-                  <input
-                    type="checkbox"
-                    className="export-row-check"
-                    checked={includeTrackingVideo}
-                    onChange={(e) => setIncludeTrackingVideo(e.target.checked)}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="export-panel-go"
-                  disabled={bundleBusy}
-                  onClick={async () => {
-                    setBundleBusy(true);
-                    try {
-                      await onExportBundle(bundleFormats, includeTrackingVideo);
-                      setExportMenuOpen(false);
-                    } finally {
-                      setBundleBusy(false);
-                    }
-                  }}
-                >
-                  <ActionIcon name="download" />
-                  {bundleBusy ? "Rendering video…" : "Download folder (.zip)"}
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </div>
-      <svg
-        className="manual-fog-bar"
-        viewBox={`0 0 ${width} ${height}`}
-        preserveAspectRatio="none"
-        role="slider"
-        aria-label="Manual FoG annotation timeline"
-        aria-valuemin={0}
-        aria-valuemax={Math.max(0, frameCount - 1)}
-        aria-valuenow={frameIndex}
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          const selected = frameFromClientX(event.clientX, event.currentTarget);
-          dragStateRef.current = {
-            mode: "create",
-            segmentIndex: null,
-            startFrame: selected,
-            originalStart: selected,
-            originalEnd: selected,
-          };
-          onSelectSegment(null);
-          onFrameSelect(selected);
-          onDraftChange({ start: selected, end: selected });
-        }}
-        onPointerMove={(event) => {
-          if (event.buttons !== 1 || dragStateRef.current === null) {
-            return;
-          }
-          const selected = frameFromClientX(event.clientX, event.currentTarget);
-          onFrameSelect(selected);
-          const drag = dragStateRef.current;
-          if (drag.mode === "create") {
-            onDraftChange({ start: drag.startFrame, end: selected });
-            return;
-          }
-          if (drag.segmentIndex === null) {
-            return;
-          }
-          if (drag.mode === "resize-start") {
-            onUpdateSegment(drag.segmentIndex, selected, drag.originalEnd);
-          } else if (drag.mode === "resize-end") {
-            onUpdateSegment(drag.segmentIndex, drag.originalStart, selected);
-          } else {
-            const delta = selected - drag.startFrame;
-            const duration = drag.originalEnd - drag.originalStart;
-            const nextStart = clamp(drag.originalStart + delta, 0, Math.max(0, frameCount - 1 - duration));
-            onUpdateSegment(drag.segmentIndex, nextStart, nextStart + duration);
-          }
-        }}
-        onPointerUp={(event) => {
-          const drag = dragStateRef.current;
-          const end = frameFromClientX(event.clientX, event.currentTarget);
-          dragStateRef.current = null;
-          onDraftChange(null);
-          if (drag?.mode === "create") {
-            onCommit(drag.startFrame, end);
-          }
-        }}
-        onPointerCancel={() => {
-          dragStateRef.current = null;
-          onDraftChange(null);
-        }}
-      >
-        <rect x={0} y={0} width={width} height={height} rx={12} className="manual-fog-bg" />
-        {visibleDeleted.map((deleted, idx) => {
-          const rect = segmentRect(deleted.startFrameIndex, deleted.endFrameIndex);
-          return (
-            <line
-              key={`deleted-${deleted.startFrameIndex}-${deleted.endFrameIndex}-${idx}`}
-              x1={rect.x}
-              x2={rect.x + rect.width}
-              y1={height / 2}
-              y2={height / 2}
-              className="manual-fog-tombstone"
-            >
-              <title>
-                Deleted prediction · frames {deleted.startFrameIndex}–{deleted.endFrameIndex}
-              </title>
-            </line>
-          );
-        })}
-        {visibleSegments.map((segment) => {
-          const index = segments.indexOf(segment);
-          const rect = segmentRect(segment.startFrameIndex, segment.endFrameIndex);
-          const isSelected = selectedSegmentIndex === index;
-          const bands = segmentBands(segment);
-          const startBandKind = bands[0]?.kind ?? "manual";
-          const endBandKind = bands[bands.length - 1]?.kind ?? startBandKind;
-          return (
-            <g key={`${segment.startFrameIndex}-${segment.endFrameIndex}-${index}`}>
-              {bands.map((band, bandIndex) => {
-                const bandRect = segmentRect(band.start, band.end);
-                if (bandRect.width <= 0) return null;
-                // Use rounded corners only on the outer edges of the segment
-                // so adjacent bands butt up cleanly against each other.
-                const isFirst = bandIndex === 0;
-                const isLast = bandIndex === bands.length - 1;
-                const radius = 6;
-                const path = bandRectPath(
-                  bandRect.x,
-                  7,
-                  bandRect.width,
-                  height - 14,
-                  isFirst ? radius : 0,
-                  isLast ? radius : 0,
-                );
-                return (
-                  <path
-                    key={`band-${bandIndex}-${band.start}-${band.end}`}
-                    d={path}
-                    className={`manual-fog-band band-${band.kind}`}
-                  />
-                );
-              })}
-              {isSelected ? (
-                <rect
-                  x={rect.x}
-                  y={7}
-                  width={rect.width}
-                  height={height - 14}
-                  rx={6}
-                  className="manual-fog-selection"
-                />
-              ) : null}
-              <rect
-                x={rect.x}
-                y={7}
-                width={rect.width}
-                height={height - 14}
-                rx={6}
-                className="manual-fog-hit"
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                  event.currentTarget.ownerSVGElement?.setPointerCapture(event.pointerId);
-                  const selected = frameFromClientX(event.clientX, event.currentTarget.ownerSVGElement as SVGSVGElement);
-                  dragStateRef.current = {
-                    mode: "move",
-                    segmentIndex: index,
-                    startFrame: selected,
-                    originalStart: segment.startFrameIndex,
-                    originalEnd: segment.endFrameIndex,
-                  };
-                  onSelectSegment(index);
-                  onFrameSelect(selected);
-                }}
-              />
-              <rect
-                x={Math.max(0, rect.x - 2)}
-                y={9}
-                width={5}
-                height={height - 18}
-                rx={3}
-                className={`manual-fog-handle band-${startBandKind} ${isSelected ? "selected" : ""}`}
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                  event.currentTarget.ownerSVGElement?.setPointerCapture(event.pointerId);
-                  const selected = frameFromClientX(event.clientX, event.currentTarget.ownerSVGElement as SVGSVGElement);
-                  dragStateRef.current = {
-                    mode: "resize-start",
-                    segmentIndex: index,
-                    startFrame: selected,
-                    originalStart: segment.startFrameIndex,
-                    originalEnd: segment.endFrameIndex,
-                  };
-                  onSelectSegment(index);
-                  onFrameSelect(selected);
-                }}
-              />
-              <rect
-                x={Math.min(width - 5, rect.x + rect.width - 3)}
-                y={9}
-                width={5}
-                height={height - 18}
-                rx={3}
-                className={`manual-fog-handle band-${endBandKind} ${isSelected ? "selected" : ""}`}
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                  event.currentTarget.ownerSVGElement?.setPointerCapture(event.pointerId);
-                  const selected = frameFromClientX(event.clientX, event.currentTarget.ownerSVGElement as SVGSVGElement);
-                  dragStateRef.current = {
-                    mode: "resize-end",
-                    segmentIndex: index,
-                    startFrame: selected,
-                    originalStart: segment.startFrameIndex,
-                    originalEnd: segment.endFrameIndex,
-                  };
-                  onSelectSegment(index);
-                  onFrameSelect(selected);
-                }}
-              />
-            </g>
-          );
-        })}
-        {draft ? (
-          <rect
-            x={segmentRect(draft.start, draft.end).x}
-            y={4}
-            width={segmentRect(draft.start, draft.end).width}
-            height={height - 8}
-            rx={8}
-            className="manual-fog-draft"
-          />
-        ) : null}
-        <line x1={cursorX} x2={cursorX} y1={0} y2={height} className="fog-density-cursor" />
-      </svg>
-    </div>
-  );
-}
-
-// Read-only ground-truth track: shows dataset + imported FoG episodes, scores the
-// human annotations against them (frame precision/recall/F1), and offers import.
-function GoldTruthBar({
-  runDetail,
-  frameIndex,
-  viewWindow,
-  annotationSegments,
-  importedSegments,
-  onImport,
-  onFrameSelect,
-}: {
-  runDetail: RunDetail;
-  frameIndex: number;
-  viewWindow: { start: number; end: number } | null;
-  annotationSegments: FogAnnotationSegment[];
-  importedSegments?: GoldTruthSegment[];
-  onImport?: (files: FileList) => void;
-  onFrameSelect: (index: number) => void;
-}) {
-  const width = 1120;
-  const height = 30;
-  const frameCount = runDetail.frames.length;
-  const gtFileInputRef = useRef<HTMLInputElement | null>(null);
-  const importedCount = importedSegments?.length ?? 0;
-  const segments = useMemo(
-    () => [...goldTruthSegments(runDetail), ...(importedSegments ?? [])],
-    [runDetail, importedSegments],
-  );
-  const viewStart = viewWindow?.start ?? 0;
-  const viewEnd = viewWindow?.end ?? Math.max(0, frameCount - 1);
-  const viewSpan = Math.max(1, viewEnd - viewStart);
-  const cursorX = ((clamp(frameIndex, viewStart, viewEnd) - viewStart) / viewSpan) * width;
-  const visibleSegments = segments.filter(
-    (segment) => segment.endFrameIndex >= viewStart && segment.startFrameIndex <= viewEnd,
-  );
-  const metrics = useMemo(
-    () => frameBenchmarkMetrics(annotationSegments, segments, frameCount),
-    [annotationSegments, frameCount, segments],
-  );
-
-  // Frame index under a pointer x, mapped through the current zoom window.
-  function frameFromClientX(clientX: number, currentTarget: SVGSVGElement): number {
-    const rect = currentTarget.getBoundingClientRect();
-    const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-    return Math.round(viewStart + ratio * viewSpan);
-  }
-
-  // Pixel x/width of a frame range within the current zoom window (min 5px wide).
-  function segmentRect(startFrame: number, endFrame: number): { x: number; width: number } {
-    const start = clamp(Math.min(startFrame, endFrame), viewStart, viewEnd);
-    const end = clamp(Math.max(startFrame, endFrame), viewStart, viewEnd);
-    const x = ((start - viewStart) / viewSpan) * width;
-    const x2 = ((end - viewStart) / viewSpan) * width;
-    return { x, width: Math.max(5, x2 - x) };
-  }
-
-  return (
-    <div className="gold-truth">
-      <div className="gold-truth-meta">
-        <div className="gold-truth-title">
-          <span>Ground truth</span>
-          <small>
-            {segments.length} FoG episode{segments.length === 1 ? "" : "s"}
-            {importedCount > 0 ? ` · ${importedCount} imported` : ""}
-          </small>
-        </div>
-        <div className="gold-truth-metrics">
-          {segments.length === 0 ? (
-            <span className="gold-truth-empty">No ground truth loaded — import to score the model</span>
-          ) : (
-            <>
-              <span>Frame precision <strong>{fmtMetric(metrics.precision)}</strong></span>
-              <span>Frame recall <strong>{fmtMetric(metrics.recall)}</strong></span>
-              <span>Frame F1 <strong>{fmtMetric(metrics.f1)}</strong></span>
-            </>
-          )}
-          {onImport ? (
-            <>
-              <input
-                ref={gtFileInputRef}
-                type="file"
-                accept=".json,.csv,.tsv,.txt,.eaf,.xml,application/json,text/csv,text/tab-separated-values,text/plain,text/xml"
-                multiple
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  if (e.target.files && e.target.files.length > 0) onImport(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-              <button
-                type="button"
-                className="gold-truth-import"
-                onClick={() => gtFileInputRef.current?.click()}
-                title="Import ground-truth FoG annotations — ELAN .eaf, kinematics .csv, annotations .json, kinesia label files, generic JSON [{startSec,endSec}] or CSV start,end[,label]"
-              >
-                + Import ground truth
-              </button>
-            </>
-          ) : null}
-        </div>
-      </div>
-      {segments.length > 0 ? (
-      <svg
-        className="gold-truth-bar"
-        viewBox={`0 0 ${width} ${height}`}
-        preserveAspectRatio="none"
-        role="slider"
-        aria-label="Ground truth FoG timeline"
-        aria-valuemin={0}
-        aria-valuemax={Math.max(0, frameCount - 1)}
-        aria-valuenow={frameIndex}
-        onPointerDown={(event) => {
-          onFrameSelect(frameFromClientX(event.clientX, event.currentTarget));
-        }}
-      >
-        <rect x={0} y={0} width={width} height={height} rx={10} className="gold-truth-bg" />
-        {visibleSegments.map((segment, index) => {
-          const rect = segmentRect(segment.startFrameIndex, segment.endFrameIndex);
-          return (
-            <g key={`${segment.datasetId}-${segment.startFrameIndex}-${segment.endFrameIndex}-${index}`}>
-              <rect
-                x={rect.x}
-                y={6}
-                width={rect.width}
-                height={height - 12}
-                rx={5}
-                className="gold-truth-segment"
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                  onFrameSelect(segment.startFrameIndex);
-                }}
-              />
-              {rect.width > 34 ? (
-                <title>
-                  {segment.label}: {segment.startSec.toFixed(2)}s to {segment.endSec.toFixed(2)}s
-                  {segment.source ? ` (${segment.source})` : ""}
-                </title>
-              ) : null}
-            </g>
-          );
-        })}
-        <line x1={cursorX} x2={cursorX} y1={0} y2={height} className="gold-truth-cursor" />
-      </svg>
-      ) : null}
-    </div>
-  );
-}
 
 // Top-level viewer: the runs/jobs sidebar, the upload + video-editing workflow,
-// the synced video / 3D / kinematics stage, and the FoG annotation + ground-truth
-// tracks. Owns essentially all of the page's interactive state. When
-// `embeddedRunId` is set it runs chromeless, locked to a single run (wizard mode).
+// and the synced video / 3D / kinematics stage. Owns essentially all of the
+// page's interactive state. When `embeddedRunId` is set it runs chromeless,
+// locked to a single run (wizard mode).
 export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) {
   // Embedded mode (e.g. inside the wizard run step): hide the sidebar/chrome
   // and lock the viewer to a single run passed in by the parent.
@@ -2341,30 +932,25 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
   const [plotGroup, setPlotGroup] = useState<PlotGroup>("angles");
   const [activePlotJointIndices, setActivePlotJointIndices] = useState<number[]>(DEFAULT_ACTIVE_PLOT_JOINTS);
   const [selectedSignalIds, setSelectedSignalIds] = useState<string[]>([]);
-  const [manualFogByRun, setManualFogByRun] = useState<Record<string, FogAnnotationSegment[]>>({});
-  const [importedGtByRun, setImportedGtByRun] = useState<Record<string, GoldTruthSegment[]>>({});
-  const [deletedAutoFogByRun, setDeletedAutoFogByRun] = useState<Record<string, DeletedFogPrediction[]>>({});
-  const [fogThresholdByRun, setFogThresholdByRun] = useState<Record<string, number>>({});
-  const [fogCleanupMinDurationSec, setFogCleanupMinDurationSec] = useState(DEFAULT_FOG_MIN_DURATION_SEC);
-  const [fogCleanupMergeGapSec, setFogCleanupMergeGapSec] = useState(DEFAULT_FOG_MERGE_GAP_SEC);
   const [signalPickerOpen, setSignalPickerOpen] = useState(false);
   const [plotLayoutMode, setPlotLayoutMode] = useState<"stacked" | "overlay">("overlay");
   // Which view fills the left media pane (3D stays on the right).
   const [leftView, setLeftView] = useState<"video" | "box">("box");
-  // Left/right media split, % width of the left pane within the media row.
-  const [mediaColPct, setMediaColPct] = useState(50);
+  // Left/right media split, % width of the (small) source-video pane; the 3D
+  // reconstruction fills the rest of the media row.
+  const [mediaColPct, setMediaColPct] = useState(26);
   // Joint + signal selectors are hidden behind a settings toggle to keep the
-  // panel focused on the plots/tracks.
+  // panel focused on the plots.
   const [plotSettingsOpen, setPlotSettingsOpen] = useState(false);
-  const [fogSettingsOpen, setFogSettingsOpen] = useState(false);
-  const [fogScoreSignalId, setFogScoreSignalId] = useState<"fog.score" | "fog.score_smooth">("fog.score");
-  const [annotationWindowFrames, setAnnotationWindowFrames] = useState<number | null>(null);
+  // Kinematics export menu (kinematics CSV/JSON + optional tracking-box video).
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [bundleFormats, setBundleFormats] = useState<ChannelFormats>(DEFAULT_CHANNEL_FORMATS);
+  const [includeTrackingVideo, setIncludeTrackingVideo] = useState(true);
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [viewWindowFrames, setViewWindowFrames] = useState<number | null>(null);
   // Window POSITION (start frame) set by the timeline navigator. null = follow the
   // playhead; a number = the user scrolled there and the window stays put.
   const [windowStartFrame, setWindowStartFrame] = useState<number | null>(null);
-  const [annotationCacheLoaded, setAnnotationCacheLoaded] = useState(false);
-  const [draftFogAnnotation, setDraftFogAnnotation] = useState<DraftAnnotation>(null);
-  const [selectedFogSegmentIndex, setSelectedFogSegmentIndex] = useState<number | null>(null);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [batchUploadProgress, setBatchUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -2372,9 +958,11 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
   const [pendingStagedUploadId, setPendingStagedUploadId] = useState<string | null>(null);
   const [patientDetectionMode, setPatientDetectionMode] = useState<PatientDetectionMode>("auto");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // Vertical split between the media row (video + 3D) and the analysis panel,
-  // as a percentage of the split region's height. Adjusted by the divider drag.
-  const [mediaSplitPct, setMediaSplitPct] = useState(33);
+  // Vertical split between the media row (3D + source video) and the kinematics
+  // panel, as a percentage of the split region's height. The 3D reconstruction
+  // dominates, so the media row takes most of the height by default. Adjusted by
+  // the divider drag.
+  const [mediaSplitPct, setMediaSplitPct] = useState(64);
   const [videoEditTool, setVideoEditTool] = useState<VideoEditTool>("subject");
   const [videoDurationSec, setVideoDurationSec] = useState(0);
   const [pendingVideoTimeSec, setPendingVideoTimeSec] = useState(0);
@@ -2405,71 +993,6 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Parse one or more dropped/selected annotation files into ground-truth
-  // segments for the current run, de-duping against existing imports and
-  // surfacing per-file parse failures.
-  const importGroundTruth = useCallback(
-    async (files: FileList) => {
-      if (!selectedRunId || !runDetail) return;
-      const fps = runDetail.fps || 30;
-      const frameCount = runDetail.frames.length;
-      const parsed: GoldTruthSegment[] = [];
-      const failed: string[] = []; // files that threw or yielded nothing
-      for (const file of Array.from(files)) {
-        try {
-          const segs = parseAnnotationsFile(await file.text(), file.name, { fps, frameCount });
-          if (segs.length === 0) {
-            failed.push(file.name);
-            continue;
-          }
-          for (const seg of segs) {
-            parsed.push({
-              startFrameIndex: seg.startFrameIndex,
-              endFrameIndex: seg.endFrameIndex,
-              startSec: seg.startSec,
-              endSec: seg.endSec,
-              label: seg.label,
-              datasetId: file.name,
-              split: "holdout",
-              labelEventsPath: null,
-              source: seg.source,
-            });
-          }
-        } catch {
-          failed.push(file.name);
-        }
-      }
-      if (parsed.length > 0) {
-        // Dedupe inside the updater so it checks against the freshest state —
-        // re-importing the same file (even before a prior import re-rendered)
-        // never stacks duplicate episodes.
-        setImportedGtByRun((current) => {
-          const prior = current[selectedRunId] ?? [];
-          const seen = new Set(prior.map((s) => `${s.label}:${s.startFrameIndex}:${s.endFrameIndex}`));
-          const added: GoldTruthSegment[] = [];
-          for (const seg of parsed) {
-            const key = `${seg.label}:${seg.startFrameIndex}:${seg.endFrameIndex}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            added.push(seg);
-          }
-          return added.length ? { ...current, [selectedRunId]: [...prior, ...added] } : current;
-        });
-      }
-      // Surface per-file failures even when other files imported successfully.
-      if (failed.length > 0) {
-        const supported =
-          "Supported: ELAN .eaf, the kinematics .csv, the annotations .json, " +
-          "kinesia label files ({episodes:[{start_ms,end_ms}]}), JSON [{startSec,endSec}] or CSV start,end.";
-        setError(
-          parsed.length === 0
-            ? `No FoG intervals found in ${failed.join(", ")}. ${supported}`
-            : `Imported some files, but found no FoG intervals in: ${failed.join(", ")}. ${supported}`,
-        );
-      }
-    },
-    [runDetail, selectedRunId],
-  );
   const [isFullScreen, setIsFullScreen] = useState(false);
   // When true, the main area shows the guided 4-step wizard instead of the
   // 3D viewer. The sidebar (runs list, brand, etc.) remains visible so the
@@ -2674,124 +1197,11 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     });
   }
 
-  const manualFogSegments = selectedRunId ? manualFogByRun[selectedRunId] ?? [] : [];
-  const deletedAutoFogSegments = selectedRunId ? deletedAutoFogByRun[selectedRunId] ?? [] : [];
-
-  // ── Annotation undo/redo ──────────────────────────────────────────────────
-  // Per-run history of {manual, deleted} snapshots. recordFogHistory() captures
-  // the pre-mutation state and is called at the top of every annotation edit.
-  const manualFogByRunRef = useRef(manualFogByRun);
-  manualFogByRunRef.current = manualFogByRun;
-  const deletedAutoFogByRunRef = useRef(deletedAutoFogByRun);
-  deletedAutoFogByRunRef.current = deletedAutoFogByRun;
-  const selectedRunIdRef = useRef(selectedRunId);
-  selectedRunIdRef.current = selectedRunId;
-  const fogHistoryRef = useRef<Record<string, { past: FogHistorySnapshot[]; future: FogHistorySnapshot[] }>>({});
-  const [fogHistoryTick, setFogHistoryTick] = useState(0);
-
-  const recordFogHistory = useCallback(() => {
-    const runId = selectedRunIdRef.current;
-    if (!runId) return;
-    const h = fogHistoryRef.current[runId] ?? { past: [], future: [] };
-    h.past.push({
-      manual: manualFogByRunRef.current[runId] ?? [],
-      deleted: deletedAutoFogByRunRef.current[runId] ?? [],
-    });
-    if (h.past.length > 100) h.past.shift();
-    h.future = [];
-    fogHistoryRef.current[runId] = h;
-    setFogHistoryTick((t) => t + 1);
-  }, []);
-
-  // Restore the previous annotation snapshot, pushing the current one onto redo.
-  const undoFogAnnotation = useCallback(() => {
-    const runId = selectedRunIdRef.current;
-    if (!runId) return;
-    const h = fogHistoryRef.current[runId];
-    if (!h || h.past.length === 0) return;
-    const prev = h.past.pop()!;
-    h.future.push({
-      manual: manualFogByRunRef.current[runId] ?? [],
-      deleted: deletedAutoFogByRunRef.current[runId] ?? [],
-    });
-    setManualFogByRun((c) => ({ ...c, [runId]: prev.manual }));
-    setDeletedAutoFogByRun((c) => ({ ...c, [runId]: prev.deleted }));
-    setSelectedFogSegmentIndex(null);
-    setFogHistoryTick((t) => t + 1);
-  }, []);
-
-  // Re-apply the most recently undone snapshot, pushing the current one onto past.
-  const redoFogAnnotation = useCallback(() => {
-    const runId = selectedRunIdRef.current;
-    if (!runId) return;
-    const h = fogHistoryRef.current[runId];
-    if (!h || h.future.length === 0) return;
-    const next = h.future.pop()!;
-    h.past.push({
-      manual: manualFogByRunRef.current[runId] ?? [],
-      deleted: deletedAutoFogByRunRef.current[runId] ?? [],
-    });
-    setManualFogByRun((c) => ({ ...c, [runId]: next.manual }));
-    setDeletedAutoFogByRun((c) => ({ ...c, [runId]: next.deleted }));
-    setSelectedFogSegmentIndex(null);
-    setFogHistoryTick((t) => t + 1);
-  }, []);
-
-  const fogHistory = selectedRunId ? fogHistoryRef.current[selectedRunId] : undefined;
-  const canUndoFog = (fogHistory?.past.length ?? 0) > 0;
-  const canRedoFog = (fogHistory?.future.length ?? 0) > 0;
-  void fogHistoryTick; // canUndo/canRedo recompute when the tick bumps
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey)) return;
-      const tag = (event.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      const key = event.key.toLowerCase();
-      if (key === "z" && !event.shiftKey) {
-        event.preventDefault();
-        undoFogAnnotation();
-      } else if ((key === "z" && event.shiftKey) || key === "y") {
-        event.preventDefault();
-        redoFogAnnotation();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [undoFogAnnotation, redoFogAnnotation]);
-  const activeFogThreshold = selectedRunId
-    ? fogThresholdByRun[selectedRunId] ?? runDetail?.fog?.threshold ?? DEFAULT_FOG_THRESHOLD
-    : DEFAULT_FOG_THRESHOLD;
-  const autoFogSegments = useMemo(
-    () => (runDetail ? predictedFogSegments(runDetail, activeFogThreshold, fogScoreSignalId) : []),
-    [activeFogThreshold, fogScoreSignalId, runDetail],
-  );
-  const autoFogSegmentsForAnnotation = useMemo(
-    () => autoFogSegments.filter((segment) => !deletedAutoFogSegments.some((deleted) => sameFrameSpan(segment, deleted))),
-    [autoFogSegments, deletedAutoFogSegments],
-  );
-  const cleanedAutoFogSegments = useMemo(() => {
-    if (!runDetail) {
-      return [];
-    }
-    return postProcessFogSegments(
-      runDetail,
-      autoFogSegmentsForAnnotation,
-      fogCleanupMinDurationSec,
-      fogCleanupMergeGapSec,
-    ).filter((segment) => !deletedAutoFogSegments.some((deleted) => sameFrameSpan(segment, deleted)));
-  }, [
-    autoFogSegmentsForAnnotation,
-    deletedAutoFogSegments,
-    fogCleanupMergeGapSec,
-    fogCleanupMinDurationSec,
-    runDetail,
-  ]);
-  const annotationWindow = useMemo(() => {
-    if (!runDetail || annotationWindowFrames === null || frameCount <= 0) {
+  const viewWindow = useMemo(() => {
+    if (!runDetail || viewWindowFrames === null || frameCount <= 0) {
       return null;
     }
-    const span = clamp(annotationWindowFrames, 1, frameCount);
+    const span = clamp(viewWindowFrames, 1, frameCount);
     const maxStart = Math.max(0, frameCount - span);
     // Use the navigator's scrolled position if set; otherwise trail the playhead.
     const start =
@@ -2799,346 +1209,16 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
         ? clamp(windowStartFrame, 0, maxStart)
         : clamp(safeFrameIndex - span + 1, 0, maxStart);
     return { start, end: Math.min(frameCount - 1, start + span - 1) };
-  }, [annotationWindowFrames, windowStartFrame, frameCount, runDetail, safeFrameIndex]);
+  }, [viewWindowFrames, windowStartFrame, frameCount, runDetail, safeFrameIndex]);
 
-  useEffect(() => {
-    try {
-      // Manual annotations and deletions are intentionally session-only:
-      // reload returns the viewer to the model's predictions. Purge any
-      // legacy data so users who had localStorage from older builds get a
-      // clean slate too. Export still lets annotators save their work.
-      try {
-        window.localStorage.removeItem(MANUAL_FOG_STORAGE_KEY);
-        window.localStorage.removeItem(DELETED_AUTO_FOG_STORAGE_KEY);
-      } catch {
-        // ignore — localStorage may be unavailable
-      }
-      const rawThresholds = window.localStorage.getItem(FOG_THRESHOLD_STORAGE_KEY);
-      if (rawThresholds) {
-        const parsed = JSON.parse(rawThresholds) as Record<string, number>;
-        if (parsed && typeof parsed === "object") {
-          const thresholds: Record<string, number> = {};
-          for (const [runId, value] of Object.entries(parsed)) {
-            if (typeof value === "number" && Number.isFinite(value)) {
-              thresholds[runId] = clamp(value, 0.01, 0.99);
-            }
-          }
-          setFogThresholdByRun(thresholds);
-        }
-      }
-      const rawPostProcess = window.localStorage.getItem(FOG_POSTPROCESS_STORAGE_KEY);
-      if (rawPostProcess) {
-        const parsed = JSON.parse(rawPostProcess) as { minDurationSec?: unknown; mergeGapSec?: unknown };
-        if (typeof parsed.minDurationSec === "number" && Number.isFinite(parsed.minDurationSec)) {
-          setFogCleanupMinDurationSec(clamp(parsed.minDurationSec, 0, 10));
-        }
-        if (typeof parsed.mergeGapSec === "number" && Number.isFinite(parsed.mergeGapSec)) {
-          setFogCleanupMergeGapSec(clamp(parsed.mergeGapSec, 0, 10));
-        }
-      }
-    } catch {
-      // Ignore corrupt local annotation cache.
-    } finally {
-      setAnnotationCacheLoaded(true);
-    }
-  }, []);
 
-  // manualFogByRun and deletedAutoFogByRun are deliberately NOT persisted —
-  // a page reload should always show the model's predictions, not any human
-  // edits. Annotators who want to keep their work use the Export JSON button.
-
-  useEffect(() => {
-    if (!annotationCacheLoaded) {
-      return;
-    }
-    try {
-      window.localStorage.setItem(FOG_THRESHOLD_STORAGE_KEY, JSON.stringify(fogThresholdByRun));
-    } catch {
-      // Local storage may be unavailable in private/browser-restricted contexts.
-    }
-  }, [annotationCacheLoaded, fogThresholdByRun]);
-
-  useEffect(() => {
-    if (!annotationCacheLoaded) {
-      return;
-    }
-    try {
-      window.localStorage.setItem(
-        FOG_POSTPROCESS_STORAGE_KEY,
-        JSON.stringify({
-          minDurationSec: fogCleanupMinDurationSec,
-          mergeGapSec: fogCleanupMergeGapSec,
-        }),
-      );
-    } catch {
-      // Local storage may be unavailable in private/browser-restricted contexts.
-    }
-  }, [annotationCacheLoaded, fogCleanupMergeGapSec, fogCleanupMinDurationSec]);
-
-  useEffect(() => {
-    if (!annotationCacheLoaded || !runDetail || !selectedRunId) {
-      return;
-    }
-    setManualFogByRun((current) => {
-      const existing = current[selectedRunId] ?? [];
-      const userEditedSegments = existing.filter((segment) => !isAutoGeneratedAnnotation(segment));
-      const synced = normalizeAnnotationSegments([...cleanedAutoFogSegments, ...userEditedSegments]);
-      if (annotationListsEqual(existing, synced)) {
-        return current;
-      }
-      return { ...current, [selectedRunId]: synced };
-    });
-    setSelectedFogSegmentIndex(null);
-  }, [annotationCacheLoaded, cleanedAutoFogSegments, runDetail, selectedRunId]);
-
-  // annotationSegmentFromFrames bound to the currently loaded run.
-  function annotationSegmentFromCurrentRun(
-    start: number,
-    end: number,
-    source: FogAnnotationSource,
-    createdAt?: string,
-    predictedRange?: { start: number; end: number } | null,
-  ): FogAnnotationSegment | null {
-    if (!runDetail || runDetail.frames.length === 0) {
-      return null;
-    }
-    return annotationSegmentFromFrames(runDetail, start, end, source, createdAt, predictedRange);
-  }
-
-  // Add a new fully-manual FoG segment for the dragged frame range.
-  const commitManualFogAnnotation = useCallback(
-    (start: number, end: number): void => {
-      if (!runDetail || !selectedRunId || runDetail.frames.length === 0) {
-        return;
-      }
-      recordFogHistory();
-      // Fully manual segments have no model lineage — predictedRange stays null.
-      const segment = annotationSegmentFromCurrentRun(start, end, "manual", undefined, null);
-      if (!segment) {
-        return;
-      }
-      setManualFogByRun((current) => ({
-        ...current,
-        [selectedRunId]: normalizeAnnotationSegments([...(current[selectedRunId] ?? []), segment]),
-      }));
-      setSelectedFogSegmentIndex(null);
-    },
-    [runDetail, selectedRunId],
-  );
-
-  // Move/resize an existing segment; an edited auto segment becomes auto_corrected
-  // while keeping its original predicted range for band rendering.
-  const updateManualFogAnnotation = useCallback(
-    (segmentIndex: number, start: number, end: number): void => {
-      if (!runDetail || !selectedRunId) {
-        return;
-      }
-      recordFogHistory();
-      setManualFogByRun((current) => {
-        const existing = current[selectedRunId] ?? [];
-        const previous = existing[segmentIndex];
-        if (!previous) {
-          return current;
-        }
-        const updatedSource = previous.source === "manual" ? "manual" : "auto_corrected";
-        const updatedCreatedAt = previous.source === "manual" ? previous.createdAt : new Date().toISOString();
-        // Carry the original prediction range untouched so extending an
-        // auto segment shows the new ends as manual additions (green).
-        const previousPredictedRange =
-          previous.predictedStartFrameIndex !== undefined && previous.predictedEndFrameIndex !== undefined
-            ? { start: previous.predictedStartFrameIndex, end: previous.predictedEndFrameIndex }
-            : null;
-        const updated = annotationSegmentFromCurrentRun(
-          start,
-          end,
-          updatedSource,
-          updatedCreatedAt,
-          previousPredictedRange,
-        );
-        if (!updated) {
-          return current;
-        }
-        const next = existing.map((segment, index) => (index === segmentIndex ? updated : segment));
-        return { ...current, [selectedRunId]: next };
-      });
-      setSelectedFogSegmentIndex(segmentIndex);
-    },
-    [runDetail, selectedRunId],
-  );
-
-  // Delete the selected segment; auto segments are tombstoned so they don't
-  // simply re-appear from the prediction sync.
-  const deleteSelectedManualFogAnnotation = useCallback((): void => {
-    if (!selectedRunId || selectedFogSegmentIndex === null) {
-      return;
-    }
-    recordFogHistory();
-    const selectedSegment = manualFogSegments[selectedFogSegmentIndex];
-    if (selectedSegment && isAutomaticAnnotation(selectedSegment)) {
-      setDeletedAutoFogByRun((current) => ({
-        ...current,
-        [selectedRunId]: [
-          ...(current[selectedRunId] ?? []),
-          {
-            ...selectedSegment,
-            deletedAt: new Date().toISOString(),
-            deletedAtFrameIndex: safeFrameIndex,
-            originalSource: selectedSegment.source,
-          },
-        ],
-      }));
-    }
-    setManualFogByRun((current) => {
-      const nextSegments = (current[selectedRunId] ?? []).filter((_, index) => index !== selectedFogSegmentIndex);
-      return { ...current, [selectedRunId]: nextSegments };
-    });
-    setSelectedFogSegmentIndex(null);
-  }, [manualFogSegments, safeFrameIndex, selectedFogSegmentIndex, selectedRunId]);
-
-  // Split the selected segment at the current playhead into two segments.
-  const splitSelectedManualFogAnnotation = useCallback((): void => {
-    if (!runDetail || !selectedRunId || selectedFogSegmentIndex === null) {
-      return;
-    }
-    recordFogHistory();
-    const segment = manualFogSegments[selectedFogSegmentIndex];
-    if (!segment || safeFrameIndex <= segment.startFrameIndex || safeFrameIndex >= segment.endFrameIndex) {
-      return;
-    }
-    const nextSource = segment.source === "manual" ? "manual" : "auto_corrected";
-    const editedAt = segment.source === "manual" ? segment.createdAt : new Date().toISOString();
-    // Each half inherits the parent's predicted range intersected with its
-    // own frame span — so band rendering stays correct after a split.
-    const parentPredStart = segment.predictedStartFrameIndex;
-    const parentPredEnd = segment.predictedEndFrameIndex;
-    function intersectPred(rangeStart: number, rangeEnd: number): { start: number; end: number } | null {
-      if (parentPredStart === undefined || parentPredEnd === undefined) return null;
-      const start = Math.max(parentPredStart, rangeStart);
-      const end = Math.min(parentPredEnd, rangeEnd);
-      if (end < start) return null;
-      return { start, end };
-    }
-    const left = annotationSegmentFromCurrentRun(
-      segment.startFrameIndex,
-      safeFrameIndex - 1,
-      nextSource,
-      editedAt,
-      intersectPred(segment.startFrameIndex, safeFrameIndex - 1),
-    );
-    const right = annotationSegmentFromCurrentRun(
-      safeFrameIndex,
-      segment.endFrameIndex,
-      nextSource,
-      new Date().toISOString(),
-      intersectPred(safeFrameIndex, segment.endFrameIndex),
-    );
-    if (!left || !right) {
-      return;
-    }
-    setManualFogByRun((current) => {
-      const existing = current[selectedRunId] ?? [];
-      const next = [
-        ...existing.slice(0, selectedFogSegmentIndex),
-        left,
-        right,
-        ...existing.slice(selectedFogSegmentIndex + 1),
-      ];
-      return { ...current, [selectedRunId]: next };
-    });
-    setSelectedFogSegmentIndex(selectedFogSegmentIndex + 1);
-  }, [manualFogSegments, runDetail, safeFrameIndex, selectedFogSegmentIndex, selectedRunId]);
-
-  // Remove all annotations for the run, tombstoning the auto ones so they stay
-  // gone until reset-to-prediction.
-  const clearManualFogAnnotations = useCallback((): void => {
-    if (!selectedRunId) {
-      return;
-    }
-    recordFogHistory();
-    const autoSegments = manualFogSegments.filter(isAutomaticAnnotation);
-    if (autoSegments.length > 0) {
-      setDeletedAutoFogByRun((current) => ({
-        ...current,
-        [selectedRunId]: [
-          ...(current[selectedRunId] ?? []),
-          ...autoSegments.map((segment) => ({
-            ...segment,
-            deletedAt: new Date().toISOString(),
-            deletedAtFrameIndex: safeFrameIndex,
-            originalSource: segment.source,
-          })),
-        ],
-      }));
-    }
-    setManualFogByRun((current) => {
-      return { ...current, [selectedRunId]: [] };
-    });
-    setSelectedFogSegmentIndex(null);
-  }, [manualFogSegments, safeFrameIndex, selectedRunId]);
-
-  // Discard all human edits and restore the model's full post-processed prediction.
-  const resetManualFogAnnotationsToPrediction = useCallback((): void => {
-    if (!selectedRunId || !runDetail) {
-      return;
-    }
-    recordFogHistory();
-    // Restore the model's full post-processed predictions for this run:
-    // - forget manual segments and edits
-    // - forget tombstones so previously deleted predictions reappear
-    const fullPredictions = postProcessFogSegments(
-      runDetail,
-      autoFogSegments,
-      fogCleanupMinDurationSec,
-      fogCleanupMergeGapSec,
-    );
-    setDeletedAutoFogByRun((current) => ({ ...current, [selectedRunId]: [] }));
-    setManualFogByRun((current) => ({ ...current, [selectedRunId]: fullPredictions }));
-    setSelectedFogSegmentIndex(null);
-  }, [autoFogSegments, fogCleanupMergeGapSec, fogCleanupMinDurationSec, runDetail, selectedRunId]);
-
-  // Set the per-run FoG decision threshold (clamped away from 0/1).
-  const updateFogThreshold = useCallback(
-    (threshold: number): void => {
-      if (!selectedRunId) {
-        return;
-      }
-      setFogThresholdByRun((current) => ({
-        ...current,
-        [selectedRunId]: clamp(threshold, 0.01, 0.99),
-      }));
-    },
-    [selectedRunId],
-  );
-
-  // Export every channel at once as one ZIP that unpacks to a folder named
-  // <video>_<timestamp>/, with a separate per-channel file inside (kinematics,
-  // FoG probability, the annotation track, and — when present — ground truth).
-  // Each channel's format is chosen independently in the export panel.
+  // Export the per-joint kinematics (CSV or JSON) and, optionally, the rendered
+  // tracking-box MP4, as one ZIP that unpacks to a <video>_<timestamp>/ folder.
   const exportBundle = useCallback(async (formats: ChannelFormats, includeTrackingVideo: boolean): Promise<void> => {
     if (!runDetail || !selectedRunId) return;
     const now = new Date();
     const videoName = runs.find((run) => run.id === selectedRunId)?.id ?? selectedRunId;
     const baseName = bundleBaseName(videoName, now);
-    const frameCount = runDetail.frames.length;
-    const toInterval = (s: {
-      startSec: number;
-      endSec: number;
-      startFrameIndex?: number;
-      endFrameIndex?: number;
-      label?: string;
-      source?: string;
-    }): ExportInterval => ({
-      startSec: s.startSec,
-      endSec: s.endSec,
-      startFrameIndex: s.startFrameIndex,
-      endFrameIndex: s.endFrameIndex,
-      label: s.label,
-      source: s.source,
-    });
-    const groundTruth = [
-      ...goldTruthSegments(runDetail),
-      ...(importedGtByRun[selectedRunId] ?? []),
-    ].map(toInterval);
     const files = buildBundleFiles(
       {
         baseName,
@@ -3146,12 +1226,6 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
         videoFileName: `${selectedRunId}.mp4`,
         dateIso: now.toISOString(),
         runDetail,
-        fogScores: fogScoreValues(runDetail, "fog.score"),
-        fogScoresSmooth: fogScoreValues(runDetail, "fog.score_smooth"),
-        threshold: activeFogThreshold,
-        annotatedMask: segmentFrameMask(manualFogSegments, frameCount),
-        annotationSegments: manualFogSegments.map(toInterval),
-        groundTruthSegments: groundTruth,
       },
       formats,
     );
@@ -3170,7 +1244,7 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
       }
     }
     downloadBundle(baseName, files, now, binaryFiles);
-  }, [activeFogThreshold, importedGtByRun, manualFogSegments, runDetail, runs, selectedRunId]);
+  }, [runDetail, runs, selectedRunId]);
 
   // Fetch the processed-runs list, auto-selecting the first run only when nothing
   // is selected and no upload is in progress.
@@ -3471,29 +1545,16 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
           return;
         }
         toggleRunPlayback();
-      } else if (event.code === "Delete" || event.code === "Backspace") {
-        if (isTyping) {
-          return;
-        }
-        if (selectedFogSegmentIndex !== null) {
-          event.preventDefault();
-          deleteSelectedManualFogAnnotation();
-        }
-      } else if (event.code === "Escape") {
-        setSelectedFogSegmentIndex(null);
-        setDraftFogAnnotation(null);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    deleteSelectedManualFogAnnotation,
     frameCount,
     pendingFileUrl,
     pendingVideoCursorSec,
     runDetail,
     safeFrameIndex,
-    selectedFogSegmentIndex,
     visibleTimelineSegments,
   ]);
 
@@ -4831,27 +2892,6 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                       onJointPick={toggleActiveJoint}
                     />
                   </div>
-                  <div className="fog-under-three">
-                    <FogProbabilityPanel
-                      runDetail={runDetail}
-                      frameIndex={safeFrameIndex}
-                      threshold={activeFogThreshold}
-                      cleanupMinDurationSec={fogCleanupMinDurationSec}
-                      cleanupMergeGapSec={fogCleanupMergeGapSec}
-                      settingsOpen={fogSettingsOpen}
-                      onCleanupMinDurationChange={setFogCleanupMinDurationSec}
-                      onCleanupMergeGapChange={setFogCleanupMergeGapSec}
-                      onSettingsOpenChange={setFogSettingsOpen}
-                      onThresholdChange={updateFogThreshold}
-                      scoreSignalId={fogScoreSignalId}
-                      onScoreSignalChange={setFogScoreSignalId}
-                      onFrameSelect={(index) => {
-                        setIsPlaying(false);
-                        setFrameIndex(index);
-                        setFrameCursor(index);
-                      }}
-                    />
-                  </div>
                 </div>
               </div>
             ) : activeRunLoadState && !activeJobForRun ? (
@@ -5265,6 +3305,62 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                 {" · "}
                 {activePlotJointIndices.length}/{PLOT_JOINT_OPTIONS.length} joints
               </span>
+              {runDetail ? (
+                <div className="plot-export">
+                  <button
+                    type="button"
+                    className={`plot-export-toggle ${exportMenuOpen ? "active" : ""}`}
+                    onClick={() => setExportMenuOpen((value) => !value)}
+                    disabled={bundleBusy}
+                    title="Export kinematics and the tracking-box video"
+                  >
+                    {bundleBusy ? "Exporting…" : "⬇ Export"}
+                  </button>
+                  {exportMenuOpen ? (
+                    <div className="plot-export-menu">
+                      <label>
+                        <span>Kinematics</span>
+                        <select
+                          value={bundleFormats.kinematics}
+                          onChange={(event) =>
+                            setBundleFormats((current) => ({
+                              ...current,
+                              kinematics: event.target.value as FrameFormat,
+                            }))
+                          }
+                        >
+                          <option value="csv">CSV</option>
+                          <option value="json">JSON</option>
+                        </select>
+                      </label>
+                      <label className="plot-export-check">
+                        <input
+                          type="checkbox"
+                          checked={includeTrackingVideo}
+                          onChange={(event) => setIncludeTrackingVideo(event.target.checked)}
+                        />
+                        <span>Tracking-box video</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="plot-export-download"
+                        disabled={bundleBusy}
+                        onClick={async () => {
+                          setBundleBusy(true);
+                          try {
+                            await exportBundle(bundleFormats, includeTrackingVideo);
+                            setExportMenuOpen(false);
+                          } finally {
+                            setBundleBusy(false);
+                          }
+                        }}
+                      >
+                        Download
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
             {plotSettingsOpen ? (
             <>
@@ -5386,66 +3482,16 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
               <TimelineNavigator
                 frameCount={frameCount}
                 frameIndex={safeFrameIndex}
-                windowStart={annotationWindow?.start ?? 0}
-                windowSpan={annotationWindow ? annotationWindow.end - annotationWindow.start + 1 : frameCount}
+                windowStart={viewWindow?.start ?? 0}
+                windowSpan={viewWindow ? viewWindow.end - viewWindow.start + 1 : frameCount}
                 onWindowChange={(start, span) => {
                   if (span >= frameCount) {
-                    setAnnotationWindowFrames(null);
+                    setViewWindowFrames(null);
                     setWindowStartFrame(null);
                   } else {
-                    setAnnotationWindowFrames(span);
+                    setViewWindowFrames(span);
                     setWindowStartFrame(start);
                   }
-                }}
-              />
-            ) : null}
-            {runDetail ? (
-              <ManualFogAnnotationBar
-                runDetail={runDetail}
-                frameIndex={safeFrameIndex}
-                segments={manualFogSegments}
-                deletedSegments={deletedAutoFogSegments}
-                draft={draftFogAnnotation}
-                viewWindow={annotationWindow}
-                onDraftChange={setDraftFogAnnotation}
-                onCommit={commitManualFogAnnotation}
-                selectedSegmentIndex={selectedFogSegmentIndex}
-                onSelectSegment={setSelectedFogSegmentIndex}
-                onUpdateSegment={updateManualFogAnnotation}
-                onDeleteSelected={deleteSelectedManualFogAnnotation}
-                onSplitSelected={splitSelectedManualFogAnnotation}
-                onFrameSelect={(index) => {
-                  setIsPlaying(false);
-                  setFrameIndex(index);
-                  setFrameCursor(index);
-                }}
-                onClear={clearManualFogAnnotations}
-                onExportBundle={exportBundle}
-                hasGroundTruth={
-                  goldTruthSegments(runDetail).length +
-                    (selectedRunId ? importedGtByRun[selectedRunId]?.length ?? 0 : 0) >
-                  0
-                }
-                onUndo={undoFogAnnotation}
-                onRedo={redoFogAnnotation}
-                canUndo={canUndoFog}
-                canRedo={canRedoFog}
-                onResetToPrediction={resetManualFogAnnotationsToPrediction}
-                predictionCount={cleanedAutoFogSegments.length}
-              />
-            ) : null}
-            {runDetail ? (
-              <GoldTruthBar
-                runDetail={runDetail}
-                frameIndex={safeFrameIndex}
-                viewWindow={annotationWindow}
-                annotationSegments={manualFogSegments}
-                importedSegments={selectedRunId ? importedGtByRun[selectedRunId] : undefined}
-                onImport={importGroundTruth}
-                onFrameSelect={(index) => {
-                  setIsPlaying(false);
-                  setFrameIndex(index);
-                  setFrameCursor(index);
                 }}
               />
             ) : null}
@@ -5455,8 +3501,7 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
               fps={runDetail?.fps ?? 30}
               frameCount={frameCount}
               mode={plotLayoutMode}
-              viewWindow={annotationWindow}
-              annotationSegments={manualFogSegments}
+              viewWindow={viewWindow}
               maskedRanges={maskedFrameRanges}
               colorForId={(_id, index) => PLOT_COLORS[index % PLOT_COLORS.length]}
               onFrameSelect={(index) => {
