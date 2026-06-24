@@ -12,10 +12,9 @@ from pathlib import Path
 # Silicon. Default it ON — harmless on CUDA/CPU. (An explicit env value still wins.)
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-from .analytics import AnalysisParams, analyze_run, load_analysis_for_evaluation
+from .analytics import AnalysisParams, analyze_run
 from .artifacts import build_run_manifest, ensure_run_layout, write_json
 from .doctor import run_doctor
-from .evaluation import evaluate_dataset
 from .pipeline import PipelineConfig, parse_bbox, run_pipeline
 from .workspace import DEFAULT_ANALYSIS_PRESET, DEFAULT_CONFIG_PROFILE, project_root_from
 
@@ -36,7 +35,7 @@ DEFAULT_MHR_PATH = Path(
         DEFAULT_MODELS_ROOT / "sam-3d-body-dinov3" / "assets" / "mhr_model.pt",
     )
 )
-SUBCOMMANDS = {"run", "analyze", "evaluate", "doctor"}
+SUBCOMMANDS = {"run", "analyze", "doctor"}
 
 
 def sanitize_token(input_text: str) -> str:
@@ -184,11 +183,6 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--min-duration-ms", type=int, default=400)
     analyze_parser.add_argument("--gap-fill-ms", type=int, default=220)
     analyze_parser.add_argument("--json", action="store_true")
-
-    eval_parser = subparsers.add_parser("evaluate", help="Evaluate predictions against labeled episodes.")
-    eval_parser.add_argument("--dataset-manifest", type=Path, required=True)
-    eval_parser.add_argument("--preset", default=DEFAULT_ANALYSIS_PRESET)
-    eval_parser.add_argument("--json", action="store_true")
 
     doctor_parser = subparsers.add_parser("doctor", help="Validate environment and model dependencies.")
     doctor_parser.add_argument("--checkpoint-path", type=Path, default=DEFAULT_CHECKPOINT_PATH)
@@ -503,24 +497,6 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_evaluate(args: argparse.Namespace) -> int:
-    """Evaluate predictions against a labeled dataset and print the result summary."""
-    summary = evaluate_dataset(
-        dataset_manifest_path=args.dataset_manifest.expanduser().resolve(),
-        preset=args.preset,
-        analysis_lookup=lambda run_id, preset: load_analysis_for_evaluation(run_id, preset),
-    )
-    if args.json:
-        print(json.dumps(summary, indent=2))
-    else:
-        print(json.dumps({
-            "dataset_id": summary["dataset_id"],
-            "runs_evaluated": summary["runs_evaluated"],
-            "holdout_f1_event": summary["splits"]["holdout"]["f1_event"],
-        }, indent=2))
-    return 0
-
-
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Validate the environment and model dependencies, printing the doctor report."""
     summary = run_doctor(
@@ -554,8 +530,6 @@ def main() -> None:
         raise SystemExit(cmd_run(args))
     if args.command == "analyze":
         raise SystemExit(cmd_analyze(args))
-    if args.command == "evaluate":
-        raise SystemExit(cmd_evaluate(args))
     if args.command == "doctor":
         raise SystemExit(cmd_doctor(args))
     parser.print_help()
