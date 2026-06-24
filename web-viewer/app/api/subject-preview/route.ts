@@ -173,8 +173,8 @@ export async function POST(request: Request) {
     );
     // SAM3 is a promptable text-conditioned detector, so a user-provided
     // description ("the patient", "the guy with the blue shirt", ...) is the
-    // most reliable way to disambiguate. We default to "the patient" — the
-    // primary FoG use case — but forward whatever the UI sends through.
+    // most reliable way to disambiguate. We default to "the patient" but
+    // forward whatever the UI sends through.
     const sam3TextPrompts = normalizePromptList(formData.get("sam3TextPrompts"), "the patient");
 
     const stagedUpload =

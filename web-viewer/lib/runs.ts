@@ -184,9 +184,9 @@ async function readRunManifest(runId: string): Promise<JsonRecord | null> {
   return readJsonIfExists<JsonRecord>(path.join(runDir(runId), RUN_MANIFEST_FILE));
 }
 
-// Auto-compute FoG/kinematics analysis for a run that has pose joints but no
+// Auto-compute the kinematics analysis for a run that has pose joints but no
 // analysis yet (e.g. a run created outside the web job flow, or one whose analyze
-// step never ran) so the viewer never shows an all-zero FoG track. Idempotent and
+// step never ran) so the viewer always has signals to plot. Idempotent and
 // lock-guarded; a no-op once an analysis exists. Returns true if analysis is present
 // afterwards.
 export async function ensureRunAnalysis(runIdRaw: string): Promise<boolean> {
@@ -218,7 +218,7 @@ export async function ensureRunAnalysis(runIdRaw: string): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       const child = spawn(
         "uv",
-        ["run", "sam3d", "analyze", "--run-id", runId, "--preset", "clinical_fog_v1"],
+        ["run", "sam3d", "analyze", "--run-id", runId, "--preset", "kinematics_v1"],
         {
           cwd: projectRoot(),
           env: {
@@ -810,7 +810,7 @@ function runIdFromBaseDir(baseDir: string): string {
   return path.basename(baseDir);
 }
 
-// Assemble the full RunDetail for the viewer: frames, stabilization, derived signals, FoG summary, videos, datasets.
+// Assemble the full RunDetail for the viewer: frames, stabilization, derived signals, and videos.
 export async function getRunDetail(runIdRaw: string, analysisId?: string | null): Promise<RunDetail> {
   const runId = ensureSafeId(runIdRaw);
   const manifest = await readRunManifest(runId);

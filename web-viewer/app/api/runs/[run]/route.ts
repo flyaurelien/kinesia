@@ -14,8 +14,9 @@ export async function GET(
     const run = decodeURIComponent(params.run);
     const url = new URL(request.url);
     const analysisId = url.searchParams.get("analysisId");
-    // Auto-compute FoG/kinematics if a finished run has none (old/CLI runs, or a run
-    // whose analyze step never completed). Skip while a job is still generating it.
+    // Auto-compute the kinematics analysis if a finished run has none (old/CLI
+    // runs, or a run whose analyze step never completed). Skip while a job is
+    // still generating it.
     if (!analysisId) {
       const busy = listJobs().some(
         (job) => job.runId === run && (job.status === "queued" || job.status === "running"),

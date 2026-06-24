@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Kinesia",
-  description: "Freezing-of-gait detection and 3D gait analysis viewer",
+  description: "Markerless 3D body reconstruction and gait kinematics viewer",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

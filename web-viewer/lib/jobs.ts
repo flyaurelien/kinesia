@@ -522,7 +522,7 @@ async function writeInitialRunFiles(job: GenerationJob, processingStatus: "queue
       created_at: createdAt,
       updated_at: createdAt,
       source_video: job.inputVideoPath,
-      config_profile: "clinical_fog_workstation_v1",
+      config_profile: "kinesia_workstation_v1",
       inference_target: job.inferenceTarget,
       subject_count: 1,
       frame_count: 0,
@@ -537,7 +537,7 @@ async function writeInitialRunFiles(job: GenerationJob, processingStatus: "queue
         preview_video: null,
         logs: "logs",
       },
-      analysis_profiles: { default: "clinical_fog_v1" },
+      analysis_profiles: { default: "kinematics_v1" },
       analyses: [],
       latest_analysis_id: null,
       processing_status: processingStatus,
@@ -749,7 +749,7 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
       "--run-id",
       job.runId,
       "--preset",
-      "clinical_fog_v1",
+      "kinematics_v1",
     ]);
     if (isCanceled(job)) {
       return;

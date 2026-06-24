@@ -587,15 +587,6 @@ button:disabled {
   font-size: 12px;
 }
 
-.live-pill,
-.fog-detected-badge,
-.fog-clear-badge {
-  border-radius: 999px;
-  padding: 3px 9px;
-  border: 1px solid var(--line-strong);
-  font-size: 12px;
-}
-
 .live-pill {
   color: #fde68a;
   border-color: rgba(251, 191, 36, 0.38);
@@ -1014,44 +1005,6 @@ button:disabled {
   display: inline-block;
   min-width: 7ch;
   text-align: left;
-}
-
-.viewer-fog-mini {
-  width: 150px;
-  height: 46px;
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.viewer-fog-mini-bg {
-  fill: rgba(5, 9, 21, 0.82);
-}
-
-.viewer-fog-mini-threshold {
-  stroke: rgba(251, 146, 60, 0.62);
-  stroke-width: 1.2;
-  stroke-dasharray: 5 5;
-}
-
-.viewer-fog-mini-path {
-  fill: none;
-  stroke: #67e8f9;
-  stroke-width: 2.3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  filter: drop-shadow(0 0 4px rgba(103, 232, 249, 0.5));
-}
-
-.fog-detected-badge {
-  color: #fed7aa;
-  border-color: rgba(251, 146, 60, 0.38);
-  background: rgba(251, 146, 60, 0.12);
-}
-
-.fog-clear-badge {
-  color: #99f6e4;
-  border-color: rgba(45, 212, 191, 0.34);
-  background: rgba(20, 184, 166, 0.12);
 }
 
 .viewer-video-card {
@@ -1552,8 +1505,8 @@ button:disabled {
   flex: 1 1 0;
   min-height: 104px;
   /* No horizontal padding/border: the uPlot canvas left edge == panel content
-     left, so its data area [56, W-18] aligns pixel-for-pixel with the FoG-prob
-     plot and the annotation / ground-truth tracks. */
+     left, so its data area [56, W-18] aligns pixel-for-pixel with the timeline
+     navigator. */
   padding: 2px 0 0;
   overflow: hidden;
 }
@@ -1758,38 +1711,6 @@ button:disabled {
 }
 .plot-export-download:disabled {
   opacity: 0.5;
-}
-
-.gold-truth-empty {
-  color: #6b7689;
-  font-style: italic;
-  font-size: 12px;
-}
-
-/* Raw / Smoothed probability source toggle in the FoG-probability footer. */
-.fog-score-toggle {
-  display: inline-flex;
-  border: 1px solid var(--line-strong);
-  border-radius: 5px;
-  overflow: hidden;
-}
-.fog-score-toggle button {
-  border: none;
-  background: #0d1424;
-  color: #8190ac;
-  padding: 3px 9px;
-  font-size: 11px;
-  font-weight: 800;
-}
-.fog-score-toggle button + button {
-  border-left: 1px solid var(--line-strong);
-}
-.fog-score-toggle button.active {
-  color: #021018;
-  background: var(--cyan);
-}
-.fog-score-toggle button:disabled {
-  opacity: 0.4;
 }
 
 .signal-picker-actions {
@@ -2015,332 +1936,9 @@ button:disabled {
   border: 1px solid var(--line-strong);
 }
 
-.fog-probability {
-  position: relative;
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid rgba(34, 211, 238, 0.18);
-  border-radius: 6px;
-  background:
-    radial-gradient(circle at 14% 0%, rgba(34, 211, 238, 0.14), transparent 34%),
-    linear-gradient(180deg, rgba(8, 13, 26, 0.98), rgba(5, 9, 21, 0.98));
-}
-
 /* % readout + gear settings icon (right of the header). */
-.fog-readout {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-.fog-gear {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  background: #0d1424;
-  color: #aab6cc;
-  padding: 0;
-}
-.fog-gear:hover {
-  color: #e2e8f0;
-  border-color: #49617f;
-}
-.fog-gear.active {
-  color: #021018;
-  background: var(--cyan);
-  border-color: var(--cyan);
-}
 
 /* Settings popover opened by the gear icon. */
-.fog-settings-popover {
-  position: absolute;
-  /* The FoG card sits at the bottom of the right column, so the popover opens
-     upward (over the 3D) to avoid being clipped by the pane bottom. */
-  bottom: calc(100% - 26px);
-  right: 8px;
-  z-index: 12;
-  width: min(320px, calc(100% - 16px));
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(34, 211, 238, 0.3);
-  border-radius: 6px;
-  background: rgba(7, 11, 22, 0.98);
-  box-shadow: 0 14px 34px rgba(2, 6, 23, 0.6);
-  color: #8190ac;
-  font-size: 11px;
-  font-weight: 850;
-}
-.fog-settings-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #e5edf8;
-  font-size: 12px;
-}
-.fog-settings-close {
-  border: none;
-  background: transparent;
-  color: #8190ac;
-  font-size: 13px;
-  padding: 0 2px;
-}
-.fog-settings-close:hover {
-  color: #e2e8f0;
-}
-.fog-settings-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.fog-settings-popover label {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: 6px 8px;
-}
-.fog-settings-popover label input[type="range"] {
-  grid-column: 1 / -1;
-  width: 100%;
-  accent-color: var(--cyan);
-}
-.fog-settings-popover strong {
-  color: #e5edf8;
-  font-variant-numeric: tabular-nums;
-}
-
-.fog-probability-header,
-.fog-probability-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.fog-probability-header span {
-  color: #e5edf8;
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.fog-probability-header small {
-  display: block;
-  margin-top: 3px;
-  color: #8190ac;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.fog-probability-header strong {
-  min-width: 52px;
-  color: #f8fafc;
-  font-size: 16px;
-  font-weight: 950;
-  line-height: 1;
-  text-align: right;
-  text-shadow: 0 0 16px rgba(34, 211, 238, 0.38);
-}
-
-.fog-probability-footer {
-  color: #8190ac;
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.fog-threshold-control {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-left: auto;
-}
-
-.fog-threshold-control input[type="range"] {
-  width: min(210px, 22vw);
-  accent-color: var(--cyan);
-}
-
-.fog-threshold-control input[type="number"] {
-  width: 48px;
-  border: 1px solid var(--line-strong);
-  border-radius: 5px;
-  background: #070b16;
-  color: #e5edf8;
-  padding: 3px 5px;
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.fog-settings-toggle {
-  border: 1px solid rgba(34, 211, 238, 0.3);
-  border-radius: 6px;
-  background: rgba(8, 145, 178, 0.12);
-  color: #a5f3fc;
-  padding: 5px 9px;
-  font-size: 11px;
-  font-weight: 900;
-}
-
-.fog-probability-bar-wrap {
-  width: 100%;
-  height: 46px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 6px;
-  background: #050915;
-  overflow: hidden;
-}
-
-.fog-probability-bar {
-  display: block;
-  width: 100%;
-  height: 100%;
-  cursor: pointer;
-  background: transparent;
-}
-
-.fog-score-grid {
-  stroke: rgba(148, 163, 184, 0.14);
-  stroke-width: 1;
-  shape-rendering: crispEdges;
-}
-
-.fog-threshold-line {
-  stroke: rgba(251, 146, 60, 0.78);
-  stroke-width: 1.25;
-  stroke-dasharray: 6 5;
-}
-
-.fog-threshold-label {
-  fill: rgba(251, 146, 60, 0.85);
-  font-size: 8px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  font-feature-settings: "tnum" 1;
-}
-
-.fog-score-area {
-  fill: rgba(34, 211, 238, 0.14);
-}
-
-.fog-score-curve {
-  fill: none;
-  stroke: #67e8f9;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.fog-evidence-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.fog-evidence-chips span {
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.72);
-  color: #8fa0bd;
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.fog-evidence-chips strong {
-  color: #e5edf8;
-}
-
-.fog-cleanup-row {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(160px, 1fr)) auto;
-  align-items: center;
-  gap: 8px;
-  color: #8190ac;
-  font-size: 11px;
-  font-weight: 850;
-  border-top: 1px solid rgba(148, 163, 184, 0.12);
-  padding-top: 8px;
-}
-
-.fog-cleanup-row label {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-}
-
-.fog-cleanup-row input[type="range"] {
-  width: 100%;
-  accent-color: var(--cyan);
-}
-
-.fog-cleanup-row select {
-  width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: 5px;
-  background: #070b16;
-  color: #e5edf8;
-  padding: 5px 7px;
-  font-size: 11px;
-  font-weight: 850;
-}
-
-.fog-cleanup-row strong {
-  color: #e5edf8;
-  font-variant-numeric: tabular-nums;
-}
-
-.fog-density-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #8190ac;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-}
-
-.fog-density-meta strong {
-  color: #e5edf8;
-}
-
-.fog-density-bar {
-  width: 100%;
-  height: 24px;
-  cursor: pointer;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: #050915;
-  overflow: hidden;
-}
-
-.fog-density-bg {
-  fill: #050915;
-}
-
-.fog-density-cursor {
-  stroke: #f8fafc;
-  stroke-width: 1.6;
-  vector-effect: non-scaling-stroke;
-  filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.7));
-}
-
-.manual-fog-bar line,
-.manual-fog-bar rect,
-.gold-truth-bar line,
-.gold-truth-bar rect {
-  vector-effect: non-scaling-stroke;
-}
-
-.manual-fog {
-  display: grid;
-  gap: 6px;
-}
 
 .annotation-track-title {
   display: grid;
@@ -2398,62 +1996,12 @@ button:disabled {
   background: transparent;
 }
 
-.manual-fog-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.manual-fog-actions button {
-  border: 1px solid var(--line-strong);
-  border-radius: 5px;
-  background: #0d1424;
-  color: #cbd5e1;
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.manual-fog-actions button:disabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-}
-
-.manual-fog-actions .manual-fog-reset {
-  border-color: rgba(56, 189, 248, 0.55);
-  background: rgba(8, 145, 178, 0.22);
-  color: #bae6fd;
-  font-weight: 850;
-}
-
-.manual-fog-actions .manual-fog-reset:not(:disabled):hover {
-  border-color: rgba(103, 232, 249, 0.85);
-  background: rgba(8, 145, 178, 0.30);
-}
-
-.manual-fog-actions .manual-fog-export {
-  border-color: rgba(34, 197, 94, 0.45);
-  background: rgba(34, 197, 94, 0.14);
-  color: #bbf7d0;
-  font-weight: 850;
-}
-
-.manual-fog-actions .manual-fog-export:not(:disabled):hover {
-  border-color: rgba(74, 222, 128, 0.78);
-  background: rgba(34, 197, 94, 0.22);
-}
-
 /* Single Export control + its format menu (replaces the 3 download buttons). */
 .export-menu-wrap {
   position: relative;
   display: inline-flex;
 }
-.manual-fog-actions .export-btn.active {
-  border-color: rgba(74, 222, 128, 0.78);
-  background: rgba(34, 197, 94, 0.22);
-  color: #dcfce7;
-}
+
 .export-menu {
   position: absolute;
   top: calc(100% + 6px);
@@ -2468,22 +2016,6 @@ button:disabled {
   border-radius: 6px;
   background: rgba(7, 11, 22, 0.98);
   box-shadow: 0 14px 34px rgba(2, 6, 23, 0.6);
-}
-.manual-fog-actions .export-menu-item {
-  width: 100%;
-  text-align: left;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  background: transparent;
-  color: #cbd5e1;
-  padding: 7px 10px;
-  font-size: 11px;
-  font-weight: 800;
-}
-.manual-fog-actions .export-menu-item:not(:disabled):hover {
-  border-color: rgba(74, 222, 128, 0.5);
-  background: rgba(34, 197, 94, 0.16);
-  color: #dcfce7;
 }
 
 /* Structured export panel: per-channel format pickers + one download button. */
@@ -2586,46 +2118,6 @@ button:disabled {
 }
 
 /* Icon-only edit actions + compact export buttons. */
-.manual-fog-actions .icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  min-width: 30px;
-  padding: 0 7px;
-  color: #aab6cc;
-}
-.manual-fog-actions .icon-btn:not(:disabled):hover {
-  color: #e2e8f0;
-  border-color: #49617f;
-}
-.manual-fog-actions .export-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 28px;
-  padding: 0 9px;
-  border: 1px solid rgba(34, 197, 94, 0.45);
-  border-radius: 5px;
-  background: rgba(34, 197, 94, 0.14);
-  color: #bbf7d0;
-  font-size: 11px;
-  font-weight: 850;
-}
-.manual-fog-actions .export-btn:disabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-}
-.manual-fog-actions .export-btn:not(:disabled):hover {
-  border-color: rgba(74, 222, 128, 0.78);
-  background: rgba(34, 197, 94, 0.22);
-}
-.manual-fog-sep {
-  width: 1px;
-  height: 20px;
-  background: var(--line-strong);
-  margin: 0 3px;
-}
 
 /* Shared horizontal navigator/scrollbar for the labelling tracks. Its SVG insets
    the track to x=56 internally, so it aligns with the annotation/ground-truth/
@@ -2662,187 +2154,6 @@ button:disabled {
   stroke: #f8fafc;
   stroke-width: 1.5;
   opacity: 0.85;
-}
-
-.manual-fog-bar {
-  display: block;
-  /* Inset to match the kinematic plot's data area: [panel-left+56, panel-right-18] */
-  width: calc(100% - 74px);
-  margin-left: 56px;
-  margin-right: 18px;
-  height: 46px;
-  cursor: crosshair;
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  border-radius: 5px;
-  background: #050915;
-  overflow: hidden;
-}
-
-.manual-fog-bg {
-  fill: #07101d;
-}
-
-.manual-fog-band {
-  stroke: none;
-  pointer-events: none;
-  shape-rendering: geometricPrecision;
-}
-
-.manual-fog-band.band-predicted {
-  fill: rgba(56, 189, 248, 0.74);
-}
-
-.manual-fog-band.band-manual {
-  fill: rgba(34, 197, 94, 0.74);
-}
-
-.manual-fog-hit {
-  fill: transparent;
-  cursor: grab;
-}
-
-.manual-fog-selection {
-  fill: none;
-  stroke: #fef2f2;
-  stroke-width: 1.4;
-  vector-effect: non-scaling-stroke;
-  pointer-events: none;
-}
-
-.manual-fog-tombstone {
-  stroke: rgba(56, 189, 248, 0.75);
-  stroke-width: 1.4;
-  stroke-dasharray: 4 3;
-  stroke-linecap: round;
-  vector-effect: non-scaling-stroke;
-  pointer-events: none;
-}
-
-.manual-fog-handle {
-  stroke-width: 0.8;
-  cursor: ew-resize;
-}
-
-.manual-fog-handle.band-predicted {
-  fill: rgba(224, 242, 254, 0.85);
-  stroke: rgba(14, 116, 144, 0.9);
-}
-
-.manual-fog-handle.band-manual {
-  fill: rgba(220, 252, 231, 0.85);
-  stroke: rgba(21, 128, 61, 0.85);
-}
-
-.manual-fog-handle.selected {
-  fill: #fef2f2;
-  stroke: #e5edf8;
-  stroke-width: 1.1;
-}
-
-.manual-fog-draft {
-  fill: rgba(34, 197, 94, 0.42);
-  stroke: #bbf7d0;
-  stroke-width: 1.1;
-  stroke-dasharray: 5 4;
-}
-
-
-.gold-truth {
-  display: grid;
-  gap: 6px;
-  margin-top: -2px;
-}
-
-.gold-truth-meta {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 12px;
-  color: #9aa9c2;
-}
-
-.gold-truth-title {
-  display: flex;
-  align-items: baseline;
-  gap: 9px;
-}
-
-.gold-truth-title span {
-  color: #e5edf8;
-  font-size: 12px;
-  font-weight: 900;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.gold-truth-title small,
-.gold-truth-metrics {
-  color: #8090ad;
-  font-size: 10px;
-  font-weight: 800;
-}
-
-.gold-truth-metrics {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  white-space: nowrap;
-}
-
-.gold-truth-metrics strong {
-  color: #fef3c7;
-  font-size: 11px;
-  font-weight: 950;
-}
-
-.gold-truth-import {
-  flex: 0 0 auto;
-  padding: 4px 10px;
-  border-radius: 5px;
-  border: 1px solid rgba(250, 204, 21, 0.4);
-  background: rgba(250, 204, 21, 0.1);
-  color: #fde68a;
-  font-size: 11px;
-  font-weight: 800;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.gold-truth-import:hover {
-  background: rgba(250, 204, 21, 0.2);
-  color: #fef3c7;
-}
-
-.gold-truth-bar {
-  display: block;
-  /* Match the kinematic plot data area: [panel-left+56, panel-right-18] */
-  width: calc(100% - 74px);
-  margin-left: 56px;
-  margin-right: 18px;
-  height: 34px;
-  cursor: pointer;
-  border: 1px solid rgba(250, 204, 21, 0.28);
-  border-radius: 7px;
-  background: #080b13;
-  overflow: hidden;
-}
-
-.gold-truth-bg {
-  fill: #080b13;
-}
-
-.gold-truth-segment {
-  fill: rgba(250, 204, 21, 0.82);
-  stroke: rgba(254, 240, 138, 0.86);
-  stroke-width: 0.9;
-  cursor: pointer;
-}
-
-.gold-truth-cursor {
-  stroke: #f8fafc;
-  stroke-width: 1.8;
-  filter: drop-shadow(0 0 4px rgba(250, 204, 21, 0.75));
 }
 
 .kinematic-plot-wrapper {
@@ -2904,19 +2215,6 @@ button:disabled {
 
 .plot-line {
   fill: none;
-}
-
-.plot-fog-segment {
-  pointer-events: none;
-  stroke: none;
-}
-
-.plot-fog-segment.plot-fog-band-predicted {
-  fill: rgba(56, 189, 248, 0.11);
-}
-
-.plot-fog-segment.plot-fog-band-manual {
-  fill: rgba(34, 197, 94, 0.13);
 }
 
 .plot-cursor {
@@ -3082,20 +2380,11 @@ button:disabled {
     max-height: min(240px, 32vh);
   }
 
-  .fog-cleanup-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  
 
-  .gold-truth-meta {
-    align-items: flex-start;
-    flex-direction: column;
-  }
+  
 
-  .gold-truth-metrics {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-    white-space: normal;
-  }
+  
 }
 
 @media (max-width: 720px) {
@@ -3190,10 +2479,7 @@ button:disabled {
     letter-spacing: 0.06em;
   }
 
-  .viewer-fog-mini {
-    width: 92px;
-    height: 34px;
-  }
+  
 
   .viewer-video-card {
     left: 9px;
@@ -3299,22 +2585,13 @@ button:disabled {
     justify-content: center;
   }
 
-  .signal-picker-head,
-  .fog-probability-header,
-  .fog-probability-footer,
-  .fog-density-meta {
-    align-items: stretch;
-    flex-direction: column;
-  }
+  
 
   .signal-picker-head div {
     flex-wrap: wrap;
   }
 
-  .signal-picker-head button,
-  .fog-settings-toggle {
-    width: 100%;
-  }
+  
 
   .selected-signal-strip {
     flex-wrap: nowrap;
@@ -3352,46 +2629,23 @@ button:disabled {
     white-space: nowrap;
   }
 
-  .fog-probability {
-    border-radius: 8px;
-    padding: 9px;
-  }
+  
 
-  .fog-probability-header strong {
-    min-width: 0;
-    font-size: 26px;
-    text-align: left;
-  }
+  
 
-  .fog-probability-bar-wrap {
-    height: 96px;
-  }
+  
 
-  .fog-cleanup-row {
-    grid-template-columns: 1fr;
-  }
+  
 
-  .manual-fog-actions {
-    width: 100%;
-  }
+  
 
-  .manual-fog-actions button {
-    flex: 1 1 120px;
-  }
+  
 
-  .manual-fog-bar {
-    height: 52px;
-  }
+  
 
-  .gold-truth-title {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 3px;
-  }
+  
 
-  .gold-truth-metrics {
-    gap: 7px;
-  }
+  
 
   .kinematic-plot-wrapper {
     height: 256px;
@@ -3433,9 +2687,7 @@ button:disabled {
     right: auto;
   }
 
-  .viewer-fog-mini {
-    display: none;
-  }
+  
 
   .viewer-video-card {
     top: 47px;
@@ -3446,18 +2698,11 @@ button:disabled {
     max-height: 20vh;
   }
 
-  .fog-probability-header span {
-    font-size: 13px;
-  }
+  
 
-  .manual-fog-actions button {
-    flex-basis: 100%;
-  }
+  
 
-  .gold-truth-metrics {
-    display: grid;
-    grid-template-columns: 1fr;
-  }
+  
 
   .error-toast {
     right: 10px;

@@ -329,7 +329,7 @@ export function RunStep() {
 
               {selectedJob?.error ? <div className="of-banner">{selectedJob.error}</div> : null}
 
-              {/* Full live 3D viewer + kinematics/FoG plots for this run. */}
+              {/* Full live 3D viewer + kinematics plots for this run. */}
               <div className="of-embedded-viewer">
                 <EmbeddedViewer key={activeRunId} embeddedRunId={activeRunId} />
               </div>
@@ -345,7 +345,7 @@ export function RunStep() {
         </button>
         <span className="of-action-hint">
           {isComplete
-            ? "Processing complete. Review the 3D and FoG plots above, or open the full browser."
+            ? "Processing complete. Review the 3D and kinematics plots above, or open the full browser."
             : selectedJob
               ? "Processing in background — the 3D and plots update live as frames arrive."
               : "Multi-job runs are supported. Each job appears in the left rail."}

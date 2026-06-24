@@ -1486,118 +1486,6 @@
   gap: 14px;
 }
 
-.kinesia-process .of-fog-bar-wrap {
-  background: var(--of-surface-1);
-  border: 1px solid var(--of-line);
-  border-radius: var(--of-radius-lg);
-  padding: 16px;
-}
-
-.kinesia-process .of-fog-bar-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.kinesia-process .of-fog-bar-title {
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.kinesia-process .of-fog-bar-row {
-  position: relative;
-  height: 56px;
-  background: var(--of-surface-3);
-  border-radius: var(--of-radius-md);
-  overflow: hidden;
-  border: 1px solid var(--of-line);
-  cursor: pointer;
-}
-
-.kinesia-process .of-fog-prob-bar {
-  position: absolute;
-  bottom: 0;
-  width: 0.18%;
-  background: linear-gradient(180deg, rgba(56, 189, 248, 0.55), rgba(56, 189, 248, 0.18));
-  border-radius: 1px;
-  pointer-events: none;
-}
-
-.kinesia-process .of-fog-threshold {
-  position: absolute;
-  left: 0;
-  right: 0;
-  border-top: 1.5px dashed rgba(245, 158, 11, 0.7);
-  pointer-events: none;
-}
-
-.kinesia-process .of-fog-seg {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  pointer-events: auto;
-  cursor: pointer;
-  transition: filter var(--of-dur-fast) var(--of-ease);
-}
-
-.kinesia-process .of-fog-seg:hover {
-  filter: brightness(1.15);
-}
-
-.kinesia-process .of-fog-seg.is-validated {
-  background: rgba(52, 211, 153, 0.22);
-  border-left: 2px solid var(--of-positive);
-  border-right: 2px solid var(--of-positive);
-}
-.kinesia-process .of-fog-seg.is-corrected {
-  background: repeating-linear-gradient(
-    45deg,
-    rgba(245, 158, 11, 0.22) 0,
-    rgba(245, 158, 11, 0.22) 6px,
-    rgba(245, 158, 11, 0.08) 6px,
-    rgba(245, 158, 11, 0.08) 12px
-  );
-  border-left: 2px solid var(--of-warn);
-  border-right: 2px solid var(--of-warn);
-}
-.kinesia-process .of-fog-seg.is-manual {
-  background: repeating-linear-gradient(
-    -45deg,
-    rgba(167, 139, 250, 0.24) 0,
-    rgba(167, 139, 250, 0.24) 6px,
-    rgba(167, 139, 250, 0.08) 6px,
-    rgba(167, 139, 250, 0.08) 12px
-  );
-  border-left: 2px solid var(--of-manual);
-  border-right: 2px solid var(--of-manual);
-}
-.kinesia-process .of-fog-seg.is-deleted {
-  background: repeating-linear-gradient(
-    0deg,
-    rgba(248, 113, 113, 0.12) 0,
-    rgba(248, 113, 113, 0.12) 3px,
-    rgba(0, 0, 0, 0) 3px,
-    rgba(0, 0, 0, 0) 8px
-  );
-  border-left: 2px solid var(--of-danger);
-  border-right: 2px solid var(--of-danger);
-}
-.kinesia-process .of-fog-seg.is-selected {
-  outline: 2px solid var(--of-accent-hi);
-  outline-offset: -2px;
-}
-
-.kinesia-process .of-fog-playhead {
-  position: absolute;
-  top: -6px;
-  bottom: -6px;
-  width: 2px;
-  background: var(--of-text);
-  pointer-events: none;
-  z-index: 4;
-}
-
 .kinesia-process .of-legend {
   display: flex;
   flex-wrap: wrap;
@@ -1639,7 +1527,6 @@
   border: 1.5px solid #facc15;
 }
 
-/* Gold-truth band shown below the main FoG bar for benchmark runs */
 .kinesia-process .of-gold-band {
   margin-top: 8px;
   display: flex;
