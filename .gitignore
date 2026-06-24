@@ -1,0 +1,73 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+
+# Node / Next.js
+web-viewer/node_modules/
+web-viewer/.next/
+web-viewer/tsconfig.tsbuildinfo
+
+# Local data and heavy model files
+A public dataset of video, acceleration, angular velocity, and clinical scales in individuals with Parkinson's disease during the turning-in-place task/
+input/*
+!input/.gitkeep
+input_originals/
+output/*
+!output/.gitkeep
+public-runs/*
+!public-runs/.gitkeep
+models/*
+!models/.gitkeep
+
+# Vendored upstream demo media. The upstream *code* is kept under vendor/ so the
+# pipeline runs straight after clone; only the heavy sample images, videos, and
+# demo notebooks are excluded from the repository.
+vendor/sam3-main/assets/
+vendor/sam-3d-body-main/assets/
+vendor/sam-3d-body-main/notebook/
+
+# Local-only developer scripts and internal notes (kept on disk, not published).
+# Dataset-specific batch/benchmark helpers and internal context docs that are not
+# part of the public install/run workflow.
+/scripts_*.sh
+/scripts_*.py
+/PROJECT.md
+/CHANGELOG.md
+/report/
+docs/*.pdf
+docs/*.pptx
+docs/figures/
+# Local figure/screenshot capture scripts
+_cap*.mjs
+web-viewer/_cap*.mjs
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# macOS Finder / iCloud duplicate artifacts (e.g. "viewer-three 2.tsx")
+* 2.*
+
+# MLX SAM 3 port (vendor/mlx_sam3): keep the runtime package (sam3/) + the BPE
+# tokenizer asset + README; exclude the upstream demo media and packaging noise.
+vendor/mlx_sam3/examples/
+vendor/mlx_sam3/assets/images/
+vendor/mlx_sam3/app/
+vendor/mlx_sam3/main.py
+vendor/mlx_sam3/uv.lock
+vendor/mlx_sam3/pyproject.toml
+
+# Kinesia local
+/tracking_box.mp4

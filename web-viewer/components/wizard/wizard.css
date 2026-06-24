@@ -1,0 +1,1834 @@
+/* Kinesia processing wizard. Scoped under .kinesia-process so existing
+   viewer styles in globals.css remain untouched. */
+
+.kinesia-process {
+  /* Layered tokens — refined for clinical dark UI. */
+  --of-bg: #080c15;
+  --of-surface-1: #10151f;
+  --of-surface-2: #161d2c;
+  --of-surface-3: #1f2839;
+  --of-surface-4: #2a334a;
+  --of-line: #232c40;
+  --of-line-strong: #3a4665;
+  --of-text: #eaf0fa;
+  --of-text-dim: #aab5cf;
+  --of-text-mute: #6c7791;
+  --of-accent: #38bdf8;
+  --of-accent-hi: #7dd3fc;
+  --of-accent-deep: #0284c7;
+  --of-positive: #34d399;
+  --of-warn: #f59e0b;
+  --of-danger: #f87171;
+  --of-danger-deep: #dc2626;
+  --of-manual: #c4b5fd;
+  --of-of-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+
+  --of-radius-sm: 3px;
+  --of-radius-md: 6px;
+  --of-radius-lg: 9px;
+  --of-radius-pill: 999px;
+
+  --of-ease: cubic-bezier(0.22, 0.65, 0.32, 1);
+  --of-dur-fast: 120ms;
+  --of-dur-base: 200ms;
+
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 0%, rgba(56, 189, 248, 0.06), transparent 70%),
+    linear-gradient(180deg, #060911 0%, #04060c 100%);
+  color: var(--of-text);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ===========================================================
+   Top bar + stepper
+   =========================================================== */
+
+.kinesia-process .of-topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--of-line);
+  background: rgba(8, 12, 21, 0.78);
+  backdrop-filter: blur(14px);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.kinesia-process .of-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  font-size: 15px;
+}
+
+.kinesia-process .of-brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--of-accent-deep), var(--of-accent-hi));
+  color: #022;
+  font-weight: 900;
+  font-size: 13px;
+  letter-spacing: -0.07em;
+}
+
+.kinesia-process .of-topbar-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.kinesia-process .of-stepper {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  max-width: 760px;
+}
+
+.kinesia-process .of-step {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--of-radius-md);
+  font-size: 13px;
+  color: var(--of-text-mute);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background var(--of-dur-fast) var(--of-ease), color var(--of-dur-fast) var(--of-ease);
+  text-align: left;
+  min-width: 0;
+}
+
+.kinesia-process .of-step:hover:not(:disabled) {
+  color: var(--of-text-dim);
+  background: var(--of-surface-1);
+}
+
+.kinesia-process .of-step:disabled {
+  cursor: not-allowed;
+}
+
+.kinesia-process .of-step.is-current {
+  background: var(--of-surface-2);
+  border-color: var(--of-line-strong);
+  color: var(--of-text);
+}
+
+.kinesia-process .of-step.is-done {
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-step-index {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1.5px solid var(--of-line-strong);
+  background: var(--of-surface-1);
+  color: var(--of-text-mute);
+  flex-shrink: 0;
+}
+
+.kinesia-process .of-step.is-current .of-step-index {
+  background: var(--of-accent);
+  border-color: var(--of-accent);
+  color: #022;
+}
+
+.kinesia-process .of-step.is-done .of-step-index {
+  background: var(--of-positive);
+  border-color: var(--of-positive);
+  color: #022;
+}
+
+.kinesia-process .of-step-label {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===========================================================
+   Main + panels
+   =========================================================== */
+
+.kinesia-process .of-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 28px 96px;
+  max-width: 1320px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.kinesia-process .of-step-header {
+  margin-bottom: 20px;
+}
+
+.kinesia-process .of-step-title {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 4px;
+}
+
+.kinesia-process .of-step-subtitle {
+  margin: 0;
+  color: var(--of-text-dim);
+  font-size: 14px;
+}
+
+.kinesia-process .of-panel {
+  background: var(--of-surface-1);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-lg);
+  padding: 20px;
+}
+
+.kinesia-process .of-panel + .of-panel {
+  margin-top: 16px;
+}
+
+/* ===========================================================
+   Buttons
+   =========================================================== */
+
+.kinesia-process .of-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--of-radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--of-line-strong);
+  background: var(--of-surface-2);
+  color: var(--of-text);
+  cursor: pointer;
+  transition: background var(--of-dur-fast) var(--of-ease), border-color var(--of-dur-fast) var(--of-ease), transform var(--of-dur-fast) var(--of-ease);
+  white-space: nowrap;
+}
+
+.kinesia-process .of-btn:hover:not(:disabled) {
+  background: var(--of-surface-3);
+  border-color: var(--of-text-mute);
+}
+
+.kinesia-process .of-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.kinesia-process .of-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.kinesia-process .of-btn.is-primary {
+  background: var(--of-accent);
+  border-color: var(--of-accent);
+  color: #022;
+}
+
+.kinesia-process .of-btn.is-primary:hover:not(:disabled) {
+  background: var(--of-accent-hi);
+  border-color: var(--of-accent-hi);
+}
+
+.kinesia-process .of-btn.is-ghost {
+  background: transparent;
+  border-color: var(--of-line);
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-btn.is-ghost:hover:not(:disabled) {
+  color: var(--of-text);
+  border-color: var(--of-line-strong);
+  background: var(--of-surface-1);
+}
+
+.kinesia-process .of-btn.is-danger {
+  background: transparent;
+  border-color: rgba(248, 113, 113, 0.4);
+  color: var(--of-danger);
+}
+
+.kinesia-process .of-btn.is-danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.1);
+  border-color: var(--of-danger);
+}
+
+.kinesia-process .of-btn.is-sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.kinesia-process .of-btn.is-icon {
+  width: 36px;
+  padding: 0;
+  justify-content: center;
+}
+
+.kinesia-process .of-btn.is-sm.is-icon {
+  width: 28px;
+}
+
+/* ===========================================================
+   Upload step
+   =========================================================== */
+
+.kinesia-process .of-upload-drop {
+  border: 2px dashed var(--of-line-strong);
+  border-radius: var(--of-radius-lg);
+  padding: 56px 24px;
+  text-align: center;
+  background: var(--of-surface-1);
+  transition: border-color var(--of-dur-base) var(--of-ease), background var(--of-dur-base) var(--of-ease);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.kinesia-process .of-upload-drop.is-hover {
+  border-color: var(--of-accent);
+  background: rgba(56, 189, 248, 0.06);
+}
+
+.kinesia-process .of-upload-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  background: var(--of-surface-3);
+  color: var(--of-accent-hi);
+}
+
+.kinesia-process .of-upload-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.kinesia-process .of-upload-hint {
+  color: var(--of-text-mute);
+  font-size: 13px;
+  margin: 0;
+}
+
+.kinesia-process .of-upload-formats {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.kinesia-process .of-format-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: var(--of-radius-pill);
+  background: var(--of-surface-3);
+  color: var(--of-text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Footer / action bar fixed at bottom of step */
+
+.kinesia-process .of-action-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(8, 12, 21, 0.92);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--of-line);
+  padding: 14px 28px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  z-index: 5;
+}
+
+.kinesia-process .of-action-bar .of-action-hint {
+  color: var(--of-text-mute);
+  font-size: 12px;
+}
+
+.kinesia-process .of-action-bar-spacer {
+  flex: 1;
+}
+
+/* Keyboard shortcut chip */
+
+.kinesia-process .of-kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--of-surface-3);
+  color: var(--of-text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid var(--of-line-strong);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+/* Placeholder step */
+
+.kinesia-process .of-placeholder {
+  border-radius: var(--of-radius-lg);
+  border: 1px dashed var(--of-line-strong);
+  padding: 64px 24px;
+  text-align: center;
+  background: var(--of-surface-1);
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-placeholder strong {
+  display: block;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--of-text);
+  margin-bottom: 8px;
+}
+
+/* Error banner */
+
+.kinesia-process .of-banner {
+  padding: 12px 16px;
+  border-radius: var(--of-radius-md);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.08);
+  color: #fecaca;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+/* ===========================================================
+   App shell — sidebar + main
+   =========================================================== */
+
+.kinesia-process .of-app {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+@media (max-width: 920px) {
+  .kinesia-process .of-app {
+    grid-template-columns: 1fr;
+  }
+}
+
+.kinesia-process .of-app-sidebar {
+  background: rgba(8, 12, 21, 0.7);
+  border-right: 1px solid var(--of-line);
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.kinesia-process .of-app-sidebar-head {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kinesia-process .of-app-sidebar h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--of-text-mute);
+  padding: 4px 6px;
+}
+
+.kinesia-process .of-new-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: linear-gradient(135deg, var(--of-accent-deep), var(--of-accent-hi));
+  color: #022;
+  border: none;
+  border-radius: var(--of-radius-md);
+  font-weight: 700;
+  font-size: 14px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: transform var(--of-dur-fast) var(--of-ease), filter var(--of-dur-fast) var(--of-ease);
+}
+.kinesia-process .of-new-btn:hover {
+  filter: brightness(1.08);
+}
+.kinesia-process .of-new-btn:active {
+  transform: translateY(1px);
+}
+
+.kinesia-process .of-runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.kinesia-process .of-run-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--of-radius-md);
+  background: transparent;
+  border: 1px solid transparent;
+  text-align: left;
+  color: var(--of-text-dim);
+  cursor: pointer;
+  transition: background var(--of-dur-fast) var(--of-ease), border-color var(--of-dur-fast) var(--of-ease);
+}
+.kinesia-process .of-run-row:hover {
+  background: var(--of-surface-1);
+}
+.kinesia-process .of-run-row.is-active {
+  background: var(--of-surface-2);
+  border-color: var(--of-line-strong);
+  color: var(--of-text);
+}
+
+.kinesia-process .of-run-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--of-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kinesia-process .of-run-row-meta {
+  font-size: 11px;
+  color: var(--of-text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.kinesia-process .of-runs-empty {
+  text-align: center;
+  padding: 20px 8px;
+  font-size: 12px;
+  color: var(--of-text-mute);
+  border: 1px dashed var(--of-line);
+  border-radius: var(--of-radius-md);
+}
+
+.kinesia-process .of-sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--of-line);
+  font-size: 11px;
+  color: var(--of-text-mute);
+}
+
+/* Empty hero in main area */
+
+.kinesia-process .of-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 80px 24px;
+  gap: 16px;
+  min-height: 60vh;
+}
+
+.kinesia-process .of-hero-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 22px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--of-accent-deep), var(--of-accent-hi));
+  color: #022;
+  font-weight: 900;
+  font-size: 36px;
+  letter-spacing: -0.05em;
+}
+
+.kinesia-process .of-hero h1 {
+  font-size: 28px;
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.kinesia-process .of-hero p {
+  margin: 0;
+  color: var(--of-text-dim);
+  font-size: 14px;
+  max-width: 540px;
+}
+
+/* Run details panel */
+
+.kinesia-process .of-run-detail-wrap {
+  padding: 24px 28px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.kinesia-process .of-run-detail-meta {
+  display: flex;
+  gap: 24px;
+  padding: 12px 14px;
+  background: var(--of-surface-2);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-md);
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-run-detail-meta strong {
+  color: var(--of-text);
+  font-weight: 700;
+}
+
+/* ===========================================================
+   Detect step — subject detection
+   =========================================================== */
+
+.kinesia-process .of-detect-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1080px) {
+  .kinesia-process .of-detect-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.kinesia-process .of-detect-stage {
+  background: var(--of-surface-1);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-lg);
+  padding: 16px;
+}
+
+.kinesia-process .of-detect-video {
+  position: relative;
+  /* Cap the preview height so the Detect step fits the viewport without
+     constant scrolling; keep 16:9 and center it. */
+  height: 40vh;
+  max-height: 360px;
+  aspect-ratio: 16 / 9;
+  max-width: 100%;
+  margin: 0 auto;
+  background: #000;
+  border-radius: var(--of-radius-md);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.kinesia-process .of-detect-video video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* Streaming detection: box overlay synced to playback (SVG matches object-fit:
+   contain via preserveAspectRatio). Only the boxes are clickable, not the whole
+   overlay, so the video stays interactive underneath. */
+.kinesia-process .of-detect-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.kinesia-process .of-detect-overlay g {
+  pointer-events: auto;
+}
+
+.kinesia-process .of-detect-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.kinesia-process .of-detect-progress-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: var(--of-radius-pill);
+  background: var(--of-surface-2);
+  border: 1px solid var(--of-line);
+  overflow: hidden;
+}
+.kinesia-process .of-detect-progress-fill {
+  height: 100%;
+  background: var(--of-accent);
+  transition: width var(--of-dur-fast) var(--of-ease);
+}
+.kinesia-process .of-detect-progress-label {
+  font-size: 12px;
+  color: var(--of-text-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kinesia-process .of-detect-transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.kinesia-process .of-detect-scrub {
+  flex: 1;
+  accent-color: var(--of-accent);
+  cursor: pointer;
+}
+
+.kinesia-process .of-track-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.kinesia-process .of-track-chips-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.kinesia-process .of-track-chips-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+.kinesia-process .of-track-chips-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--of-text-dim);
+}
+.kinesia-process .of-track-chip-unmerge {
+  margin-left: 2px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--of-text-mute);
+  cursor: pointer;
+  padding: 0 2px;
+}
+.kinesia-process .of-track-chip-unmerge:hover {
+  color: var(--of-danger);
+}
+.kinesia-process .of-track-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.kinesia-process .of-track-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1.5px solid var(--of-line-strong);
+  border-radius: var(--of-radius-md);
+  background: var(--of-surface-1);
+  color: var(--of-text);
+  cursor: pointer;
+  transition: border-color var(--of-dur-fast) var(--of-ease), background var(--of-dur-fast) var(--of-ease);
+}
+.kinesia-process .of-track-chip:hover {
+  background: var(--of-surface-2);
+}
+.kinesia-process .of-track-chip.is-selected {
+  background: var(--of-surface-2);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.kinesia-process .of-track-chip-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.kinesia-process .of-track-chip-name {
+  font-size: 13px;
+  font-weight: 700;
+}
+.kinesia-process .of-track-chip-meta {
+  font-size: 11px;
+  color: var(--of-text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.kinesia-process .of-track-chip-check {
+  font-weight: 800;
+  color: var(--of-positive);
+}
+
+.kinesia-process .of-box-overlay {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.kinesia-process .of-box-overlay.is-passive {
+  cursor: default;
+}
+
+.kinesia-process .of-box {
+  position: absolute;
+  border: 2px solid var(--of-accent-hi);
+  background: rgba(56, 189, 248, 0.08);
+  border-radius: 2px;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.kinesia-process .of-box.is-auto {
+  border-color: var(--of-positive);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.kinesia-process .of-box.is-anchor {
+  border-color: var(--of-warn);
+  background: rgba(245, 158, 11, 0.08);
+  border-style: dashed;
+}
+
+/* Multi-subject: every detected person is a clickable box on the scrub video. */
+.kinesia-process .of-box-overlay .of-box {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.kinesia-process .of-box.is-candidate {
+  border-color: rgba(226, 232, 240, 0.65);
+  background: rgba(226, 232, 240, 0.05);
+}
+.kinesia-process .of-box.is-candidate:hover {
+  border-color: var(--of-accent-hi);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.kinesia-process .of-box-tag {
+  position: absolute;
+  top: -22px;
+  left: 0;
+  background: var(--of-accent);
+  color: #022;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.kinesia-process .of-detect-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+/* Detect-step compact timeline scrubber */
+
+.kinesia-process .of-mini-tl {
+  position: relative;
+  height: 36px;
+  background: var(--of-surface-2);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-md);
+  margin-top: 10px;
+  touch-action: none;
+  user-select: none;
+}
+
+.kinesia-process .of-mini-tl-track {
+  position: absolute;
+  inset: 5px;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--of-surface-3) 0,
+    var(--of-surface-3) 1px,
+    transparent 1px,
+    transparent 40px
+  );
+  border-radius: 3px;
+}
+
+.kinesia-process .of-mini-kept {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  background: rgba(56, 189, 248, 0.18);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.kinesia-process .of-mini-removed {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(248, 113, 113, 0.16) 0,
+    rgba(248, 113, 113, 0.16) 4px,
+    rgba(248, 113, 113, 0.04) 4px,
+    rgba(248, 113, 113, 0.04) 8px
+  );
+  pointer-events: none;
+}
+
+.kinesia-process .of-mini-playhead {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  background: var(--of-text);
+  pointer-events: none;
+  z-index: 3;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.4);
+}
+
+.kinesia-process .of-mini-marker {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 16px;
+  margin-left: -8px;
+  background: var(--of-warn);
+  border-radius: 4px;
+  cursor: ew-resize;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  color: #022;
+  z-index: 4;
+  border: 1.5px solid #1a1300;
+  box-shadow: 0 2px 4px rgba(0,0,0,.45);
+}
+
+.kinesia-process .of-mini-marker:hover {
+  filter: brightness(1.12);
+}
+
+.kinesia-process .of-mini-anchor-tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 3px;
+  background: rgba(245, 158, 11, 0.7);
+  margin-left: -1.5px;
+  pointer-events: none;
+  border-radius: 2px;
+}
+
+.kinesia-process .of-detect-time {
+  font-size: 12px;
+  color: var(--of-text-mute);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+/* Prompt input */
+
+.kinesia-process .of-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.kinesia-process .of-prompt-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-prompt-row {
+  display: flex;
+  gap: 8px;
+}
+
+.kinesia-process .of-input {
+  flex: 1;
+  background: var(--of-surface-2);
+  border: 1px solid var(--of-line-strong);
+  border-radius: var(--of-radius-md);
+  padding: 9px 12px;
+  color: var(--of-text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color var(--of-dur-fast) var(--of-ease);
+}
+
+.kinesia-process .of-input:focus {
+  border-color: var(--of-accent);
+}
+
+.kinesia-process .of-prompt-hint {
+  font-size: 12px;
+  color: var(--of-text-mute);
+}
+
+/* Anchor list / preview grid */
+
+.kinesia-process .of-anchor-list {
+  background: var(--of-surface-1);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kinesia-process .of-anchor-list-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.kinesia-process .of-anchor-list-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-anchor-list-head .of-pill {
+  background: var(--of-surface-3);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: var(--of-radius-pill);
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-anchor-list-head .of-pill.is-ok {
+  background: rgba(52, 211, 153, 0.18);
+  color: var(--of-positive);
+}
+
+.kinesia-process .of-anchor-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--of-radius-md);
+  border: 1px solid var(--of-line);
+  background: var(--of-surface-2);
+  cursor: pointer;
+  transition: border-color var(--of-dur-fast) var(--of-ease);
+}
+
+.kinesia-process .of-anchor-card:hover {
+  border-color: var(--of-line-strong);
+}
+
+.kinesia-process .of-anchor-card.is-current {
+  border-color: var(--of-warn);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.kinesia-process .of-anchor-card-num {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--of-surface-3);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--of-warn);
+  flex-shrink: 0;
+}
+
+.kinesia-process .of-anchor-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.kinesia-process .of-anchor-card-time {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--of-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.kinesia-process .of-anchor-card-meta {
+  font-size: 11px;
+  color: var(--of-text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.kinesia-process .of-anchor-empty {
+  font-size: 13px;
+  color: var(--of-text-mute);
+  text-align: center;
+  padding: 16px 8px;
+}
+
+/* Auto preview grid */
+
+.kinesia-process .of-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  /* Keep the 5 thumbnails compact and centered so they don't add height. */
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+@media (max-width: 720px) {
+  .kinesia-process .of-preview-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.kinesia-process .of-preview-tile {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--of-surface-3);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-md);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color var(--of-dur-fast) var(--of-ease);
+}
+
+.kinesia-process .of-preview-tile:hover {
+  border-color: var(--of-line-strong);
+}
+
+.kinesia-process .of-preview-tile.is-active {
+  border-color: var(--of-accent);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25);
+}
+
+.kinesia-process .of-preview-tile .of-preview-label {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--of-text);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  z-index: 2;
+}
+
+.kinesia-process .of-preview-tile .of-preview-status {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--of-text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.kinesia-process .of-preview-tile .of-preview-status.is-ok {
+  background: rgba(52, 211, 153, 0.78);
+  color: #022;
+}
+
+.kinesia-process .of-preview-tile .of-preview-status.is-err {
+  background: rgba(248, 113, 113, 0.78);
+  color: #022;
+}
+
+/* ===========================================================
+   Run step — live monitoring
+   =========================================================== */
+
+/* Pre-launch screen: a centered card with the video preview + the Start button.
+   (Starting a run jumps straight to the full viewer, so this step is just launch.) */
+.kinesia-process .of-run-launch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 460px;
+  margin: 7vh auto 0;
+  text-align: center;
+}
+.kinesia-process .of-run-launch-video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #000;
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-lg);
+  box-shadow: var(--of-of-shadow);
+}
+.kinesia-process .of-run-launch-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.kinesia-process .of-run-launch-name {
+  font-size: 16px;
+  color: var(--of-text);
+  word-break: break-word;
+}
+.kinesia-process .of-run-launch-sub {
+  font-size: 13px;
+  color: var(--of-text-dim);
+}
+.kinesia-process .of-run-launch-btn {
+  min-width: 240px;
+  height: 46px;
+  font-size: 14px;
+}
+.kinesia-process .of-run-launch-hint {
+  margin: 0;
+  max-width: 440px;
+  font-size: 12px;
+  color: var(--of-text-mute);
+  line-height: 1.5;
+}
+
+.kinesia-process .of-run-grid {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1080px) {
+  .kinesia-process .of-run-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.kinesia-process .of-job-list {
+  background: var(--of-surface-1);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kinesia-process .of-job-list h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-job-card {
+  padding: 10px 12px;
+  border-radius: var(--of-radius-md);
+  background: var(--of-surface-2);
+  border: 1px solid var(--of-line);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color var(--of-dur-fast) var(--of-ease);
+}
+
+.kinesia-process .of-job-card:hover {
+  border-color: var(--of-line-strong);
+}
+
+.kinesia-process .of-job-card.is-active {
+  border-color: var(--of-accent);
+  background: rgba(56, 189, 248, 0.05);
+}
+
+.kinesia-process .of-job-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kinesia-process .of-job-card-top .of-job-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.kinesia-process .of-job-del {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1px solid var(--of-line, #2a3550);
+  background: transparent;
+  color: var(--of-text-mute, #94a3b8);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0;
+}
+
+.kinesia-process .of-job-del:hover {
+  color: #fca5a5;
+  border-color: #7f1d1d;
+  background: rgba(127, 29, 29, 0.18);
+}
+
+.kinesia-process .of-job-status {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--of-surface-3);
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-job-status.is-running {
+  background: rgba(56, 189, 248, 0.18);
+  color: var(--of-accent-hi);
+}
+.kinesia-process .of-job-status.is-completed {
+  background: rgba(52, 211, 153, 0.18);
+  color: var(--of-positive);
+}
+.kinesia-process .of-job-status.is-failed {
+  background: rgba(248, 113, 113, 0.18);
+  color: var(--of-danger);
+}
+.kinesia-process .of-job-status.is-queued {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--of-warn);
+}
+
+.kinesia-process .of-job-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--of-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kinesia-process .of-job-prog-bar {
+  position: relative;
+  height: 4px;
+  background: var(--of-surface-3);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.kinesia-process .of-job-prog-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, var(--of-accent-deep), var(--of-accent-hi));
+  border-radius: 999px;
+  transition: width var(--of-dur-base) var(--of-ease);
+}
+
+.kinesia-process .of-job-meta {
+  font-size: 11px;
+  color: var(--of-text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Run detail panel */
+
+.kinesia-process .of-run-detail {
+  background: var(--of-surface-1);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-lg);
+  padding: 18px;
+}
+
+.kinesia-process .of-run-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.kinesia-process .of-run-detail-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.kinesia-process .of-run-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 720px) {
+  .kinesia-process .of-run-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.kinesia-process .of-stat {
+  background: var(--of-surface-2);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-md);
+  padding: 10px 12px;
+}
+
+.kinesia-process .of-stat-key {
+  font-size: 11px;
+  color: var(--of-text-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+}
+
+.kinesia-process .of-stat-val {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--of-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Live kinematics strip */
+
+.kinesia-process .of-kine-strip {
+  background: var(--of-surface-2);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-md);
+  padding: 14px;
+}
+
+.kinesia-process .of-kine-strip-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-kine-svg {
+  width: 100%;
+  height: 90px;
+  background: var(--of-surface-3);
+  border-radius: 6px;
+  display: block;
+}
+
+.kinesia-process .of-empty-run {
+  border: 1px dashed var(--of-line-strong);
+  border-radius: var(--of-radius-md);
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--of-text-mute);
+}
+
+/* ===========================================================
+   Review step — annotate + export
+   =========================================================== */
+
+.kinesia-process .of-review {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.kinesia-process .of-fog-bar-wrap {
+  background: var(--of-surface-1);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-lg);
+  padding: 16px;
+}
+
+.kinesia-process .of-fog-bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.kinesia-process .of-fog-bar-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.kinesia-process .of-fog-bar-row {
+  position: relative;
+  height: 56px;
+  background: var(--of-surface-3);
+  border-radius: var(--of-radius-md);
+  overflow: hidden;
+  border: 1px solid var(--of-line);
+  cursor: pointer;
+}
+
+.kinesia-process .of-fog-prob-bar {
+  position: absolute;
+  bottom: 0;
+  width: 0.18%;
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.55), rgba(56, 189, 248, 0.18));
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.kinesia-process .of-fog-threshold {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1.5px dashed rgba(245, 158, 11, 0.7);
+  pointer-events: none;
+}
+
+.kinesia-process .of-fog-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: filter var(--of-dur-fast) var(--of-ease);
+}
+
+.kinesia-process .of-fog-seg:hover {
+  filter: brightness(1.15);
+}
+
+.kinesia-process .of-fog-seg.is-validated {
+  background: rgba(52, 211, 153, 0.22);
+  border-left: 2px solid var(--of-positive);
+  border-right: 2px solid var(--of-positive);
+}
+.kinesia-process .of-fog-seg.is-corrected {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(245, 158, 11, 0.22) 0,
+    rgba(245, 158, 11, 0.22) 6px,
+    rgba(245, 158, 11, 0.08) 6px,
+    rgba(245, 158, 11, 0.08) 12px
+  );
+  border-left: 2px solid var(--of-warn);
+  border-right: 2px solid var(--of-warn);
+}
+.kinesia-process .of-fog-seg.is-manual {
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(167, 139, 250, 0.24) 0,
+    rgba(167, 139, 250, 0.24) 6px,
+    rgba(167, 139, 250, 0.08) 6px,
+    rgba(167, 139, 250, 0.08) 12px
+  );
+  border-left: 2px solid var(--of-manual);
+  border-right: 2px solid var(--of-manual);
+}
+.kinesia-process .of-fog-seg.is-deleted {
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(248, 113, 113, 0.12) 0,
+    rgba(248, 113, 113, 0.12) 3px,
+    rgba(0, 0, 0, 0) 3px,
+    rgba(0, 0, 0, 0) 8px
+  );
+  border-left: 2px solid var(--of-danger);
+  border-right: 2px solid var(--of-danger);
+}
+.kinesia-process .of-fog-seg.is-selected {
+  outline: 2px solid var(--of-accent-hi);
+  outline-offset: -2px;
+}
+
+.kinesia-process .of-fog-playhead {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  background: var(--of-text);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.kinesia-process .of-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--of-text-dim);
+  margin-top: 10px;
+}
+
+.kinesia-process .of-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kinesia-process .of-legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+}
+.kinesia-process .of-legend-swatch.is-validated {
+  background: rgba(52, 211, 153, 0.22);
+  border: 1.5px solid var(--of-positive);
+}
+.kinesia-process .of-legend-swatch.is-corrected {
+  background: repeating-linear-gradient(45deg, rgba(245, 158, 11, 0.4) 0 3px, transparent 3px 6px);
+  border: 1.5px solid var(--of-warn);
+}
+.kinesia-process .of-legend-swatch.is-manual {
+  background: repeating-linear-gradient(-45deg, rgba(167, 139, 250, 0.4) 0 3px, transparent 3px 6px);
+  border: 1.5px solid var(--of-manual);
+}
+.kinesia-process .of-legend-swatch.is-deleted {
+  background: repeating-linear-gradient(0deg, rgba(248, 113, 113, 0.3) 0 1.5px, transparent 1.5px 4px);
+  border: 1.5px solid var(--of-danger);
+}
+.kinesia-process .of-legend-swatch.is-gold {
+  background: linear-gradient(180deg, rgba(250, 204, 21, 0.6), rgba(250, 204, 21, 0.3));
+  border: 1.5px solid #facc15;
+}
+
+/* Gold-truth band shown below the main FoG bar for benchmark runs */
+.kinesia-process .of-gold-band {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.kinesia-process .of-gold-band-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: rgba(250, 204, 21, 0.85);
+}
+.kinesia-process .of-gold-band-row {
+  position: relative;
+  height: 22px;
+  background: var(--of-surface-3);
+  border: 1px solid var(--of-line);
+  border-radius: var(--of-radius-md);
+  overflow: visible;
+}
+.kinesia-process .of-gold-seg {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: linear-gradient(180deg, rgba(250, 204, 21, 0.55), rgba(250, 204, 21, 0.25));
+  border-left: 2px solid #facc15;
+  border-right: 2px solid #facc15;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.kinesia-process .of-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.kinesia-process .of-toolbar-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 180px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--of-surface-3);
+  outline: none;
+}
+
+.kinesia-process .of-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--of-accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid var(--of-surface-1);
+}
+
+.kinesia-process .of-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--of-accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid var(--of-surface-1);
+}
+
+/* ===== Cut step: segment modes ===== */
+
+.kinesia-process .of-btn.is-warn {
+  background: transparent;
+  border-color: rgba(245, 158, 11, 0.45);
+  color: var(--of-warn);
+}
+
+.kinesia-process .of-btn.is-warn:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: var(--of-warn);
+}
+
+.kinesia-process .of-mode-group {
+  display: inline-flex;
+  gap: 4px;
+  padding: 0 4px;
+  margin: 0 2px;
+  border-left: 1px solid var(--of-line-strong);
+  border-right: 1px solid var(--of-line-strong);
+}
+
+.kinesia-process .of-timeline-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--of-text-dim);
+}
+
+.kinesia-process .of-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kinesia-process .of-legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.kinesia-process .of-legend-dot.is-keep {
+  background: var(--of-accent-deep);
+}
+
+.kinesia-process .of-legend-dot.is-mask {
+  background-color: rgba(245, 158, 11, 0.18);
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(245, 158, 11, 0.6) 0,
+    rgba(245, 158, 11, 0.6) 3px,
+    rgba(245, 158, 11, 0.15) 3px,
+    rgba(245, 158, 11, 0.15) 6px
+  );
+}
+
+.kinesia-process .of-legend-dot.is-delete {
+  background-color: rgba(248, 113, 113, 0.14);
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(248, 113, 113, 0.55) 0,
+    rgba(248, 113, 113, 0.55) 3px,
+    rgba(248, 113, 113, 0.12) 3px,
+    rgba(248, 113, 113, 0.12) 6px
+  );
+}
+
+.kinesia-process .of-mode-pill {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: var(--of-radius-pill);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kinesia-process .of-mode-pill.is-keep {
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--of-accent-hi);
+}
+
+.kinesia-process .of-mode-pill.is-mask {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--of-warn);
+}
+
+.kinesia-process .of-mode-pill.is-delete {
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--of-danger);
+}
+
+.kinesia-process .of-segment-card.is-mask .of-segment-card-index {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--of-warn);
+}
+
+.kinesia-process .of-segment-card.is-delete .of-segment-card-index {
+  background: rgba(248, 113, 113, 0.18);
+  color: var(--of-danger);
+}
+
+/* ===== Run step: embedded live 3D viewer ===== */
+
+.kinesia-process .of-embedded-viewer {
+  margin-top: 12px;
+  border: 1px solid var(--of-line-strong);
+  border-radius: var(--of-radius-md);
+  overflow: hidden;
+  background: #05070d;
+}
+
