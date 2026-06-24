@@ -54,10 +54,6 @@ export type RunFrame = {
     right: boolean;
     support: "left" | "right" | "both" | "none";
   };
-  fogDetected?: boolean;
-  fogScore?: number | null;
-  fogScoreSmooth?: number | null;
-  fogComponents?: Record<string, number | null>;
   // Subject-tracking confidence for this frame (0..1), null when no subject.
   trackingScore?: number | null;
 };
@@ -69,93 +65,6 @@ export type RunSignal = {
   unit: string;
   description: string;
   values: Array<number | null>;
-};
-
-// A contiguous span of frames flagged as a freezing-of-gait (FoG) event.
-export type FogSegment = {
-  startFrameIndex: number;
-  endFrameIndex: number;
-  startVideoFrame: number;
-  endVideoFrame: number;
-  durationSec: number;
-};
-
-// Run-level FoG detection summary (threshold + the resulting segments).
-export type FogSummary = {
-  threshold: number;
-  detectedFrameCount: number;
-  detectedRatio: number;
-  segments: FogSegment[];
-};
-
-// Detection metrics for a single run, scored against its ground-truth labels.
-export type DatasetRunMetrics = {
-  precision: number | null;
-  recall: number | null;
-  f1Event: number | null;
-  matchedEvents: number | null;
-  falsePositiveEvents: number | null;
-  falseNegativeEvents: number | null;
-  meanOnsetLatencyMs: number | null;
-  falsePositiveDurationPerMinS: number | null;
-  nonInterpretableRate: number | null;
-};
-
-// Metrics averaged across the runs in one dataset split (tuning or holdout).
-export type DatasetAggregateMetrics = {
-  count: number;
-  precision: number | null;
-  recall: number | null;
-  f1Event: number | null;
-  meanOnsetLatencyMs: number | null;
-  falsePositiveDurationPerMinS: number | null;
-  nonInterpretableRate: number | null;
-};
-
-// Full evaluation report for a dataset: per-split aggregates + per-run breakdown.
-export type DatasetEvaluationSummary = {
-  datasetId: string;
-  preset: string;
-  generatedAt: string | null;
-  runsEvaluated: number;
-  splits: {
-    tuning: DatasetAggregateMetrics;
-    holdout: DatasetAggregateMetrics;
-  };
-  perRun: Array<{
-    runId: string;
-    split: "tuning" | "holdout";
-    metrics: DatasetRunMetrics;
-    qaStatus: string | null;
-    needsReview: boolean;
-  }>;
-};
-
-// A single ground-truth labeled interval (e.g. an annotated FoG episode).
-export type LabeledEpisode = {
-  label: string;
-  startMs: number;
-  endMs: number;
-  durationMs: number;
-  startFrameIndex: number | null;
-  endFrameIndex: number | null;
-};
-
-// Association between a run and the dataset it belongs to (labels + metadata).
-export type RunDatasetLink = {
-  datasetId: string;
-  split: "tuning" | "holdout";
-  patientId: string | null;
-  sessionId: string | null;
-  videoPath: string | null;
-  notes: string | null;
-  labelEventsPath: string | null;
-  labeledEpisodes: LabeledEpisode[];
-  latestEvaluation: {
-    preset: string;
-    generatedAt: string | null;
-    metrics: DatasetRunMetrics | null;
-  } | null;
 };
 
 // Full payload for a single run, including every frame and signal (viewer page).
@@ -172,7 +81,6 @@ export type RunDetail = {
   inputVideoUrl: string | null;
   previewVideoUrl: string | null;
   previewVideoTimebase: "processed" | "source";
-  fog: FogSummary | null;
   signals: RunSignal[];
   frames: RunFrame[];
   analyses?: Array<{
@@ -188,8 +96,6 @@ export type RunDetail = {
     joint_visibility_ratio: number | null;
     critical_joint_visibility_ratio: number | null;
     camera_motion_severity: number | null;
-    event_confidence: number | null;
     reasons: string[];
   } | null;
-  datasets?: RunDatasetLink[];
 };
