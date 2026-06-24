@@ -38,11 +38,6 @@ export function uploadsRoot(): string {
   return configuredProjectPath(process.env.KINESIA_UPLOADS_ROOT, path.join(projectRoot(), "input"));
 }
 
-// Directory holding generated datasets under the workspace.
-export function datasetsRoot(): string {
-  return path.join(workspaceRoot(), "datasets");
-}
-
 // Pre-configurable output location kept for backward compatibility.
 export function legacyOutputRoot(): string {
   return path.join(projectRoot(), "output");
