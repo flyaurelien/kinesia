@@ -2,7 +2,6 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
-import { discoverRunDatasets } from "./datasets";
 import { stabilizeXY } from "./stabilization_xy";
 import {
   RUN_MANIFEST_FILE,
@@ -16,7 +15,7 @@ import {
   runsRoot,
   usesConfiguredRunsRoot,
 } from "./store";
-import type { FogSummary, RunDetail, RunFrame, RunSignal, RunSummary } from "./types";
+import type { RunDetail, RunFrame, RunSignal, RunSummary } from "./types";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -438,10 +437,6 @@ function normalizeFrame(
     rootWorldRaw: rootRaw ?? undefined,
     rootWorldStabilized: rootStab ?? undefined,
     footContact,
-    fogDetected: Boolean(rawFrame.fog_detected ?? rawFrame.fogDetected ?? false),
-    fogScore: numericOrNull(rawFrame.fog_score) ?? numericOrNull(rawFrame.fogScore),
-    fogScoreSmooth: numericOrNull(rawFrame.fog_score_smooth) ?? numericOrNull(rawFrame.fogScoreSmooth),
-    fogComponents: normalizeNumberRecord(rawFrame.fog_components ?? rawFrame.fogComponents),
     // Per-frame subject-tracking confidence (gallery appearance match, else stability).
     trackingScore: subjectPresent
       ? numericOrNull(rawFrame.identity_gallery_similarity) ??
@@ -450,18 +445,6 @@ function normalizeFrame(
         numericOrNull(record.identity_stability_score)
       : null,
   };
-}
-
-// Coerce a flat object of numbers (e.g. FoG components) into finite-or-null values.
-function normalizeNumberRecord(value: unknown): Record<string, number | null> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const out: Record<string, number | null> = {};
-  for (const [key, raw] of Object.entries(value as JsonRecord)) {
-    out[key] = numericOrNull(raw);
-  }
-  return out;
 }
 
 // Constrain a raw foot-support value to the known set, defaulting to "none".
@@ -787,49 +770,6 @@ function withDisplayRootSignals(signals: RunSignal[], frames: RunFrame[]): RunSi
   return out;
 }
 
-// Aggregate per-frame FoG detections into contiguous episode segments plus overall counts/ratio.
-function fogSummary(frames: RunFrame[], signals: RunSignal[]): FogSummary | null {
-  const score = signals.find((signal) => signal.id === "fog.score")?.values ?? [];
-  const threshold =
-    signals.find((signal) => signal.id === "fog.threshold")?.values.find((value) => typeof value === "number") ??
-    null;
-  const stateSignal = signals.find((signal) => signal.id === "fog.state")?.values ?? [];
-  const detected = frames.map((frame, index) =>
-    Boolean(frame.fogDetected || (typeof stateSignal[index] === "number" && (stateSignal[index] as number) > 0.5)),
-  );
-  const detectedFrameCount = detected.filter(Boolean).length;
-  const segments: FogSummary["segments"] = [];
-  let start: number | null = null;
-  // Iterate one past the end so a segment still open at the final frame gets flushed
-  // (detected[length] is undefined, taking the closing branch).
-  for (let index = 0; index <= detected.length; index += 1) {
-    if (detected[index] && start === null) {
-      start = index;
-    } else if (!detected[index] && start !== null) {
-      const end = index - 1;
-      const startFrame = frames[start];
-      const endFrame = frames[end];
-      segments.push({
-        startFrameIndex: start,
-        endFrameIndex: end,
-        startVideoFrame: startFrame?.videoFrame ?? start,
-        endVideoFrame: endFrame?.videoFrame ?? end,
-        durationSec: Math.max(0, end - start + 1) / Math.max(1, frames.length),
-      });
-      start = null;
-    }
-  }
-  if (score.length === 0 && threshold === null && detectedFrameCount === 0) {
-    return null;
-  }
-  return {
-    threshold: threshold ?? 0,
-    detectedFrameCount,
-    detectedRatio: frames.length > 0 ? detectedFrameCount / frames.length : 0,
-    segments,
-  };
-}
-
 // Locate the input or preview video by trying manifest/metadata hints, then known filenames,
 // then any video in the run dir; preview falls back to the input video when none is found.
 async function findVideoPath(baseDir: string, manifest: JsonRecord | null, metadata: JsonRecord | null, kind: "input" | "preview"): Promise<string | null> {
@@ -911,14 +851,11 @@ export async function getRunDetail(runIdRaw: string, analysisId?: string | null)
     inputVideoUrl: inputVideo ? `/api/runs/${encodeURIComponent(runId)}/input-video` : null,
     previewVideoUrl: previewVideo ? `/api/runs/${encodeURIComponent(runId)}/preview-video` : null,
     previewVideoTimebase,
-    fog: fogSummary(displayFrames, signals),
     signals,
     frames: displayFrames,
     analyses: analysesFromManifest(manifest),
     qa,
-    datasets: [],
   };
-  detail.datasets = await discoverRunDatasets(runId, displayFrames, fps).catch(() => []);
   return detail;
 }
 
@@ -1056,44 +993,6 @@ export async function readMeshFaces(runIdRaw: string): Promise<{ data: Buffer; v
     }
   }
   return { data: out, vertexCount: layout.vertexCount, faceCount: layout.faceCount };
-}
-
-// Run the Python `sam3d analyze` CLI for a run with the given FoG preset/parameters, then return the refreshed detail.
-export async function createRunAnalysis(runIdRaw: string, body: {
-  preset?: string;
-  sensitivityPercent?: number;
-  minDurationMs?: number;
-  gapFillMs?: number;
-}): Promise<RunDetail> {
-  const runId = ensureSafeId(runIdRaw);
-  const args = [
-    "run",
-    "sam3d",
-    "analyze",
-    "--run-id",
-    runId,
-    "--preset",
-    String(body.preset || "clinical_fog_v1"),
-    "--sensitivity-percent",
-    String(Math.trunc(body.sensitivityPercent ?? 0)),
-    "--min-duration-ms",
-    String(Math.trunc(body.minDurationMs ?? 400)),
-    "--gap-fill-ms",
-    String(Math.trunc(body.gapFillMs ?? 220)),
-  ];
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn("uv", args, { cwd: projectRoot(), stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    proc.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    proc.on("error", reject);
-    proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(stderr.trim() || `sam3d analyze exited with code ${code}`));
-    });
-  });
-  return getRunDetail(runId);
 }
 
 // Delete a run's directory, checking the versioned location first then the legacy one.
