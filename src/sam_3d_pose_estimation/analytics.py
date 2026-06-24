@@ -30,26 +30,17 @@ LEFT_HEEL = 17
 RIGHT_BIG_TOE = 18
 RIGHT_SMALL_TOE = 19
 RIGHT_HEEL = 20
-DEFAULT_FOG_PROBABILITY_THRESHOLD = 0.37
 
 
 @dataclass(frozen=True)
 class AnalysisParams:
-    """Tunable parameters for a single FoG analysis pass (preset + event-shaping knobs)."""
+    """Tunable parameters for a single kinematics analysis pass."""
 
     preset: str = DEFAULT_ANALYSIS_PRESET
-    sensitivity_percent: int = 0
-    min_duration_ms: int = 400
-    gap_fill_ms: int = 220
 
     def as_dict(self) -> dict[str, Any]:
-        """Serialize the params to a plain, JSON-friendly dict with normalized integer fields."""
-        return {
-            "preset": self.preset,
-            "sensitivity_percent": int(self.sensitivity_percent),
-            "min_duration_ms": int(self.min_duration_ms),
-            "gap_fill_ms": int(self.gap_fill_ms),
-        }
+        """Serialize the params to a plain, JSON-friendly dict."""
+        return {"preset": self.preset}
 
 
 def analyze_run(
@@ -73,7 +64,6 @@ def analyze_run(
         analysis_directory / "signals.json",
         {"analysis_id": analysis_id, "preset": params.preset, "signals": payload["signals"]},
     )
-    write_json(analysis_directory / "events.json", payload["events"])
     write_json(
         analysis_directory / "frames.json",
         {
@@ -105,7 +95,6 @@ def analyze_run(
         "analysis_id": analysis_id,
         "manifest": analysis_manifest,
         "signals": payload["signals"],
-        "events": payload["events"],
         "qa": payload["qa"],
         "duration_ms": payload["duration_ms"],
     }
@@ -124,10 +113,9 @@ def build_analysis_payload(
     metadata: dict[str, Any],
     params: AnalysisParams,
 ) -> dict[str, Any]:
-    """Build the complete analysis payload (frames, signals, events, QA) from per-frame metadata.
+    """Build the complete analysis payload (frames, signals, QA) from per-frame metadata.
 
-    Stabilizes the root trajectory, derives FoG kinematic metrics, applies the decision
-    threshold with gap filling, and annotates each frame with its per-frame outputs.
+    Stabilizes the root trajectory and derives the per-frame kinematic signal series.
     """
     records_raw = metadata.get("records")
     records = [item for item in records_raw if isinstance(item, dict)] if isinstance(records_raw, list) else []
@@ -158,37 +146,14 @@ def build_analysis_payload(
         frame["root_world_stabilized"] = list(stabilization["root_world_stabilized"][index])
         frame["foot_contact"] = stabilization["foot_contact"][index]
 
-    fog_metrics = build_fog_metrics(frames, fps)
-    fog_score = fog_metrics.get("fog.score", [None] * len(frames))
-    fog_score_smooth = centered_rolling_mean(fog_score, window=max(3, int(round(max(fps, 1.0) * 0.55))))
-    fog_metrics["fog.score_smooth"] = fog_score_smooth
-    threshold = infer_threshold([value for value in fog_score if value is not None], params)
-    fog_state = fill_short_gaps(
-        [value is not None and value >= threshold for value in fog_score],
-        max_gap=max(1, round((params.gap_fill_ms / 1000.0) * fps)),
-    )
-
-    for index, frame in enumerate(frames):
-        frame["fog_score"] = fog_score[index]
-        frame["fog_score_smooth"] = fog_score_smooth[index]
-        frame["fog_components"] = {
-            signal_id: values[index]
-            for signal_id, values in fog_metrics.items()
-            if signal_id.startswith("fog.") and signal_id not in {"fog.score", "fog.score_smooth"} and index < len(values)
-        }
-        frame["fog_detected"] = bool(fog_state[index])
-
-    signals = build_signals(frames, stabilization, fog_metrics, threshold, fog_state)
-    events = build_events(fog_state, fps, params)
-    qa = build_qa_summary(metadata, frames, fog_score, threshold)
+    metrics = build_kinematic_metrics(frames, fps)
+    signals = build_signals(frames, stabilization, metrics)
+    qa = build_qa_summary(metadata, frames)
     duration_ms = int(round((len(frames) / max(fps, 1e-6)) * 1000.0))
-    events["duration_ms"] = duration_ms
-    events["run_id"] = run_id
     return {
         "fps": fps,
         "frames": frames,
         "signals": signals,
-        "events": events,
         "qa": qa,
         "duration_ms": duration_ms,
     }
@@ -318,11 +283,9 @@ def xy_speed(previous: np.ndarray | None, current: np.ndarray | None, fps: float
 def build_signals(
     frames: list[dict[str, Any]],
     stabilization: dict[str, Any],
-    fog_metrics: dict[str, list[float | None]],
-    threshold: float,
-    fog_state: list[bool],
+    metrics: dict[str, list[float | None]],
 ) -> list[dict[str, Any]]:
-    """Assemble the ordered list of labeled, unit-tagged display signals from the computed metrics."""
+    """Assemble the ordered list of labeled, unit-tagged kinematics signals from the computed metrics."""
     roots = [frame["root_world_stabilized"] for frame in frames]
     return [
         make_signal("root.stab.x", "Root Stabilized X", "m", "Stabilized root translation X.", [value[0] for value in roots]),
@@ -330,45 +293,18 @@ def build_signals(
         make_signal("root.stab.z", "Root Stabilized Z", "m", "Stabilized root translation Z.", [value[2] for value in roots]),
         make_signal("foot.left.slip_speed", "Left Foot Slip Speed", "m/s", "Estimated XY slip of the left support foot.", stabilization["slip_speed_left"]),
         make_signal("foot.right.slip_speed", "Right Foot Slip Speed", "m/s", "Estimated XY slip of the right support foot.", stabilization["slip_speed_right"]),
-        make_signal("root.xy_speed", "Pelvis XY Speed", "m/s", "Horizontal pelvis speed used as a progression context signal.", fog_metrics["root.xy_speed"]),
-        make_signal("gait.ankle_relative_speed", "Relative Ankle Activity", "m/s", "Mean lower-limb activity relative to pelvis.", fog_metrics["gait.ankle_relative_speed"]),
-        make_signal("gait.context", "Gait-Cycle Context", "score", "Recent evidence that the subject is in a gait-cycle task.", fog_metrics["gait.context"]),
-        make_signal("turn.yaw_rate", "Body Turn Rate", "deg/s", "Absolute yaw-rate estimated from the hip/shoulder axis; context only.", fog_metrics["turn.yaw_rate"]),
-        make_signal("turn.context", "Turning Task Context", "score", "Recent evidence that the subject is attempting a turn or stepping-in-place task.", fog_metrics["turn.context"]),
-        make_signal("fog.walking_context", "Walking Context", "score", "Automatic context weight from center-of-mass XY progression.", fog_metrics["fog.walking_context"]),
-        make_signal("fog.turning_context", "Turning Context", "score", "Automatic context weight from body yaw rotation.", fog_metrics["fog.turning_context"]),
-        make_signal("fog.locomotor_context", "Locomotor Context", "score", "Automatic gait/turning task context used by the FoG probability estimate.", fog_metrics["fog.locomotor_context"]),
-        make_signal("step.effective_event", "Effective Step Event", "bool", "Detected alternating effective foot lift/placement event.", fog_metrics["step.effective_event"]),
-        make_signal("step.cadence_hz", "Step Cadence", "Hz", "Instantaneous cadence from alternating effective step events.", fog_metrics["step.cadence_hz"]),
-        make_signal("step.time_since_effective", "Time Since Effective Step", "s", "Seconds since the last alternating effective step event.", fog_metrics["step.time_since_effective"]),
-        make_signal("fog.progression_arrest", "Progression Arrest Evidence", "score", "Low horizontal pelvis progression evidence; not valid alone during turning-in-place.", fog_metrics["fog.progression_arrest"]),
-        make_signal("fog.leg_activity_arrest", "Foot Activity Arrest Evidence", "score", "Low relative ankle activity evidence for akinetic freezing.", fog_metrics["fog.leg_activity_arrest"]),
-        make_signal("fog.leg_activity_abs_arrest", "Absolute Foot Activity Arrest", "score", "Conservative low lower-limb activity gate in m/s, used to suppress successful-motion false positives.", fog_metrics["fog.leg_activity_abs_arrest"]),
-        make_signal("fog.freezing_index", "Freezing Index 3-8/0.5-3 Hz", "ratio", "Power ratio between freezing band and locomotor band.", fog_metrics["fog.freezing_index"]),
-        make_signal("fog.freezing_index_score", "Freezing-Index Evidence", "score", "Normalized freezing-index evidence for trembling freezing.", fog_metrics["fog.freezing_index_score"]),
-        make_signal("fog.step_arrest", "Step Arrest Evidence", "score", "No alternating effective step for longer than the subject-specific expected interval.", fog_metrics["fog.step_arrest"]),
-        make_signal("fog.alternation_break", "Alternation Break Evidence", "score", "Breakdown of left-right step alternation.", fog_metrics["fog.alternation_break"]),
-        make_signal("fog.yaw_arrest", "Turn Arrest Evidence", "score", "Low pelvis/body yaw-rate during a recent turning task context.", fog_metrics["fog.yaw_arrest"]),
-        make_signal("fog.contextual_arrest", "Contextual Motion Arrest", "score", "Automatically blends center-of-mass progression arrest and yaw arrest according to current motion context.", fog_metrics["fog.contextual_arrest"]),
-        make_signal("fog.ineffective_stepping", "Ineffective Stepping Evidence", "score", "Visible stepping attempt without an effective alternating step.", fog_metrics["fog.ineffective_stepping"]),
-        make_signal("fog.akinetic", "Akinetic FoG Evidence", "score", "No clinically visible lower-limb movement during recent stepping/turning context.", fog_metrics["fog.akinetic"]),
-        make_signal("fog.trembling", "Kinetic-Trembling FoG Evidence", "score", "High 3-8 Hz lower-limb oscillation without effective stepping.", fog_metrics["fog.trembling"]),
-        make_signal("fog.kinetic_no_trembling", "Kinetic-No-Trembling FoG Evidence", "score", "Ineffective non-trembling foot movement, including shuffling/festinating-freezing.", fog_metrics["fog.kinetic_no_trembling"]),
-        make_signal("fog.step_failure", "Effective-Step Failure", "probability", "Probability-like evidence that effective stepping has failed in the current task context.", fog_metrics["fog.step_failure"]),
-        make_signal("fog.attempted_stepping", "Attempted Stepping Context", "probability", "Observable kinematic context that a gait-related stepping task is underway.", fog_metrics["fog.attempted_stepping"]),
-        make_signal("fog.probability", "FoG Event Probability", "probability", "Uncalibrated kinematics-only probability-like estimate of a FoG event.", fog_metrics["fog.probability"]),
-        make_signal("fog.score", "FoG Event Probability", "probability", "Compatibility alias for fog.probability.", fog_metrics["fog.score"]),
-        make_signal("fog.score_smooth", "FoG Smoothed Probability", "probability", "Centered smoothed FoG probability for display color and live mini-plot.", fog_metrics["fog.score_smooth"]),
-        make_signal("fog.threshold", "FoG Probability Threshold", "probability", "Decision threshold used for the kinematics-only FoG probability.", [threshold] * len(frames)),
-        make_signal("fog.state", "FoG Detected", "bool", "FoG binary state (1=detected, 0=normal).", [1 if value else 0 for value in fog_state]),
+        make_signal("root.xy_speed", "Pelvis XY Speed", "m/s", "Horizontal pelvis progression speed.", metrics["root.xy_speed"]),
+        make_signal("gait.ankle_relative_speed", "Relative Ankle Activity", "m/s", "Mean lower-limb activity relative to the pelvis.", metrics["gait.ankle_relative_speed"]),
+        make_signal("turn.yaw_rate", "Body Turn Rate", "deg/s", "Absolute yaw-rate estimated from the hip/shoulder axis.", metrics["turn.yaw_rate"]),
+        make_signal("step.effective_event", "Effective Step Event", "bool", "Detected alternating effective foot lift/placement event.", metrics["step.effective_event"]),
+        make_signal("step.cadence_hz", "Step Cadence", "Hz", "Instantaneous cadence from alternating effective step events.", metrics["step.cadence_hz"]),
+        make_signal("step.time_since_effective", "Time Since Effective Step", "s", "Seconds since the last alternating effective step event.", metrics["step.time_since_effective"]),
     ]
 
 
-def build_fog_metrics(frames: list[dict[str, Any]], fps: float) -> dict[str, list[float | None]]:
-    """Compute every per-frame FoG kinematic signal and combine them into the FoG probability.
+def build_kinematic_metrics(frames: list[dict[str, Any]], fps: float) -> dict[str, list[float | None]]:
+    """Compute the per-frame kinematic signal series (speeds, turn rate, step events).
 
-    Derives progression/leg-activity/turning context and arrest evidence, then fuzzy-combines
-    them into akinetic/trembling/kinetic FoG sub-scores and the final fog.probability series.
     Returns a series of all-None signals when there are too few frames to differentiate.
     """
     roots = [tuple(frame.get("root_world_stabilized") or frame.get("root_world_raw") or (0.0, 0.0, 0.0)) for frame in frames]
@@ -378,32 +314,10 @@ def build_fog_metrics(frames: list[dict[str, Any]], fps: float) -> dict[str, lis
         return {
             "root.xy_speed": empty,
             "gait.ankle_relative_speed": empty,
-            "gait.context": empty,
             "turn.yaw_rate": empty,
-            "turn.context": empty,
-            "fog.walking_context": empty,
-            "fog.turning_context": empty,
-            "fog.locomotor_context": empty,
             "step.effective_event": empty,
             "step.cadence_hz": empty,
             "step.time_since_effective": empty,
-            "fog.progression_arrest": empty,
-            "fog.leg_activity_arrest": empty,
-            "fog.leg_activity_abs_arrest": empty,
-            "fog.freezing_index": empty,
-            "fog.freezing_index_score": empty,
-            "fog.step_arrest": empty,
-            "fog.alternation_break": empty,
-            "fog.yaw_arrest": empty,
-            "fog.contextual_arrest": empty,
-            "fog.ineffective_stepping": empty,
-            "fog.akinetic": empty,
-            "fog.trembling": empty,
-            "fog.kinetic_no_trembling": empty,
-            "fog.step_failure": empty,
-            "fog.attempted_stepping": empty,
-            "fog.probability": empty,
-            "fog.score": empty,
         }
 
     root_xy = np.asarray([[float(root[0]), float(root[1])] for root in roots], dtype=np.float64)
@@ -416,161 +330,24 @@ def build_fog_metrics(frames: list[dict[str, Any]], fps: float) -> dict[str, lis
         fps,
     )
     ankle_activity = rolling_mean(ankle_activity, window=max(3, int(round(max(fps, 1.0) * 0.35))))
-    freeze_ratio = build_freezing_ratio(ankle_rel, fps)
     turn_rate = build_body_turn_rate(frames, fps)
     step_metrics = build_effective_step_metrics(frames, roots, fps)
 
-    progression_arrest = inverse_quantile_score(root_speed, lo_q=0.12, hi_q=0.82)
-    leg_arrest = inverse_quantile_score(ankle_activity, lo_q=0.12, hi_q=0.82)
-    leg_abs_arrest = inverse_range_score(ankle_activity, lo=0.10, hi=0.30)
-    freeze_band = quantile_score(freeze_ratio, lo_q=0.55, hi_q=0.92)
-    progression_activity = quantile_score(root_speed, lo_q=0.18, hi_q=0.82)
-    leg_activity_score = quantile_score(ankle_activity, lo_q=0.18, hi_q=0.82)
-    gait_context = build_gait_context(progression_activity, leg_activity_score, fps)
-    turning_context = quantile_score(turn_rate, lo_q=0.55, hi_q=0.90)
-    turning_task_context = rolling_max_score(turning_context, window=max(3, int(round(max(fps, 1.0) * 2.5))))
-    walking_task_context = build_walking_context(root_xy, fps)
-    locomotor_context = [
-        max_optional(walk, turn, leg)
-        for walk, turn, leg in zip(walking_task_context, turning_task_context, leg_activity_score, strict=False)
-    ]
-    yaw_arrest = [
-        fuzzy_and([inverse, task])
-        for inverse, task in zip(inverse_quantile_score(turn_rate, lo_q=0.12, hi_q=0.75), turning_task_context, strict=False)
-    ]
-    step_arrest = build_step_arrest_score(step_metrics["step.time_since_effective"], step_metrics["step.expected_interval_s"])
-    alternation_break = build_alternation_break_score(step_metrics["step.alternation_ok"], step_metrics["step.event_side"])
-
-    contextual_arrest_score: list[float | None] = []
-    ineffective_stepping_score: list[float | None] = []
-    akinetic_score: list[float | None] = []
-    trembling_score: list[float | None] = []
-    kinetic_no_trembling_score: list[float | None] = []
-    step_failure_score: list[float | None] = []
-    attempted_stepping_score: list[float | None] = []
-    fog_probability: list[float | None] = []
-    for index in range(n):
-        task_context = locomotor_context[index]
-        walk_context = walking_task_context[index]
-        turn_context = turning_task_context[index]
-        visible_attempt = max_optional(leg_activity_score[index], freeze_band[index], alternation_break[index])
-        contextual_arrest = context_weighted_arrest(
-            progression_arrest[index],
-            yaw_arrest[index],
-            walk_context,
-            turn_context,
-        )
-        step_failure = max_optional(
-            leg_abs_arrest[index],
-            contextual_arrest,
-            fuzzy_and([step_arrest[index], leg_arrest[index], task_context]),
-        )
-        attempted_stepping = max_optional(task_context, visible_attempt)
-        trembling = fuzzy_and(
-            [
-                attempted_stepping,
-                contextual_arrest,
-                freeze_band[index],
-            ]
-        )
-        kinetic_no_trembling = fuzzy_and(
-            [
-                attempted_stepping,
-                contextual_arrest,
-                alternation_break[index],
-                inverse_score(freeze_band[index]),
-            ]
-        )
-        ineffective = max_optional(trembling, kinetic_no_trembling)
-        akinetic = fuzzy_and(
-            [
-                attempted_stepping,
-                leg_abs_arrest[index],
-            ]
-        )
-        probability = leg_abs_arrest[index]
-        contextual_arrest_score.append(contextual_arrest)
-        ineffective_stepping_score.append(ineffective)
-        akinetic_score.append(akinetic)
-        trembling_score.append(trembling)
-        kinetic_no_trembling_score.append(kinetic_no_trembling)
-        step_failure_score.append(step_failure)
-        attempted_stepping_score.append(attempted_stepping)
-        fog_probability.append(probability)
     return {
         "root.xy_speed": root_speed,
         "gait.ankle_relative_speed": ankle_activity,
-        "gait.context": gait_context,
         "turn.yaw_rate": turn_rate,
-        "turn.context": turning_task_context,
-        "fog.walking_context": walking_task_context,
-        "fog.turning_context": turning_task_context,
-        "fog.locomotor_context": locomotor_context,
         "step.effective_event": step_metrics["step.effective_event"],
         "step.cadence_hz": step_metrics["step.cadence_hz"],
         "step.time_since_effective": step_metrics["step.time_since_effective"],
-        "fog.progression_arrest": progression_arrest,
-        "fog.leg_activity_arrest": leg_arrest,
-        "fog.leg_activity_abs_arrest": leg_abs_arrest,
-        "fog.freezing_index": freeze_ratio,
-        "fog.freezing_index_score": freeze_band,
-        "fog.step_arrest": step_arrest,
-        "fog.alternation_break": alternation_break,
-        "fog.yaw_arrest": yaw_arrest,
-        "fog.contextual_arrest": contextual_arrest_score,
-        "fog.ineffective_stepping": ineffective_stepping_score,
-        "fog.akinetic": akinetic_score,
-        "fog.trembling": trembling_score,
-        "fog.kinetic_no_trembling": kinetic_no_trembling_score,
-        "fog.step_failure": step_failure_score,
-        "fog.attempted_stepping": attempted_stepping_score,
-        "fog.probability": fog_probability,
-        "fog.score": fog_probability,
-    }
-
-
-def infer_threshold(values: list[float], params: AnalysisParams) -> float:
-    """Decision threshold for fog.probability, shifted by the sensitivity param and clamped."""
-    finite = [value for value in values if math.isfinite(value)]
-    sensitivity_shift = clamp(params.sensitivity_percent / 100.0, -0.5, 0.5) * 0.20
-    if not finite:
-        return clamp(DEFAULT_FOG_PROBABILITY_THRESHOLD - sensitivity_shift, 0.10, 0.90)
-    return clamp(DEFAULT_FOG_PROBABILITY_THRESHOLD - sensitivity_shift, 0.10, 0.90)
-
-
-def build_events(fog_state: list[bool], fps: float, params: AnalysisParams) -> dict[str, Any]:
-    """Collapse the per-frame FoG state into discrete episodes, dropping ones below min duration."""
-    min_frames = max(1, round((params.min_duration_ms / 1000.0) * fps))
-    segments: list[dict[str, Any]] = []
-    start: int | None = None
-    for index, active in enumerate([*fog_state, False]):
-        if active and start is None:
-            start = index
-        elif not active and start is not None:
-            if index - start >= min_frames:
-                segments.append(
-                    {
-                        "label": "fog",
-                        "start_frame": start,
-                        "end_frame": index - 1,
-                        "start_ms": int(round((start / max(fps, 1e-6)) * 1000)),
-                        "end_ms": int(round((index / max(fps, 1e-6)) * 1000)),
-                    }
-                )
-            start = None
-    return {
-        "episodes": [{"label": item["label"], "start_ms": item["start_ms"], "end_ms": item["end_ms"]} for item in segments],
-        "summary": {"segments": segments, "count": len(segments)},
     }
 
 
 def build_qa_summary(
     metadata: dict[str, Any],
     frames: list[dict[str, Any]],
-    fog_score: list[float | None],
-    threshold: float,
 ) -> dict[str, Any]:
-    """Build the quality-assurance summary (interpretability status, visibility ratios, confidence)."""
+    """Build the quality-assurance summary (interpretability status, visibility ratios)."""
     total = len(frames)
     visible = sum(1 for frame in frames if isinstance(frame.get("joints_cam"), list) and frame["joints_cam"])
     critical = 0
@@ -588,11 +365,6 @@ def build_qa_summary(
     elif joint_visibility_ratio < 0.60:
         status = "needs_review"
         reasons.append("low_joint_visibility")
-    finite_scores = [value for value in fog_score if isinstance(value, (int, float)) and math.isfinite(value)]
-    event_confidence = None
-    if finite_scores:
-        margins = [max(0.0, value - threshold) for value in finite_scores]
-        event_confidence = sum(margins) / len(margins)
     return {
         "status": status,
         "needs_review": status != "interpretable",
@@ -600,7 +372,6 @@ def build_qa_summary(
         "joint_visibility_ratio": joint_visibility_ratio,
         "critical_joint_visibility_ratio": critical_joint_visibility_ratio,
         "camera_motion_severity": camera_motion_severity(metadata),
-        "event_confidence": event_confidence,
         "reasons": reasons,
     }
 
@@ -611,8 +382,6 @@ def write_parquet(file_path: Path, frames: list[dict[str, Any]], signals: list[d
         "frame_index": [frame["index"] for frame in frames],
         "video_frame": [frame["video_frame"] for frame in frames],
         "mesh_file": [frame["mesh_file"] for frame in frames],
-        "fog_detected": [bool(frame.get("fog_detected")) for frame in frames],
-        "fog.score": [frame.get("fog_score") for frame in frames],
     }
     for signal in signals:
         columns[str(signal["id"])] = list(signal["values"])
@@ -646,24 +415,6 @@ def min_world_z(joints: list[Any], indices: list[int]) -> float | None:
         world = cam_to_world_xyz(float(joints[index][0]), float(joints[index][1]), float(joints[index][2]))
         values.append(world[2])
     return min(values) if values else None
-
-
-def fill_short_gaps(values: list[bool], max_gap: int) -> list[bool]:
-    """Bridge runs of False no longer than max_gap that are flanked by True on both sides."""
-    out = list(values)
-    index = 0
-    while index < len(out):
-        if out[index]:
-            index += 1
-            continue
-        start = index
-        while index < len(out) and not out[index]:
-            index += 1
-        end = index
-        if start > 0 and end < len(out) and end - start <= max_gap:
-            for fill in range(start, end):
-                out[fill] = True
-    return out
 
 
 def estimate_root_world(
@@ -789,166 +540,6 @@ def build_ankle_relative_series(
         rows.append(values)
         last = values
     return np.asarray(rows, dtype=np.float64)
-
-
-def finite_quantile(values: list[float | None], q: float) -> float | None:
-    """Quantile q over the finite entries of values, or None if there are none."""
-    finite = [float(value) for value in values if isinstance(value, (int, float)) and math.isfinite(float(value))]
-    if not finite:
-        return None
-    return quantile(finite, q)
-
-
-def inverse_quantile_score(values: list[float | None], lo_q: float, hi_q: float) -> list[float | None]:
-    """Map values to [0,1] inverted between their lo_q/hi_q quantiles (low value -> high score)."""
-    lo = finite_quantile(values, lo_q)
-    hi = finite_quantile(values, hi_q)
-    if lo is None or hi is None or hi <= lo + 1e-9:
-        return [None if value is None else 0.0 for value in values]
-    return [
-        None if value is None or not math.isfinite(float(value))
-        else clamp(1.0 - ((float(value) - lo) / (hi - lo)), 0.0, 1.0)
-        for value in values
-    ]
-
-
-def quantile_score(values: list[float | None], lo_q: float, hi_q: float) -> list[float | None]:
-    """Map values to [0,1] between their lo_q/hi_q quantiles (high value -> high score)."""
-    lo = finite_quantile(values, lo_q)
-    hi = finite_quantile(values, hi_q)
-    if lo is None or hi is None or hi <= lo + 1e-9:
-        return [None if value is None else 0.0 for value in values]
-    return [
-        None if value is None or not math.isfinite(float(value))
-        else clamp((float(value) - lo) / (hi - lo), 0.0, 1.0)
-        for value in values
-    ]
-
-
-def inverse_range_score(values: list[float | None], lo: float, hi: float) -> list[float | None]:
-    """Map values to [0,1] inverted between fixed absolute bounds lo/hi (low value -> high score)."""
-    if hi <= lo + 1e-9:
-        return [None if value is None else 0.0 for value in values]
-    return [
-        None if value is None or not math.isfinite(float(value))
-        else clamp(1.0 - ((float(value) - lo) / (hi - lo)), 0.0, 1.0)
-        for value in values
-    ]
-
-
-def weighted_score(components: list[tuple[float | None, float]]) -> float | None:
-    """Weighted average of (value, weight) pairs over finite values, clamped to [0,1]."""
-    total_weight = 0.0
-    score = 0.0
-    for value, weight in components:
-        if value is None or not math.isfinite(value):
-            continue
-        score += float(value) * weight
-        total_weight += weight
-    return None if total_weight <= 0 else clamp(score / total_weight, 0.0, 1.0)
-
-
-def max_optional(*values: float | None) -> float | None:
-    """Maximum over the finite arguments, or None if none are finite."""
-    finite = [float(value) for value in values if value is not None and math.isfinite(float(value))]
-    return max(finite) if finite else None
-
-
-def inverse_score(value: float | None) -> float | None:
-    """Fuzzy NOT: 1 - value clamped to [0,1], passing None/non-finite through as None."""
-    if value is None or not math.isfinite(float(value)):
-        return None
-    return clamp(1.0 - float(value), 0.0, 1.0)
-
-
-def fuzzy_and(values: Iterable[float | None]) -> float | None:
-    """Fuzzy AND: minimum of the finite values (each clamped to [0,1]), or None if none finite."""
-    finite = [
-        clamp(float(value), 0.0, 1.0)
-        for value in values
-        if value is not None and math.isfinite(float(value))
-    ]
-    return min(finite) if finite else None
-
-
-def context_weighted_arrest(
-    progression_arrest: float | None,
-    yaw_arrest: float | None,
-    walking_context: float | None,
-    turning_context: float | None,
-) -> float | None:
-    """Blend progression and yaw arrest evidence by the current walking vs. turning context weights."""
-    walk = 0.0 if walking_context is None or not math.isfinite(float(walking_context)) else clamp(float(walking_context), 0.0, 1.0)
-    turn = 0.0 if turning_context is None or not math.isfinite(float(turning_context)) else clamp(float(turning_context), 0.0, 1.0)
-    total = walk + turn
-    if total <= 1e-6:
-        return weighted_score([(progression_arrest, 0.50), (yaw_arrest, 0.50)])
-    return weighted_score(
-        [
-            (progression_arrest, walk / total),
-            (yaw_arrest, turn / total),
-        ]
-    )
-
-
-def rolling_max_score(values: list[float | None], window: int) -> list[float | None]:
-    """Centered rolling maximum over finite values; windows with no finite values yield None."""
-    if not values:
-        return []
-    win = max(1, int(window))
-    pad = win // 2
-    out: list[float | None] = []
-    for index in range(len(values)):
-        lo = max(0, index - pad)
-        hi = min(len(values), index + pad + 1)
-        finite = [float(value) for value in values[lo:hi] if isinstance(value, (int, float)) and math.isfinite(float(value))]
-        out.append(max(finite) if finite else None)
-    return out
-
-
-def build_gait_context(
-    progression_activity: list[float | None],
-    leg_activity: list[float | None],
-    fps: float,
-) -> list[float | None]:
-    """Recent evidence of an active gait cycle: windowed max of blended progression/leg activity."""
-    n = max(len(progression_activity), len(leg_activity))
-    if n == 0:
-        return []
-    half_window = max(3, int(round(max(fps, 1.0) * 1.2)))
-    out: list[float | None] = []
-    for index in range(n):
-        lo = max(0, index - half_window)
-        hi = min(n, index + half_window + 1)
-        values: list[float] = []
-        for cursor in range(lo, hi):
-            progression = progression_activity[cursor] if cursor < len(progression_activity) else None
-            leg = leg_activity[cursor] if cursor < len(leg_activity) else None
-            local = weighted_score([(progression, 0.45), (leg, 0.55)])
-            if local is not None and math.isfinite(local):
-                values.append(local)
-        out.append(max(values) if values else None)
-    return out
-
-
-def build_walking_context(root_xy: np.ndarray, fps: float) -> list[float | None]:
-    """Walking-task context score from windowed pelvis XY displacement against absolute thresholds."""
-    n = len(root_xy)
-    if n == 0:
-        return []
-    window = max(3, int(round(max(fps, 1.0) * 2.0)))
-    out: list[float | None] = []
-    for index in range(n):
-        previous = max(0, index - window)
-        delta = root_xy[index] - root_xy[previous]
-        if not np.isfinite(delta).all():
-            out.append(None)
-            continue
-        displacement = float(np.linalg.norm(delta))
-        # Absolute thresholds keep turning-in-place from being re-labeled as walking
-        # just because it has locally high but small pelvis drift.
-        out.append(clamp((displacement - 0.12) / (0.45 - 0.12), 0.0, 1.0))
-    return rolling_mean(out, window=max(3, int(round(max(fps, 1.0) * 0.45))))
 
 
 def build_effective_step_metrics(
@@ -1101,75 +692,6 @@ def detect_foot_lift_events(foot_rel: np.ndarray, fps: float) -> list[int]:
         if lift[candidate] > lift[events[-1]]:
             events[-1] = candidate
     return events
-
-
-def build_step_arrest_score(values: list[float | None], expected_interval_s: float) -> list[float | None]:
-    """Score [0,1] for how overdue the next step is, ramping past the subject's expected interval."""
-    start = clamp(expected_interval_s * 1.35, 0.65, 1.45)
-    full = clamp(expected_interval_s * 2.50, 1.30, 2.20)
-    if full <= start + 1e-6:
-        full = start + 0.60
-    out: list[float | None] = []
-    for value in values:
-        if value is None or not math.isfinite(float(value)):
-            out.append(None)
-        else:
-            out.append(clamp((float(value) - start) / (full - start), 0.0, 1.0))
-    return out
-
-
-def build_alternation_break_score(
-    alternation_ok: list[float | None],
-    event_side: list[str | None],
-) -> list[float | None]:
-    """Evidence that left-right step alternation has broken down, decaying after each bad step."""
-    out: list[float | None] = []
-    last_bad_frame: int | None = None
-    decay_frames = 18
-    for index, (ok, side) in enumerate(zip(alternation_ok, event_side, strict=False)):
-        if side is not None and ok == 0.0:
-            last_bad_frame = index
-        if last_bad_frame is None:
-            out.append(0.0)
-        else:
-            out.append(clamp(1.0 - ((index - last_bad_frame) / max(decay_frames, 1)), 0.0, 1.0))
-    return out
-
-
-def build_freezing_ratio(values: np.ndarray, fps: float) -> list[float | None]:
-    """Sliding-window freezing index: 3-8 Hz vs. 0.5-3 Hz spectral power ratio of foot-relative motion."""
-    n = len(values)
-    if n == 0:
-        return []
-    window = max(16, int(round(max(fps, 1.0) * 2.0)))
-    if window > n:
-        return [None] * n
-    half = window // 2
-    sample_rate = max(float(fps), 1.0)
-    freqs = np.fft.rfftfreq(window, d=1.0 / sample_rate)
-    loco_mask = (freqs >= 0.5) & (freqs <= 3.0)
-    freeze_mask = (freqs >= 3.0) & (freqs <= min(8.0, sample_rate * 0.45))
-    if not np.any(loco_mask) or not np.any(freeze_mask):
-        return [None] * n
-    out: list[float | None] = [None] * n
-    window_fn = np.hanning(window)
-    for center in range(n):
-        lo = center - half
-        hi = lo + window
-        if lo < 0 or hi > n:
-            continue
-        chunk = values[lo:hi].astype(np.float64)
-        chunk = chunk - np.mean(chunk, axis=0, keepdims=True)
-        chunk = chunk * window_fn[:, None]
-        spectrum = np.fft.rfft(chunk, axis=0)
-        power = np.mean(np.abs(spectrum) ** 2, axis=1)
-        loco_power = float(np.sum(power[loco_mask]))
-        freeze_power = float(np.sum(power[freeze_mask]))
-        if not math.isfinite(loco_power + freeze_power) or (loco_power + freeze_power) <= 1e-12:
-            out[center] = None
-        else:
-            out[center] = freeze_power / max(loco_power, 1e-12)
-    return out
 
 
 def build_body_turn_rate(frames: list[dict[str, Any]], fps: float) -> list[float | None]:

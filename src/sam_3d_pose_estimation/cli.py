@@ -169,19 +169,16 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, require_output_dir: bo
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level parser with the run/analyze/evaluate/doctor subcommands."""
+    """Build the top-level parser with the run/analyze/doctor subcommands."""
     parser = argparse.ArgumentParser(prog="sam3d", description="SAM3D workstation CLI")
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run inference and produce a versioned run manifest.")
     add_run_arguments(run_parser, require_output_dir=False)
 
-    analyze_parser = subparsers.add_parser("analyze", help="Analyze a run and export FoG/kinematics artifacts.")
+    analyze_parser = subparsers.add_parser("analyze", help="Analyze a run and export kinematics artifacts.")
     analyze_parser.add_argument("--run-id", required=True)
     analyze_parser.add_argument("--preset", default=DEFAULT_ANALYSIS_PRESET)
-    analyze_parser.add_argument("--sensitivity-percent", type=int, default=0)
-    analyze_parser.add_argument("--min-duration-ms", type=int, default=400)
-    analyze_parser.add_argument("--gap-fill-ms", type=int, default=220)
     analyze_parser.add_argument("--json", action="store_true")
 
     doctor_parser = subparsers.add_parser("doctor", help="Validate environment and model dependencies.")
@@ -478,12 +475,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_analyze(args: argparse.Namespace) -> int:
     """Analyze an existing run and print either the full manifest or a short summary."""
-    params = AnalysisParams(
-        preset=args.preset,
-        sensitivity_percent=int(args.sensitivity_percent),
-        min_duration_ms=int(args.min_duration_ms),
-        gap_fill_ms=int(args.gap_fill_ms),
-    )
+    params = AnalysisParams(preset=args.preset)
     result = analyze_run(run_id=args.run_id, params=params)
     if args.json:
         print(json.dumps(result["manifest"], indent=2))
@@ -492,7 +484,6 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             "analysis_id": result["analysis_id"],
             "qa_status": result["qa"]["status"],
             "needs_review": result["qa"]["needs_review"],
-            "segments": len(result["events"]["summary"]["segments"]),
         }, indent=2))
     return 0
 
