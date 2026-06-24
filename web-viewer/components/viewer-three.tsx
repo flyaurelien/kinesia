@@ -289,41 +289,8 @@ export async function preloadRunAssets(
   await preloadMeshFiles(runDetail.id, meshFiles, onProgress);
 }
 
-// Clamp a value to the [0, 1] range.
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value));
-}
-
-// Per-frame freezing-of-gait score in [0, 1], preferring the smoothed value; 0 when unavailable.
-function fogScore(frame: RunFrame | null | undefined): number {
-  const score = frame?.fogScoreSmooth ?? frame?.fogScore;
-  return typeof score === "number" && Number.isFinite(score) ? clamp01(score) : 0;
-}
-
-// Box-average each frame's FoG score over a +/-radius window to avoid flickering color.
-function smoothFogScores(frames: RunFrame[], radius = 8): number[] {
-  return frames.map((_, index) => {
-    const lo = Math.max(0, index - radius);
-    const hi = Math.min(frames.length - 1, index + radius);
-    let total = 0;
-    let count = 0;
-    for (let cursor = lo; cursor <= hi; cursor += 1) {
-      total += fogScore(frames[cursor]);
-      count += 1;
-    }
-    return count > 0 ? total / count : 0;
-  });
-}
-
-// Map a FoG score to a CSS color: grey -> amber for the lower half, amber -> red for the upper half.
-function fogColor(score: number): string {
-  const t = clamp01(score);
-  if (t < 0.5) {
-    const local = t / 0.5;
-    return new THREE.Color("#8f978c").lerp(new THREE.Color("#f59e0b"), local).getStyle();
-  }
-  return new THREE.Color("#f59e0b").lerp(new THREE.Color("#ef4444"), (t - 0.5) / 0.5).getStyle();
-}
+// Neutral body color for the reconstructed mesh.
+const MESH_COLOR = "#9aa7b8";
 
 // Extract the world-space recentering anchor (in camera coords) from the run, or null if not finite.
 function displayAnchor(runDetail: RunDetail): DisplayAnchor | null {
@@ -551,7 +518,6 @@ function MeshGeometry({
   pivot,
   anchor,
   meshOpacity,
-  meshFogScore,
 }: {
   runId: string;
   meshFile: string;
@@ -560,7 +526,6 @@ function MeshGeometry({
   pivot: THREE.Vector3;
   anchor: DisplayAnchor | null;
   meshOpacity: number;
-  meshFogScore: number;
 }) {
   const [faces, setFaces] = useState<Uint32Array | null>(null);
   const [verticesState, setVerticesState] = useState<{ meshFile: string; vertices: Float32Array } | null>(null);
@@ -652,7 +617,7 @@ function MeshGeometry({
   return (
     <mesh geometry={geometry} castShadow receiveShadow>
       <meshBasicMaterial
-        color={fogColor(meshFogScore)}
+        color={MESH_COLOR}
         transparent={meshOpacity < 0.995}
         opacity={meshOpacity}
         side={THREE.DoubleSide}
@@ -710,7 +675,6 @@ function MeshBody({
   showJoints,
   showBones,
   meshOpacity,
-  meshFogScore,
   selectedJointIndices,
   onJointPick,
 }: {
@@ -728,7 +692,6 @@ function MeshBody({
   showJoints: boolean;
   showBones: boolean;
   meshOpacity: number;
-  meshFogScore: number;
   selectedJointIndices: number[];
   onJointPick?: (jointIndex: number) => void;
 }) {
@@ -760,7 +723,6 @@ function MeshBody({
           pivot={meshPivot}
           anchor={anchor}
           meshOpacity={meshOpacity}
-          meshFogScore={meshFogScore}
         />
       ) : null}
       {showBones ? <SkeletonBones joints={joints} /> : null}
@@ -1002,7 +964,6 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         .clone()
         .slerp(uprightQuaternions[nextIndex] ?? uprightQuaternions[baseIndex] ?? new THREE.Quaternion(), interpolation)
     : new THREE.Quaternion();
-  const smoothedFogScores = useMemo(() => smoothFogScores(props.runDetail.frames), [props.runDetail.frames]);
 
   return (
     <>
@@ -1026,7 +987,6 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         showJoints={props.showJoints}
         showBones={props.showBones}
         meshOpacity={props.meshOpacity}
-        meshFogScore={smoothedFogScores[baseIndex] ?? 0}
         selectedJointIndices={props.selectedJointIndices}
         onJointPick={props.onJointPick}
       />
