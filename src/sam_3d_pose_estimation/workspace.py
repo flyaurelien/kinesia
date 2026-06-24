@@ -12,8 +12,8 @@ import os
 from pathlib import Path
 
 
-DEFAULT_CONFIG_PROFILE = "clinical_fog_workstation_v1"
-DEFAULT_ANALYSIS_PRESET = "clinical_fog_v1"
+DEFAULT_CONFIG_PROFILE = "kinesia_workstation_v1"
+DEFAULT_ANALYSIS_PRESET = "kinematics_v1"
 
 
 def project_root_from(start: Path | None = None) -> Path:

@@ -19,9 +19,9 @@ def world_to_cam(x: float, y: float, z: float) -> list[float]:
 
 
 def build_record(mesh_path: Path, frame_index: int, fps: float) -> dict:
-    """Synthesize one per-frame pipeline record of a subject walking with a brief freeze around frames 12-18."""
-    freeze = 12 <= frame_index <= 18
-    pelvis_x = (0.02 * frame_index) if not freeze else (0.24 + 0.003 * (frame_index - 12))
+    """Synthesize one per-frame pipeline record of a subject walking with a brief pause around frames 12-18."""
+    paused = 12 <= frame_index <= 18
+    pelvis_x = (0.02 * frame_index) if not paused else (0.24 + 0.003 * (frame_index - 12))
     left_hip = (pelvis_x - 0.08, 0.0, 1.05)
     right_hip = (pelvis_x + 0.08, 0.0, 1.05)
     step = 0.18 if frame_index % 2 == 0 else 0.06
