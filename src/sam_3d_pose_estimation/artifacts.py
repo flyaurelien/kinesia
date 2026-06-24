@@ -129,7 +129,6 @@ def append_analysis_to_run_manifest(
         "artifacts": {
             "manifest": f"{analysis_rel_dir}/{ANALYSIS_MANIFEST_FILE}",
             "signals": f"{analysis_rel_dir}/signals.json",
-            "events": f"{analysis_rel_dir}/events.json",
             "frames": f"{analysis_rel_dir}/frames.json",
             "qa": f"{analysis_rel_dir}/qa.json",
             "kinematics": f"{analysis_rel_dir}/kinematics.parquet",
@@ -165,7 +164,6 @@ def build_analysis_manifest(
         "qa_summary": qa_summary,
         "artifacts": {
             "signals": "signals.json",
-            "events": "events.json",
             "frames": "frames.json",
             "qa": "qa.json",
             "kinematics": "kinematics.parquet",

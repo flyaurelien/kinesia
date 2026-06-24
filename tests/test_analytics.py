@@ -68,7 +68,7 @@ class AnalyticsArtifactsTest(unittest.TestCase):
     """End-to-end checks on analytics output: artifact layout and root-XY stabilization."""
 
     def test_analyze_run_writes_versioned_artifacts(self) -> None:
-        """Run analyze_run on a synthetic walk and assert the versioned analysis artifacts and FoG columns are emitted."""
+        """Run analyze_run on a synthetic walk and assert the versioned analysis artifacts and kinematics columns are emitted."""
         with tempfile.TemporaryDirectory() as tmpdir_raw:
             tmpdir = Path(tmpdir_raw)
             (tmpdir / "pyproject.toml").write_text("[project]\nname='tmp'\nversion='0.0.0'\n", encoding="utf-8")
@@ -123,7 +123,6 @@ class AnalyticsArtifactsTest(unittest.TestCase):
             analysis_id = result["analysis_id"]
             analysis_path = run_path / "analysis" / analysis_id
             self.assertTrue((analysis_path / "signals.json").exists())
-            self.assertTrue((analysis_path / "events.json").exists())
             self.assertTrue((analysis_path / "frames.json").exists())
             self.assertTrue((analysis_path / "qa.json").exists())
             self.assertTrue((analysis_path / "kinematics.parquet").exists())
@@ -134,13 +133,15 @@ class AnalyticsArtifactsTest(unittest.TestCase):
 
             table = pq.read_table(analysis_path / "kinematics.parquet")
             self.assertEqual(table.num_rows, len(records))
-            self.assertIn("fog.probability", table.column_names)
-            self.assertIn("fog.score", table.column_names)
-            self.assertIn("fog.leg_activity_abs_arrest", table.column_names)
-            self.assertIn("fog.walking_context", table.column_names)
-            self.assertIn("fog.turning_context", table.column_names)
-            self.assertIn("fog.contextual_arrest", table.column_names)
-            self.assertNotIn("fog.gait_score", table.column_names)
+            self.assertIn("root.stab.x", table.column_names)
+            self.assertIn("root.xy_speed", table.column_names)
+            self.assertIn("gait.ankle_relative_speed", table.column_names)
+            self.assertIn("turn.yaw_rate", table.column_names)
+            self.assertIn("step.cadence_hz", table.column_names)
+            self.assertFalse(
+                any(name.startswith("fog.") for name in table.column_names),
+                msg="no FoG columns should remain",
+            )
 
     def test_stabilize_xy_reduces_root_jitter_during_double_support(self) -> None:
         """When both feet are planted, stabilization should damp the injected per-frame root jitter."""
