@@ -111,23 +111,6 @@ def analyze_run(
     }
 
 
-def load_analysis_for_evaluation(
-    run_id: str,
-    preset: str,
-    project_root: Path | None = None,
-) -> dict[str, Any]:
-    """Load the most recent stored analysis for a run/preset (events + QA) for evaluation/scoring."""
-    manifest = read_json(run_manifest_path(run_id, project_root))
-    analyses = [item for item in list(manifest.get("analyses") or []) if item.get("preset") == preset]
-    if not analyses:
-        raise FileNotFoundError(f"No analysis found for run '{run_id}' and preset '{preset}'")
-    analysis_id = str(analyses[-1]["analysis_id"])
-    directory = analysis_dir(run_id, analysis_id, project_root)
-    events = read_json(directory / "events.json")
-    qa = read_json(directory / "qa.json")
-    return {"events": events, "qa": qa, "duration_ms": int(events.get("duration_ms") or 0)}
-
-
 def build_analysis_id(run_id: str, params: AnalysisParams) -> str:
     """Derive a stable analysis id from the run id, preset, and a hash of the params."""
     payload = json.dumps(params.as_dict(), sort_keys=True).encode("utf-8")
