@@ -1947,6 +1947,8 @@ def resolve_identity_track(
     jump_weight: float = 0.6,
     jump_switch_ratio: float = 0.12,
     reentry_cost: float = 0.10,
+    shape_weight: float = 0.5,
+    distractor_penalty: float = 0.5,
 ) -> list[dict[str, Any]]:
     """Offline (non-causal) identity resolution by Viterbi over detection frames.
 
@@ -1976,13 +1978,34 @@ def resolve_identity_track(
     diag = max(1.0, float(frame_diag))
 
     def reward(frame: dict[str, Any], sidx: int) -> float:
-        """Per-state reward: gallery affinity above baseline (0 for ABSENT, -inf below the floor)."""
+        """Per-state reward: multi-cue identity affinity above baseline (0 for ABSENT, -inf below floor).
+
+        The identity affinity blends the frozen-gallery appearance score with an
+        optional body-shape affinity (``shape``) — body shape is lighting/pose
+        invariant, so it rescues frames where two people are dressed alike. An
+        optional ``distractor`` affinity enforces mutual exclusivity: a candidate
+        that looks more like a known bystander than the patient is penalised.
+        Candidates carrying only ``gallery`` behave exactly as before.
+        """
         if sidx == -1:
             return 0.0
-        gallery = frame["candidates"][sidx].get("gallery")
-        if gallery is None or gallery < hard_floor:
+        cand = frame["candidates"][sidx]
+        gallery = cand.get("gallery")
+        shape = cand.get("shape")
+        if gallery is None and shape is None:
             return neg_inf
-        return float(gallery) - affinity_baseline
+        if shape is None:
+            affinity = float(gallery)
+        elif gallery is None:
+            affinity = float(shape)
+        else:
+            affinity = (1.0 - shape_weight) * float(gallery) + shape_weight * float(shape)
+        if affinity < hard_floor:
+            return neg_inf
+        distractor = cand.get("distractor")
+        if distractor is not None:
+            affinity -= distractor_penalty * float(distractor)
+        return affinity - affinity_baseline
 
     def center_of(frame: dict[str, Any], sidx: int) -> np.ndarray | None:
         if sidx == -1:
