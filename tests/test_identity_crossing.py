@@ -104,7 +104,7 @@ def run_crossing(tracker_factory, n_frames=48, box_w=130, **factory_kw):
     }
 
 
-def default_tracker(patient_box, **overrides):
+def default_tracker(patient_box, *, occlusion_hold_enabled=True, **overrides):
     """A tracker seeded + warmed up on the blue patient (settled lock)."""
     frame = make_frame([(patient_box, PATIENT_BLUE)])
     seed = extract_bbox_appearance_hist(frame, patient_box)
@@ -119,6 +119,7 @@ def default_tracker(patient_box, **overrides):
     )
     params.update(overrides)
     tracker = IdentityLockedBboxTracker(**params)
+    tracker.occlusion_hold_enabled = occlusion_hold_enabled
     for _ in range(params["warmup_frames"] + 1):
         tracker.update(frame, patient_box, detections=[det(patient_box)])
     return tracker
@@ -135,18 +136,21 @@ class CrossingBenchmarkTests(unittest.TestCase):
         # Sanity: at least some unambiguous frames were classified.
         self.assertGreater(len(m["labels"]), 0)
 
-    @unittest.expectedFailure
     def test_no_identity_swap_through_crossing(self):
-        """TARGET — the lock must stay on the patient through the crossing.
+        """The lock must stay on the patient through the crossing — no swap.
 
-        The current greedy single-target matcher swaps onto the other person at
-        the crossing (ends on the distractor), so this is an expected failure
-        today; the occlusion-aware joint-assignment phase makes it pass, at
-        which point this decorator is removed.
+        Occlusion-aware hold carries the subject through the overlap on
+        constant-velocity motion and re-anchors by the frozen gallery once the
+        people separate, so the box never flips onto the other person.
         """
         m = run_crossing(default_tracker)
         self.assertEqual(m["id_switches"], 0)
         self.assertTrue(m["ended_on_patient"])
+
+    def test_occlusion_hold_disabled_still_swaps(self):
+        """Control: with the occlusion hold off, the greedy matcher still swaps."""
+        m = run_crossing(default_tracker, occlusion_hold_enabled=False)
+        self.assertFalse(m["ended_on_patient"])
 
 
 if __name__ == "__main__":
