@@ -1082,8 +1082,15 @@ def _normalize_hist(hist: np.ndarray) -> np.ndarray:
 def extract_bbox_appearance_hist(
     frame_bgr: np.ndarray,
     bbox_xyxy: np.ndarray,
+    mask: np.ndarray | None = None,
 ) -> np.ndarray | None:
-    """Identity appearance feature for a box: HS colour histogram (clothing) + down-weighted brightness."""
+    """Identity appearance feature for a box: HS colour histogram (clothing) + down-weighted brightness.
+
+    When a segmentation ``mask`` is supplied (e.g. the SAM3 subject mask, either
+    full-frame HxW or already cropped to the box), the histogram is restricted to
+    the masked pixels so the descriptor captures the *person* and not the
+    background behind the box — a much cleaner identity cue for re-identification.
+    """
     h, w = frame_bgr.shape[:2]
     x1, y1, x2, y2 = clip_bbox(bbox_xyxy, frame_bgr.shape).astype(np.int32).tolist()
     if x2 - x1 < 8 or y2 - y1 < 12:
@@ -1098,7 +1105,16 @@ def extract_bbox_appearance_hist(
     val = roi_hsv[:, :, 2]
 
     # Keep informative cloth/body pixels, reduce background and dark shadows.
-    valid_mask = ((sat > 20) & (val > 28)).astype(np.uint8) * 255
+    valid = (sat > 20) & (val > 28)
+    # Restrict to the subject's segmentation mask when available so the histogram
+    # is background-free (the box always includes some scene behind the person).
+    if mask is not None:
+        m = np.asarray(mask)
+        if m.shape[:2] == (h, w):
+            m = m[y1:y2, x1:x2]
+        if m.shape[:2] == roi_bgr.shape[:2]:
+            valid = valid & (m > 0)
+    valid_mask = valid.astype(np.uint8) * 255
     if cv2.countNonZero(valid_mask) < max(25, int(0.02 * roi_bgr.shape[0] * roi_bgr.shape[1])):
         valid_mask = None
 
@@ -1153,6 +1169,27 @@ def appearance_similarity_score(
     inter_score = float(np.clip(inter, 0.0, 1.0))
 
     return float(0.40 * bhatta_score + 0.35 * corr_score + 0.25 * inter_score)
+
+
+def embedding_similarity(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
+    """Cosine similarity in [0,1] of two embedding vectors (e.g. SAM3 object embeddings).
+
+    A learned per-object embedding (SAM3's decoder query, optionally pooled over
+    the subject mask) is far more discriminative than the colour histogram; this
+    is the similarity the tracker/resolver use when detections carry an `emb`.
+    """
+    if a is None or b is None:
+        return None
+    av = np.asarray(a, dtype=np.float32).reshape(-1)
+    bv = np.asarray(b, dtype=np.float32).reshape(-1)
+    if av.size == 0 or av.size != bv.size:
+        return None
+    na = float(np.linalg.norm(av))
+    nb = float(np.linalg.norm(bv))
+    if na <= 1e-12 or nb <= 1e-12:
+        return None
+    cos = float(np.dot(av, bv) / (na * nb))
+    return float(np.clip((cos + 1.0) * 0.5, 0.0, 1.0))
 
 
 def gallery_match_score(
@@ -1533,9 +1570,10 @@ class IdentityLockedBboxTracker:
         predicted_bbox: np.ndarray,
         *,
         relaxed: bool,
+        mask: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Identity-first score for a detection: fixed-gallery affinity dominant, motion as tie-breaker."""
-        det_hist = extract_bbox_appearance_hist(frame_bgr, det_bbox)
+        det_hist = extract_bbox_appearance_hist(frame_bgr, det_bbox, mask=mask)
         gallery = gallery_match_score(self.fixed_gallery, det_hist)
         adaptive = appearance_similarity_score(self.appearance_ref, det_hist)
         distractor = self._distractor_match(det_hist)
@@ -1578,7 +1616,8 @@ class IdentityLockedBboxTracker:
         relaxed = self.warmup_left > 0 or not self.fixed_gallery
         scored = [
             self._score_detection(
-                frame_bgr, clip_bbox(d["bbox"], self.frame_shape), predicted_bbox, relaxed=relaxed
+                frame_bgr, clip_bbox(d["bbox"], self.frame_shape), predicted_bbox,
+                relaxed=relaxed, mask=d.get("mask"),
             )
             for d in detections
             if d.get("bbox") is not None
