@@ -68,6 +68,16 @@ def _xyxy_to_cxcywh(b: np.ndarray) -> np.ndarray:
     return np.array([(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1], dtype=np.float32)
 
 
+def _iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
+    """Intersection-over-union of two [x1,y1,x2,y2] boxes (0 when disjoint)."""
+    ax1, ay1, ax2, ay2 = (float(v) for v in a[:4])
+    bx1, by1, bx2, by2 = (float(v) for v in b[:4])
+    ix1, iy1, ix2, iy2 = max(ax1, bx1), max(ay1, by1), min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    union = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1) + max(0.0, bx2 - bx1) * max(0.0, by2 - by1) - inter
+    return float(inter / union) if union > 1e-6 else 0.0
+
+
 # Distinct, high-contrast track colours (cycled by track index).
 _PALETTE = [
     "#34d399", "#60a5fa", "#f472b6", "#fbbf24", "#a78bfa",
@@ -102,15 +112,28 @@ _GALLERY_TOPK = 5        # appearance = mean of the top-K best-matching gallery 
 _DEDUP_COS = 0.992       # skip only a near-identical view (keeps every real pose/angle)
 _N_INIT = 2              # detections before an identity is confirmed (surfaced)
 _MIN_SURFACE_FRAMES = 2
+# Motion continuity: a light position term added to the appearance assignment so
+# that at a crossing — where blended embeddings match BOTH galleries equally and
+# pure-appearance Hungarian can flip — each identity stays with the detection
+# nearest its last box instead of teleporting onto the other person. It only
+# breaks ties (appearance still must clear _MATCH_COS) and is disabled for stale
+# tracks, so re-identification after a real absence remains appearance-only.
+_MOTION_WEIGHT = 0.8
+_MOTION_RECENCY_FRAMES = 30
+_VEL_REF = 4.0           # px/frame at which an identity counts as "clearly moving";
+                         # only moving identities get the motion override, so a swap
+                         # during a walking crossing is fixed while a stationary
+                         # close-encounter stays pure-appearance (no frame loss)
 
 
 class _Track:
     """One identity = an unbounded GALLERY of all its raw unit embeddings (every
-    distinct view it has ever shown), plus bookkeeping. No position/velocity is
-    stored — identity is appearance-only."""
+    distinct view it has ever shown), plus bookkeeping. Identity is decided by
+    appearance; a last box + constant-velocity estimate are kept ONLY as a motion
+    tie-break so two people can't swap identities at a crossing."""
 
     __slots__ = (
-        "id", "color", "box", "gallery", "_gmat", "hits", "confirmed",
+        "id", "color", "box", "vel", "gallery", "_gmat", "hits", "confirmed",
         "first_frame", "last_frame", "frame_count", "rep_frame", "rep_area",
     )
 
@@ -118,6 +141,7 @@ class _Track:
         self.id = tid
         self.color = _PALETTE[tid % len(_PALETTE)]
         self.box = _xyxy_to_cxcywh(box_xyxy)
+        self.vel = np.zeros(2, dtype=np.float32)  # per-frame centre velocity (cx, cy)
         # Gallery of RAW unit embeddings — every view, un-averaged, uncapped.
         self.gallery: list[np.ndarray] = []
         self._gmat: np.ndarray | None = None  # cached stack of `gallery` for matching
@@ -160,8 +184,26 @@ class _Track:
         topk = np.partition(sims, -_GALLERY_TOPK)[-_GALLERY_TOPK:]
         return float(topk.mean())
 
+    def predict(self, frame_idx: int) -> np.ndarray:
+        """Constant-velocity prediction of this identity's box at ``frame_idx`` (xyxy).
+
+        At a crossing the two people physically overlap, so matching to the *last*
+        box can't separate them; extrapolating each track by its velocity does —
+        the one moving left and the one moving right have distinct predicted boxes.
+        """
+        steps = max(0, int(frame_idx) - int(self.last_frame))
+        cx = float(self.box[0]) + float(self.vel[0]) * steps
+        cy = float(self.box[1]) + float(self.vel[1]) * steps
+        w, h = float(self.box[2]), float(self.box[3])
+        return np.array([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dtype=np.float32)
+
     def update(self, frame_idx: int, box_xyxy: np.ndarray, e_unit) -> None:
-        self.box = _xyxy_to_cxcywh(box_xyxy)
+        new_box = _xyxy_to_cxcywh(box_xyxy)
+        # EMA the per-frame centre velocity from the observed displacement.
+        step = max(1, int(frame_idx) - int(self.last_frame))
+        inst_vel = (new_box[:2] - self.box[:2]) / float(step)
+        self.vel = inst_vel.astype(np.float32) if self.frame_count <= 1 else (0.6 * self.vel + 0.4 * inst_vel).astype(np.float32)
+        self.box = new_box
         if e_unit is not None:                        # bank every view (measured: a
             self._add(e_unit)                         # few degraded ones dilute, even
                                                       # enrich, and never erode the margin)
@@ -177,12 +219,21 @@ class _Track:
 
 
 class TrackManager:
-    def __init__(self, min_surface_frames: int = _MIN_SURFACE_FRAMES):
+    def __init__(
+        self,
+        min_surface_frames: int = _MIN_SURFACE_FRAMES,
+        motion_weight: float = _MOTION_WEIGHT,
+        motion_recency: int = _MOTION_RECENCY_FRAMES,
+    ):
         self.tracks: list[_Track] = []
         self._next_id = 0
         # An identity must be present for at least this many detection-points to
         # surface (computed from a duration-in-seconds so it scales with fps/stride).
         self.min_surface_frames = max(1, int(min_surface_frames))
+        # Motion-continuity tie-break (see constants); instance-level so it can be
+        # tuned offline by replaying cached detections without re-running SAM3.
+        self.motion_weight = float(motion_weight)
+        self.motion_recency = int(motion_recency)
 
     def _new_track(self, frame_idx: int, box: np.ndarray, e_unit) -> _Track:
         t = _Track(self._next_id, frame_idx, box, e_unit)
@@ -225,17 +276,43 @@ class TrackManager:
             for i, t in enumerate(ids):
                 for j in range(len(dets)):
                     sim[i, j] = t.appearance(embs[j]) if embs[j] is not None else 0.0
-            rows, cols = linear_sum_assignment(-sim)  # maximise total similarity
-            for i, j in zip(rows, cols):
-                i, j = int(i), int(j)
-                s = float(sim[i, j])
-                if s < _MATCH_COS:
-                    continue
-                # Attach to the best identity (no margin gate → never fragments), but
-                # MEMORISE the view only when this identity clearly beats every other —
-                # an ambiguous (crossing/blend) view is shown but kept out of the gallery.
-                rival = float(np.delete(sim[:, j], i).max()) if len(ids) > 1 else 0.0
-                attach(ids[i], j, bankable=(s - rival >= _BANK_MARGIN))
+            # Decouple two decisions so motion fixes crossings WITHOUT fragmenting:
+            #  (1) whether a detection is a NEW identity — appearance-only (its best
+            #      gallery match must clear _MATCH_COS), exactly as before; motion
+            #      never spawns identities.
+            #  (2) WHICH known identity a matchable detection attaches to — appearance
+            #      + a light motion-continuity term, so at a crossing (blended
+            #      embeddings that match both galleries) each identity stays with the
+            #      detection nearest its last box instead of teleporting.
+            matchable = [j for j in range(len(dets)) if float(sim[:, j].max()) >= _MATCH_COS]
+            if matchable:
+                # Motion override is gated by VELOCITY CONFIDENCE: only a clearly-
+                # moving identity gets it. At a walking crossing the blended embedding
+                # can confidently match the WRONG gallery, but the two walkers' velocity
+                # predictions are well-separated, so motion corrects it; a near-stationary
+                # close-encounter (unreliable prediction) stays pure-appearance, so
+                # identity continuity is never perturbed there (no frame loss).
+                cost = np.zeros((len(ids), len(matchable)), dtype=np.float32)
+                for i, t in enumerate(ids):
+                    recent = (frame_idx - t.last_frame) <= self.motion_recency
+                    vmag = float(np.hypot(t.vel[0], t.vel[1]))
+                    vconf = max(0.0, min(1.0, vmag / _VEL_REF))
+                    tb = t.predict(frame_idx) if (recent and vconf > 0.0) else None
+                    for b, j in enumerate(matchable):
+                        motion = (
+                            self.motion_weight * vconf * _iou_xyxy(tb, dets[j]["bbox"])
+                            if tb is not None else 0.0
+                        )
+                        cost[i, b] = sim[i, j] + motion
+                rows, cols = linear_sum_assignment(-cost)  # maximise appearance + motion
+                for i, b in zip(rows, cols):
+                    i = int(i)
+                    j = matchable[int(b)]
+                    # The detection already appearance-matches SOME identity, so it
+                    # attaches (never a spurious new track); motion only decided which.
+                    s = float(sim[i, j])
+                    rival = float(np.delete(sim[:, j], i).max()) if len(ids) > 1 else 0.0
+                    attach(ids[i], j, bankable=(s - rival >= _BANK_MARGIN))
 
         # Anything not confidently matched to a known identity becomes a new one.
         for j in list(unmatched_d):
