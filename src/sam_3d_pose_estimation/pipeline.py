@@ -1551,6 +1551,12 @@ class IdentityLockedBboxTracker:
         # Everyone except the chosen patient is a distractor to remember.
         for s in scored[1:]:
             self._remember_distractor(s["hist"])
+        # Record how much the chosen patient box overlaps the nearest other
+        # detection — a crossing/occlusion signal for downstream logic + QA.
+        self.last_occlusion_iou = max(
+            (bbox_iou(best["bbox"], s["bbox"]) for s in scored[1:]),
+            default=0.0,
+        )
         return best
 
     def _info(
@@ -1581,6 +1587,7 @@ class IdentityLockedBboxTracker:
             "gallery_size": len(self.fixed_gallery),
             "blocked_switches_total": self.total_blocked_switches,
             "reacquired_total": self.total_reacquired,
+            "occlusion_iou": float(getattr(self, "last_occlusion_iou", 0.0)),
         }
 
     def _enter_lost(
@@ -1639,6 +1646,9 @@ class IdentityLockedBboxTracker:
             )
 
         self._decay_distractors()
+        # Per-frame crossing/occlusion signal (max IoU of the chosen box vs other
+        # detections); reset each frame, set when a detection is selected.
+        self.last_occlusion_iou = 0.0
         predicted_bbox = self._predict_bbox()
 
         # (0) Hard anchor re-assertion — user ground truth overrides everything.
