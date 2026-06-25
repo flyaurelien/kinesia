@@ -1949,6 +1949,7 @@ def resolve_identity_track(
     reentry_cost: float = 0.10,
     shape_weight: float = 0.5,
     distractor_penalty: float = 0.5,
+    ambiguity_margin: float = 0.08,
 ) -> list[dict[str, Any]]:
     """Offline (non-causal) identity resolution by Viterbi over detection frames.
 
@@ -2064,11 +2065,30 @@ def resolve_identity_track(
     for t, s in enumerate(path):
         frame = detection_frames[t]
         present = s is not None and s != -1
+        # Per-frame identity confidence for human review: the gap between the two
+        # best candidate rewards this frame. A small gap means two people were
+        # nearly tied here (a crossing/look-alike) — flag it as ambiguous so the
+        # viewer can queue exactly those moments for one-click confirmation.
+        cand_rewards = sorted(
+            (reward(frame, i) for i in range(len(frame["candidates"]))),
+            reverse=True,
+        )
+        cand_rewards = [r for r in cand_rewards if r > neg_inf / 2]
+        if len(cand_rewards) >= 2:
+            margin = cand_rewards[0] - cand_rewards[1]
+        elif cand_rewards:
+            margin = max(cand_rewards[0], ambiguity_margin)  # lone candidate = confident
+        else:
+            margin = 0.0
+        ambiguous = bool(present and len(cand_rewards) >= 2 and margin < ambiguity_margin)
+        confidence = float(np.clip(margin / max(2.0 * ambiguity_margin, 1e-6), 0.0, 1.0)) if present else 0.0
         out.append({
             "frame_idx": frame["frame_idx"],
             "state": "present" if present else "absent",
             "bbox": frame["candidates"][s]["bbox"] if present else None,
             "cand_idx": s if present else -1,
+            "confidence": confidence,
+            "ambiguous": ambiguous,
         })
     return out
 
@@ -2127,10 +2147,24 @@ def apply_offline_identity_resolution(
     }
 
     suppressed = 0
+    ambiguous_frames = 0
     current_state: str | None = None
+    current_conf: float | None = None
+    current_ambig = False
     for idx, record in enumerate(records):
         if idx in resolved_by_record:
-            current_state = resolved_by_record[idx]["state"]
+            r = resolved_by_record[idx]
+            current_state = r["state"]
+            current_conf = r.get("confidence")
+            current_ambig = bool(r.get("ambiguous"))
+        # Annotate present records with the resolved identity confidence so the
+        # viewer can surface ambiguous moments for one-click human confirmation.
+        if record.get("subject_present"):
+            if current_conf is not None:
+                record["identity_confidence"] = float(current_conf)
+            record["identity_ambiguous"] = bool(current_ambig)
+            if current_ambig:
+                ambiguous_frames += 1
         if current_state != "absent":
             continue
         if not record.get("subject_present"):
@@ -2156,6 +2190,7 @@ def apply_offline_identity_resolution(
 
     summary["applied"] = True
     summary["suppressed_frames"] = suppressed
+    summary["ambiguous_frames"] = ambiguous_frames
     summary["resolved_present_frames"] = len(resolved_bboxes)
     summary["resolved_subject_bboxes"] = resolved_bboxes
     return summary

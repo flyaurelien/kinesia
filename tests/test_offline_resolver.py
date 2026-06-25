@@ -87,6 +87,22 @@ class OfflineResolverTests(unittest.TestCase):
         res = resolve(frames)
         self.assertTrue(all(r["cand_idx"] == 0 for r in res), [r["cand_idx"] for r in res])
 
+    def test_ambiguity_flag_marks_close_calls(self):
+        """Frames where two candidates are nearly tied are flagged ambiguous for
+        review; a clear single-candidate frame is confident."""
+        frames = []
+        for i in range(10):
+            px = 100 + i * 25
+            if i == 5:  # a crossing: two near-tied, co-located candidates
+                cands = [{"bbox": bb(px), "gallery": 0.72}, {"bbox": bb(px + 6), "gallery": 0.71}]
+            else:
+                cands = [{"bbox": bb(px), "gallery": 0.72}]
+            frames.append({"frame_idx": i, "candidates": cands})
+        res = resolve(frames)
+        self.assertTrue(res[5]["ambiguous"])
+        self.assertFalse(res[0]["ambiguous"])
+        self.assertLess(res[5]["confidence"], res[0]["confidence"])
+
     def test_gallery_only_candidates_unchanged(self):
         """Backward compatibility: candidates carrying only `gallery` resolve as before."""
         frames = [
