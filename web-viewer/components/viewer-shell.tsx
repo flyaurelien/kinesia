@@ -1109,6 +1109,24 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     if (start >= 0) out.push([start, frames.length - 1]);
     return out;
   }, [runDetail]);
+  // Contiguous frame spans the offline resolver flagged as identity-ambiguous
+  // (a crossing / look-alike) — the human-review queue: the few moments worth
+  // confirming, instead of scrubbing the whole clip.
+  const ambiguousSpans = useMemo<Array<{ start: number; end: number }>>(() => {
+    const spans: Array<{ start: number; end: number }> = [];
+    const frames = runDetail?.frames ?? [];
+    let start = -1;
+    for (let i = 0; i < frames.length; i += 1) {
+      if (frames[i]?.identityAmbiguous) {
+        if (start < 0) start = i;
+      } else if (start >= 0) {
+        spans.push({ start, end: i - 1 });
+        start = -1;
+      }
+    }
+    if (start >= 0) spans.push({ start, end: frames.length - 1 });
+    return spans;
+  }, [runDetail]);
   const hasManualSubject = validSubjectBox(subjectBox);
   const effectiveTrimEndSec = trimEndSec || videoDurationSec;
   const timelineDurationSec = Math.max(videoDurationSec, 0.1);
@@ -3305,6 +3323,22 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                 {" · "}
                 {activePlotJointIndices.length}/{PLOT_JOINT_OPTIONS.length} joints
               </span>
+              {ambiguousSpans.length > 0 ? (
+                <button
+                  type="button"
+                  className="plot-review-chip"
+                  title="Jump to the next moment where the subject identity is uncertain — review and confirm it"
+                  onClick={() => {
+                    const next =
+                      ambiguousSpans.find((sp) => sp.start > safeFrameIndex) ?? ambiguousSpans[0];
+                    setIsPlaying(false);
+                    setFrameIndex(next.start);
+                    setFrameCursor(next.start);
+                  }}
+                >
+                  ⚠ Review identity · {ambiguousSpans.length}
+                </button>
+              ) : null}
               {runDetail ? (
                 <div className="plot-export">
                   <button
