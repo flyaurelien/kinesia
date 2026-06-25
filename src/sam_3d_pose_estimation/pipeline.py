@@ -1335,6 +1335,19 @@ class IdentityLockedBboxTracker:
         self.total_distractor_blocks = 0
         self.last_status = "boot"
 
+        # Occlusion-aware hold: when two detections overlap (a crossing) the
+        # appearance crops blend and a greedy single-target pick can flip onto
+        # the other person. Instead, carry the locked subject straight through on
+        # constant-velocity motion — no switch, no appearance/gallery update —
+        # and let the normal gallery-dominant selection re-anchor to the right
+        # person once the detections separate. Main defence against ID swaps.
+        self.occlusion_hold_enabled = True
+        self.occlusion_iou_thresh = 0.30
+        self.max_occlusion_frames = 30
+        self.occluded_frames = 0
+        self.total_occlusion_holds = 0
+        self.last_occlusion_iou = 0.0
+
     def _predict_bbox(self) -> np.ndarray:
         """Constant-velocity prediction of next box: current centre shifted by velocity."""
         center = bbox_center(self.current_bbox) + self.velocity_xy
@@ -1467,6 +1480,31 @@ class IdentityLockedBboxTracker:
         pred = self._predict_bbox()
         # Damp velocity while lost to avoid drifting forever.
         self.velocity_xy *= 0.92
+        self.prev_bbox = self.current_bbox.copy()
+        self.current_bbox = pred
+        return pred
+
+    def _detections_crossing(self, detections: list[dict[str, Any]]) -> float:
+        """Max pairwise IoU among the detections; high means two people overlap (a crossing)."""
+        boxes = [
+            clip_bbox(d["bbox"], self.frame_shape)
+            for d in detections
+            if d.get("bbox") is not None
+        ]
+        best = 0.0
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                best = max(best, bbox_iou(boxes[i], boxes[j]))
+        return float(best)
+
+    def _coast_through_occlusion(self) -> np.ndarray:
+        """Advance the box by its (undamped) constant velocity.
+
+        Used to carry the locked subject straight through a crossing without
+        switching identity — unlike ``_hold_prediction`` it does NOT damp the
+        velocity, because the subject is still moving normally, just occluded.
+        """
+        pred = self._predict_bbox()
         self.prev_bbox = self.current_bbox.copy()
         self.current_bbox = pred
         return pred
@@ -1692,6 +1730,31 @@ class IdentityLockedBboxTracker:
         # (A) Independent detector evidence is available this frame.
         if detections is not None:
             self.frames_since_reacquire_scan = 0
+            # Occlusion-aware hold: two overlapping detections = a crossing, where
+            # blended crops make a greedy pick flip identity. While we hold a
+            # confident lock, carry the subject through on constant-velocity
+            # motion (no switch, no appearance/gallery update); the gallery-
+            # dominant selection below re-anchors once the people separate.
+            crossing_iou = self._detections_crossing(detections)
+            self.last_occlusion_iou = crossing_iou
+            if (
+                self.occlusion_hold_enabled
+                and not relaxed
+                and not self.is_lost
+                and self.fixed_gallery
+                and crossing_iou >= self.occlusion_iou_thresh
+                and self.occluded_frames < self.max_occlusion_frames
+            ):
+                self.occluded_frames += 1
+                self.total_occlusion_holds += 1
+                held = self._coast_through_occlusion()
+                return held.copy(), self._info(
+                    "occluded", present=True, supported=False,
+                    appearance=cand_adaptive, gallery=cand_gallery,
+                    stability=(cand_metrics["combined"] if cand_metrics else None),
+                    reacquire_scanned=True, reacquire_candidates=len(detections),
+                )
+            self.occluded_frames = 0
             best_det = self._select_patient_detection(frame_bgr, detections, predicted_bbox)
             if best_det is not None:
                 was_lost = self.is_lost
@@ -1829,6 +1892,7 @@ class IdentityLockedBboxTracker:
             "blocked_switches_total": self.total_blocked_switches,
             "distractor_blocks_total": self.total_distractor_blocks,
             "reacquired_total": self.total_reacquired,
+            "occlusion_holds_total": self.total_occlusion_holds,
             "last_status": self.last_status,
             "currently_lost": self.is_lost,
             "lost_frames": self.lost_frames,
