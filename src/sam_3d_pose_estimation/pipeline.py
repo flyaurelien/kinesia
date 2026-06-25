@@ -1347,6 +1347,10 @@ class IdentityLockedBboxTracker:
         self.occluded_frames = 0
         self.total_occlusion_holds = 0
         self.last_occlusion_iou = 0.0
+        # Last accepted *detection* centre — velocity is driven from the detector
+        # (the reliable subject position) rather than the smoother self-fed box,
+        # so the occlusion hold carries the true motion straight through a cross.
+        self.last_det_center: np.ndarray | None = None
 
     def _predict_bbox(self) -> np.ndarray:
         """Constant-velocity prediction of next box: current centre shifted by velocity."""
@@ -1496,6 +1500,19 @@ class IdentityLockedBboxTracker:
             for j in range(i + 1, len(boxes)):
                 best = max(best, bbox_iou(boxes[i], boxes[j]))
         return float(best)
+
+    def _update_motion_from_detection(self, det_bbox: np.ndarray) -> None:
+        """EMA the velocity from consecutive detection centres.
+
+        The self-fed box can lag the subject (and then a constant-velocity hold
+        barely moves), so we prefer the detector — the most reliable measure of
+        where the subject actually is — to drive motion through a crossing.
+        """
+        center = bbox_center(det_bbox).astype(np.float32)
+        if self.last_det_center is not None:
+            delta = center - self.last_det_center
+            self.velocity_xy = (0.6 * self.velocity_xy + 0.4 * delta).astype(np.float32)
+        self.last_det_center = center
 
     def _coast_through_occlusion(self) -> np.ndarray:
         """Advance the box by its (undamped) constant velocity.
@@ -1765,11 +1782,14 @@ class IdentityLockedBboxTracker:
                     and (relaxed or (cand_gallery is not None and cand_gallery >= self.gallery_floor))
                 )
                 if supported_candidate:
-                    # Detection confirms the smoother self-fed box: keep it.
+                    # Detection confirms the smoother self-fed box: keep it, but
+                    # take the velocity from the detection so a later occlusion
+                    # hold carries the subject's true motion (not the lagging box).
                     self._accept_candidate(
                         candidate_bbox, candidate_hist, status=status, reacquired=was_lost,
                         supported=True, update_ref=True, grow_gallery=True,
                     )
+                    self._update_motion_from_detection(best_det["bbox"])
                     return self.current_bbox.copy(), self._info(
                         status, present=True, supported=True,
                         appearance=cand_adaptive, gallery=cand_gallery,
@@ -1781,6 +1801,7 @@ class IdentityLockedBboxTracker:
                     best_det["bbox"], best_det["hist"], status=status, reacquired=was_lost,
                     supported=True, update_ref=True, grow_gallery=True,
                 )
+                self._update_motion_from_detection(best_det["bbox"])
                 return self.current_bbox.copy(), self._info(
                     status, present=True, supported=True,
                     appearance=best_det["adaptive"], gallery=best_det["gallery"],

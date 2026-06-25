@@ -65,7 +65,7 @@ def crossing_boxes(n_frames=48, box_w=130, box_h=320):
     return seq
 
 
-def run_crossing(tracker_factory, n_frames=48, box_w=130, **factory_kw):
+def run_crossing(tracker_factory, n_frames=48, box_w=130, distractor_color=DISTRACTOR_GREEN, **factory_kw):
     """Drive a crossing and return metrics; closed-loop self-fed box = prev output."""
     seq = crossing_boxes(n_frames, box_w=box_w)
     p0, _ = seq[0]
@@ -77,8 +77,15 @@ def run_crossing(tracker_factory, n_frames=48, box_w=130, **factory_kw):
     for pbox, dbox in seq:
         # Patient drawn first, distractor second, so the overlap region blends
         # toward the distractor in BOTH crops — the realistic ambiguity.
-        frame = make_frame([(pbox, PATIENT_BLUE), (dbox, DISTRACTOR_GREEN)])
-        out, info = tracker.update(frame, prev_out, detections=[det(pbox), det(dbox)])
+        frame = make_frame([(pbox, PATIENT_BLUE), (dbox, distractor_color)])
+        # Realistic self-fed box: the pose model re-fits each frame and snaps to
+        # whichever person is nearest where it last sat — so it follows the
+        # subject normally but can be hijacked onto the other person at a cross.
+        proposed = min(
+            (pbox, dbox),
+            key=lambda b: abs(float(bbox_center(b)[0]) - float(bbox_center(prev_out)[0])),
+        )
+        out, info = tracker.update(frame, proposed, detections=[det(pbox), det(dbox)])
         prev_out = out.copy()
         if info["present"]:
             present += 1
@@ -150,6 +157,20 @@ class CrossingBenchmarkTests(unittest.TestCase):
     def test_occlusion_hold_disabled_still_swaps(self):
         """Control: with the occlusion hold off, the greedy matcher still swaps."""
         m = run_crossing(default_tracker, occlusion_hold_enabled=False)
+        self.assertFalse(m["ended_on_patient"])
+
+    def test_no_swap_through_identical_appearance_crossing(self):
+        """Hardest case: two identically-dressed people crossing — appearance
+        cannot disambiguate, so only motion continuity can. The detection-driven
+        occlusion hold carries the subject through and the nearest-detection
+        re-anchor on exit keeps the lock on the patient."""
+        m = run_crossing(default_tracker, distractor_color=PATIENT_BLUE)
+        self.assertEqual(m["id_switches"], 0)
+        self.assertTrue(m["ended_on_patient"])
+
+    def test_identical_appearance_swaps_without_hold(self):
+        """Control: the identical-appearance crossing swaps with the hold off."""
+        m = run_crossing(default_tracker, distractor_color=PATIENT_BLUE, occlusion_hold_enabled=False)
         self.assertFalse(m["ended_on_patient"])
 
 
