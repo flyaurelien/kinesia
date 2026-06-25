@@ -444,6 +444,8 @@ function normalizeFrame(
         numericOrNull(rawFrame.identity_stability_score) ??
         numericOrNull(record.identity_stability_score)
       : null,
+    identityConfidence: numericOrNull(rawFrame.identity_confidence ?? record.identity_confidence),
+    identityAmbiguous: Boolean(rawFrame.identity_ambiguous ?? record.identity_ambiguous),
   };
 }
 

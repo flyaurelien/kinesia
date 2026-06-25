@@ -56,6 +56,10 @@ export type RunFrame = {
   };
   // Subject-tracking confidence for this frame (0..1), null when no subject.
   trackingScore?: number | null;
+  // Offline identity-resolution confidence (0..1) and ambiguity flag — drives
+  // the human-review queue (flagged = a crossing/look-alike worth confirming).
+  identityConfidence?: number | null;
+  identityAmbiguous?: boolean;
 };
 
 // A named time series (one value per frame) plotted in the signal charts.
