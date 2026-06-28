@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kinesia-web-viewer",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/aurelien/Desktop/VS-new/projects/kinesia && export PATH=\"/opt/homebrew/bin:$PATH\" && exec bash /Users/aurelien/Desktop/VS-new/projects/kinesia/dev.sh"
+      ],
+      "port": 4001,
+      "autoPort": false
+    }
+  ]
+}

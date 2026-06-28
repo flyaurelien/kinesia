@@ -338,6 +338,46 @@ def clip_bbox(bbox: np.ndarray, frame_shape: tuple[int, int, int]) -> np.ndarray
     return np.array([x1, y1, x2, y2], dtype=np.float32)
 
 
+def densify_anchor_track(
+    anchor_track: list[tuple[int, np.ndarray]],
+    frame_shape: tuple[int, int, int],
+    *,
+    max_gap_factor: int = 3,
+) -> list[tuple[int, np.ndarray]]:
+    """Fill small gaps in a sparse chosen-subject anchor track by interpolation.
+
+    The detect step samples the chosen subject at a stride (e.g. every 5th
+    frame), but the reconstruction processes EVERY frame (effective_frame_step
+    is forced to 1). A frame with no anchor falls back to the live identity
+    tracker, which can pick the other person at a crossing — so without this the
+    chosen-subject lock would only hold on one frame in `stride`, and identity
+    swaps re-enter the output on all the others.
+
+    Linearly interpolate the subject box across gaps up to ``max_gap_factor``
+    times the (estimated) sampling stride, so every frame inside a covered span
+    is hard-anchored. Genuine long absences (the subject left the frame) exceed
+    that window and are left uncovered, so re-entry is still handled by the
+    tracker/detector rather than by extrapolating a stale box.
+    """
+    if len(anchor_track) < 2:
+        return list(anchor_track)
+    track = sorted(anchor_track, key=lambda item: item[0])
+    diffs = [track[i + 1][0] - track[i][0] for i in range(len(track) - 1)]
+    stride_est = max(1, int(np.median(diffs))) if diffs else 1
+    max_gap = max(2, max_gap_factor * stride_est)
+    dense: list[tuple[int, np.ndarray]] = []
+    for (f0, b0), (f1, b1) in zip(track, track[1:]):
+        dense.append((f0, b0))
+        gap = f1 - f0
+        if 1 < gap <= max_gap:
+            for k in range(1, gap):
+                t = k / gap
+                bi = (1.0 - t) * b0.astype(np.float32) + t * b1.astype(np.float32)
+                dense.append((f0 + k, clip_bbox(bi, frame_shape)))
+    dense.append(track[-1])
+    return dense
+
+
 def normalize_sam3_text_prompts(prompts: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
     """Canonicalise, de-duplicate and cap the user's text prompts (defaulting to "person")."""
     if prompts is None:
@@ -3854,8 +3894,17 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
                 (_fi, clip_bbox(np.asarray(_bb, dtype=np.float32), (height, width, 3)))
             )
         anchor_track.sort(key=lambda item: item[0])
+        # Densify to every frame within covered spans: the reconstruction
+        # processes every frame (effective_frame_step==1) but the detect track is
+        # strided, so without this the chosen-subject lock would cover only one
+        # frame in `stride` and the live identity tracker would re-introduce
+        # crossing swaps on all the others.
+        anchor_track = densify_anchor_track(anchor_track, (height, width, 3))
         if anchor_track:
-            print(f"Subject anchors armed: {len(anchor_track)} re-assertion point(s)")
+            print(
+                f"Subject anchors armed: {len(anchor_track)} frame(s) "
+                "(densified from the chosen-subject track)"
+            )
     next_anchor_i = 0
 
     interrupted = False
