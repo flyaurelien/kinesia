@@ -112,6 +112,15 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, require_output_dir: bo
             "exactly the person the user picked."
         ),
     )
+    parser.add_argument(
+        "--subject-index",
+        type=int,
+        default=0,
+        help=(
+            "Which subject of the --subject-track-file to reconstruct (0-based). "
+            "Multi-subject selections run once per subject with this index."
+        ),
+    )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--frame-step", type=int, default=1)
     parser.add_argument("--max-frames", type=int, default=None)
@@ -251,21 +260,35 @@ def load_subject_tracks(path: str) -> list[dict]:
                 continue
             anchors = _frames_to_anchors(subj["frames"])
             if anchors:
-                out.append({"subject_id": str(subj.get("subjectId", i)), "anchors": anchors})
+                out.append({
+                    "subject_id": str(subj.get("subjectId", i)),
+                    "label": str(subj.get("label", len(out) + 1)),
+                    "color": str(subj.get("color", "")),
+                    "anchors": anchors,
+                })
         return out
     frames = data.get("frames", {})
     if isinstance(frames, dict):
         anchors = _frames_to_anchors(frames)
         if anchors:
-            return [{"subject_id": "0", "anchors": anchors}]
+            return [{"subject_id": "0", "label": "1", "color": "", "anchors": anchors}]
     return []
 
 
-def load_subject_track_anchors(path: str) -> list[dict]:
-    """Backwards-compatible single-subject loader: the FIRST subject's anchors.
-    (Multi-subject reconstruction loops over load_subject_tracks.)"""
+def select_subject_track(path: str, index: int) -> dict | None:
+    """Pick ONE subject of the chosen-subject track file for this run.
+    Multi-subject reconstruction = one pipeline run per subject: the web layer
+    spawns N jobs over the same file with --subject-index 0..N-1."""
     subjects = load_subject_tracks(path)
-    return subjects[0]["anchors"] if subjects else []
+    if not subjects:
+        return None
+    return subjects[max(0, min(int(index), len(subjects) - 1))]
+
+
+def load_subject_track_anchors(path: str, index: int = 0) -> list[dict]:
+    """Anchors of the chosen subject (see select_subject_track)."""
+    subject = select_subject_track(path, index)
+    return subject["anchors"] if subject else []
 
 
 def default_prompt_for_target(inference_target: str) -> str:
@@ -334,10 +357,12 @@ def build_pipeline_config(args: argparse.Namespace, output_dir: Path) -> Pipelin
     anchors = parse_prompt_anchors_json(getattr(args, "prompt_anchors_json", ""))
     # A chosen-subject track file (from the detect step) supersedes any other
     # anchors: every detected frame becomes a hard anchor so the run reconstructs
-    # exactly the picked person.
-    track_anchors = load_subject_track_anchors(getattr(args, "subject_track_file", ""))
-    if track_anchors:
-        anchors = track_anchors
+    # exactly the picked person (one run per subject via --subject-index).
+    subject = select_subject_track(
+        getattr(args, "subject_track_file", ""), getattr(args, "subject_index", 0)
+    )
+    if subject and subject["anchors"]:
+        anchors = subject["anchors"]
     # If multi-anchor list provided and no explicit single-box was passed,
     # promote the median anchor to the primary prompt fields so the existing
     # single-anchor tracker can consume it.
@@ -367,6 +392,10 @@ def build_pipeline_config(args: argparse.Namespace, output_dir: Path) -> Pipelin
         ),
         tracking_anchors=anchors or None,
         subject_track_file=(getattr(args, "subject_track_file", "") or "").strip() or None,
+        subject_index=max(0, int(getattr(args, "subject_index", 0) or 0)),
+        subject_id=(subject or {}).get("subject_id"),
+        subject_label=(subject or {}).get("label"),
+        subject_color=((subject or {}).get("color") or "").strip() or None,
         start_frame=max(args.start_frame, 0),
         frame_step=max(args.frame_step, 1),
         max_frames=args.max_frames,

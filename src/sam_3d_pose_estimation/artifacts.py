@@ -76,7 +76,10 @@ def build_run_manifest(
         "source_video": str(metadata.get("video_input") or ""),
         "config_profile": config_profile,
         "inference_target": metadata.get("inference_target") or "body",
+        # One reconstructed subject per run; multi-subject selections are one
+        # run per subject, grouped by the viewer via metadata["subject"].
         "subject_count": 1,
+        "subject": metadata.get("subject"),
         "frame_count": processed_frames,
         "processed_frames": processed_frames,
         "fps": float(fps) if isinstance(fps, (int, float)) else None,
