@@ -121,6 +121,13 @@ class PipelineConfig:
     # the detect-step streaming preview). When set, it seeds manual_subject_bboxes
     # directly so the run reconstructs exactly that person.
     subject_track_file: str | None = None
+    # Which subject of that file this run reconstructs (multi-subject selections
+    # spawn one run per subject), plus its display label ("Person 2") and colour
+    # (hex, from the detect-step palette) used across the rendered previews.
+    subject_index: int = 0
+    subject_id: str | None = None
+    subject_label: str | None = None
+    subject_color: str | None = None
 
 
 @dataclass
@@ -2956,8 +2963,10 @@ def draw_mesh_overlay_and_mask(
     faces: np.ndarray,
     focal_length: float,
     face_stride: int,
+    tint_bgr: tuple[int, int, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Draw the filled+outlined mesh overlay on the frame and return (overlay, binary mask)."""
+    """Draw the filled+outlined mesh overlay on the frame and return (overlay, binary mask).
+    ``tint_bgr`` (the subject's palette colour) overrides the default fill/contour."""
     overlay = frame_bgr.copy()
     mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
     tri_pts = _project_visible_triangles(
@@ -2972,13 +2981,19 @@ def draw_mesh_overlay_and_mask(
 
     if np.any(mask):
         in_mask = mask > 0
-        overlay_color = np.array([95, 228, 255], dtype=np.float32)
+        fill = tint_bgr if tint_bgr is not None else (95, 228, 255)
+        contour = (
+            tuple(int(min(255, c * 1.15 + 15)) for c in tint_bgr)
+            if tint_bgr is not None
+            else (0, 255, 0)
+        )
+        overlay_color = np.array(fill, dtype=np.float32)
         alpha = 0.44
         overlay[in_mask] = (
             overlay[in_mask].astype(np.float32) * (1.0 - alpha) + overlay_color * alpha
         ).astype(np.uint8)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2, lineType=cv2.LINE_AA)
+        cv2.drawContours(overlay, contours, -1, contour, 2, lineType=cv2.LINE_AA)
 
         # Dense vertex dots keep the "full mesh" visual with much lower CPU cost.
         u, v, valid = project_mesh_to_image(vertices_cam, focal_length, frame_bgr.shape)
@@ -2986,7 +3001,8 @@ def draw_mesh_overlay_and_mask(
         vi = np.round(v[valid]).astype(np.int32)
         h, w = frame_bgr.shape[:2]
         in_bounds = (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
-        overlay[vi[in_bounds], ui[in_bounds]] = (60, 210, 255)
+        dot = tint_bgr if tint_bgr is not None else (60, 210, 255)
+        overlay[vi[in_bounds], ui[in_bounds]] = dot
 
     return overlay, mask
 
@@ -3026,11 +3042,30 @@ def rasterize_mesh_mask(
     return mask
 
 
-def draw_segmentation_panel(frame_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Tinted+outlined segmentation panel for the 2x2 preview's top-right tile."""
+def hex_to_bgr(hex_color: str | None, default: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Parse a '#rrggbb' colour into OpenCV BGR, falling back to ``default``."""
+    s = (hex_color or "").strip().lstrip("#")
+    if len(s) != 6:
+        return default
+    try:
+        r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+    except ValueError:
+        return default
+    return (b, g, r)
+
+
+def draw_segmentation_panel(
+    frame_bgr: np.ndarray,
+    mask: np.ndarray,
+    tint_bgr: tuple[int, int, int] = (40, 220, 80),
+    label: str = "Segmentation mask",
+) -> np.ndarray:
+    """Tinted+outlined segmentation panel for the 2x2 preview's top-right tile.
+    The tint follows the subject's palette colour so every subject's run is
+    visually distinguishable."""
     panel = frame_bgr.copy()
     color = np.zeros_like(panel)
-    color[:] = (40, 220, 80)
+    color[:] = tint_bgr
     alpha = 0.35
 
     in_mask = mask > 0
@@ -3039,15 +3074,16 @@ def draw_segmentation_panel(frame_bgr: np.ndarray, mask: np.ndarray) -> np.ndarr
         + color[in_mask].astype(np.float32) * alpha
     ).astype(np.uint8)
 
+    outline = tuple(int(min(255, c * 1.15 + 15)) for c in tint_bgr)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(panel, contours, -1, (20, 255, 20), 2, lineType=cv2.LINE_AA)
+    cv2.drawContours(panel, contours, -1, outline, 2, lineType=cv2.LINE_AA)
     cv2.putText(
         panel,
-        "Segmentation mask",
+        label,
         (20, 36),
         cv2.FONT_HERSHEY_SIMPLEX,
         1.0,
-        (20, 255, 20),
+        outline,
         2,
         cv2.LINE_AA,
     )
@@ -3776,6 +3812,16 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
             refresh_every=cfg.live_preview_refresh_every,
         )
 
+    # Subject presentation: every rendered panel (mesh overlay, bbox, segmentation
+    # tint, labels) uses the chosen subject's detect-step palette colour and label
+    # so multi-subject runs are visually distinguishable at a glance.
+    subject_bgr: tuple[int, int, int] | None = (
+        hex_to_bgr(cfg.subject_color, (0, 255, 0)) if cfg.subject_color else None
+    )
+    subject_label_text = (
+        f"Person {cfg.subject_label}" if cfg.subject_label else "Patient"
+    )
+
     manual_subject_bboxes: dict[int, np.ndarray] = {}
     manual_subject_tracking_info: dict[str, Any] = {
         "enabled": False,
@@ -4498,6 +4544,7 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
                         display_faces,
                         focal_length=focal_length,
                         face_stride=cfg.face_stride_overlay,
+                        tint_bgr=subject_bgr,
                     )
                 else:
                     panel_top_left = frame.copy()
@@ -4505,20 +4552,21 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
 
                 bbox_i = preview_bbox.astype(np.int32)
                 if subject_present:
+                    box_color = subject_bgr if subject_bgr is not None else (0, 255, 0)
                     cv2.rectangle(
                         panel_top_left,
                         (int(bbox_i[0]), int(bbox_i[1])),
                         (int(bbox_i[2]), int(bbox_i[3])),
-                        (0, 255, 0),
+                        box_color,
                         2,
                     )
                     cv2.putText(
                         panel_top_left,
-                        "Partial target" if inference_target == "hand" else "Patient",
+                        "Partial target" if inference_target == "hand" else subject_label_text,
                         (int(bbox_i[0]), max(20, int(bbox_i[1]) - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.8,
-                        (0, 255, 0),
+                        box_color,
                         2,
                         cv2.LINE_AA,
                     )
@@ -4539,7 +4587,16 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
                 )
                 rich_frame: np.ndarray | None = None
                 if need_rich_frame:
-                    panel_top_right = draw_segmentation_panel(frame, mask)
+                    panel_top_right = draw_segmentation_panel(
+                        frame,
+                        mask,
+                        tint_bgr=(subject_bgr if subject_bgr is not None else (40, 220, 80)),
+                        label=(
+                            f"Segmentation - {subject_label_text}"
+                            if cfg.subject_label
+                            else "Segmentation mask"
+                        ),
+                    )
 
                     panel_bottom_left = render_3d_space_view(
                         display_vertices_space_cam,
@@ -4749,7 +4806,15 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
     # hand, replay the logged detector candidates through a Viterbi that uses
     # future frames to undo the greedy tracker's brief jumps onto a bystander.
     identity_offline_summary: dict[str, Any] = {"applied": False}
-    if cfg.identity_offline_resolve and inference_target != "hand" and identity_trace:
+    if (
+        cfg.identity_offline_resolve
+        and inference_target != "hand"
+        and identity_trace
+        # A wizard-chosen dense subject track is user-validated ground truth:
+        # every covered frame is hard-anchored, so second-guessing it with the
+        # offline resolver only produces spurious "review identity" flags.
+        and not cfg.subject_track_file
+    ):
         try:
             identity_offline_summary = apply_offline_identity_resolution(
                 records,
@@ -4867,6 +4932,16 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
             identity_tracker.summary() if identity_tracker is not None else None
         ),
         "identity_offline_resolution": identity_offline_summary,
+        # Which chosen subject this run reconstructs (multi-subject selections
+        # spawn one run per subject); the viewer uses label/colour for display
+        # and groups sibling runs into one 3D scene.
+        "subject": {
+            "index": int(cfg.subject_index),
+            "id": cfg.subject_id,
+            "label": cfg.subject_label,
+            "color": cfg.subject_color,
+            "track_file": cfg.subject_track_file,
+        },
         "hand_temporal_postprocess": (
             hand_temporal.summary() if hand_temporal is not None else None
         ),
