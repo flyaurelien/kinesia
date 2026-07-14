@@ -66,6 +66,11 @@ export async function POST(request: Request) {
     const sam3TextPromptsRaw = formData.get("sam3TextPrompts");
     const promptAnchorsJsonRaw = formData.get("promptAnchorsJson");
     const subjectTrackFile = await validateSubjectTrackFile(formData.get("subjectTrackFile"));
+    const subjectIndexRaw = formData.get("subjectIndex");
+    const subjectIndex =
+      subjectTrackFile && typeof subjectIndexRaw === "string" && subjectIndexRaw.trim()
+        ? Math.max(0, Math.trunc(Number(subjectIndexRaw)) || 0)
+        : 0;
     const runName =
       typeof runNameRaw === "string" && runNameRaw.trim().length > 0
         ? runNameRaw.trim()
@@ -122,6 +127,7 @@ export async function POST(request: Request) {
           ? promptAnchorsJsonRaw.trim()
           : null,
       subjectTrackFile,
+      subjectIndex,
     };
     const sam3TextPrompts =
       typeof sam3TextPromptsRaw === "string" && sam3TextPromptsRaw.trim().length > 0

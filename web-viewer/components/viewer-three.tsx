@@ -13,6 +13,15 @@ type DisplayAnchor = {
   centerZ: number;
 };
 
+// A sibling run of the same multi-subject selection, rendered in the SAME 3D
+// scene as the primary run. Both runs share the source video's camera space,
+// so placing the sibling with the primary's anchor/pivot preserves the two
+// people's true relative positions.
+export type SiblingSubject = {
+  runDetail: RunDetail;
+  color: string | null;
+};
+
 type ThreeSpaceViewerProps = {
   runDetail: RunDetail;
   frameIndex: number;
@@ -24,6 +33,8 @@ type ThreeSpaceViewerProps = {
   meshOpacity: number;
   selectedJointIndices: number[];
   onJointPick?: (jointIndex: number) => void;
+  subjectColor?: string | null;
+  siblings?: SiblingSubject[];
 };
 
 const CAM_TO_WORLD = new THREE.Matrix4().set(
@@ -518,6 +529,7 @@ function MeshGeometry({
   pivot,
   anchor,
   meshOpacity,
+  color,
 }: {
   runId: string;
   meshFile: string;
@@ -526,6 +538,7 @@ function MeshGeometry({
   pivot: THREE.Vector3;
   anchor: DisplayAnchor | null;
   meshOpacity: number;
+  color?: string | null;
 }) {
   const [faces, setFaces] = useState<Uint32Array | null>(null);
   const [verticesState, setVerticesState] = useState<{ meshFile: string; vertices: Float32Array } | null>(null);
@@ -617,7 +630,7 @@ function MeshGeometry({
   return (
     <mesh geometry={geometry} castShadow receiveShadow>
       <meshBasicMaterial
-        color={MESH_COLOR}
+        color={color || MESH_COLOR}
         transparent={meshOpacity < 0.995}
         opacity={meshOpacity}
         side={THREE.DoubleSide}
@@ -677,6 +690,7 @@ function MeshBody({
   meshOpacity,
   selectedJointIndices,
   onJointPick,
+  color,
 }: {
   runId: string;
   frame: RunFrame;
@@ -694,6 +708,7 @@ function MeshBody({
   meshOpacity: number;
   selectedJointIndices: number[];
   onJointPick?: (jointIndex: number) => void;
+  color?: string | null;
 }) {
   const subjectVisible = frame.subjectPresent !== false;
   const jointOffset = useMemo(() => footJointGroundOffset(frame, quaternion, anchor, pivot), [anchor, frame, pivot, quaternion]);
@@ -723,6 +738,7 @@ function MeshBody({
           pivot={meshPivot}
           anchor={anchor}
           meshOpacity={meshOpacity}
+          color={color}
         />
       ) : null}
       {showBones ? <SkeletonBones joints={joints} /> : null}
@@ -989,7 +1005,60 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         meshOpacity={props.meshOpacity}
         selectedJointIndices={props.selectedJointIndices}
         onJointPick={props.onJointPick}
+        color={props.subjectColor}
       />
+      {(props.siblings ?? []).map((sibling) => {
+        // Sibling subjects of the same selection share the source video's
+        // camera space, so rendering them with the PRIMARY run's anchor,
+        // pivot, position and upright rotation preserves the true relative
+        // placement of the people: relative offset = upright * (siblingCam -
+        // primaryCam). Each sibling grounds its own feet (MeshBody re-derives
+        // Z from its own frame's foot joints).
+        const siblingFrames = sibling.runDetail.frames;
+        if (siblingFrames.length === 0) {
+          return null;
+        }
+        const sBase = Math.min(baseIndex, siblingFrames.length - 1);
+        const sNext = Math.min(nextIndex, siblingFrames.length - 1);
+        const sFrameBase = siblingFrames[sBase];
+        const sFrameNext = siblingFrames[sNext] ?? sFrameBase;
+        const sCachedMeshIndex = props.showMesh
+          ? nearestCachedMeshFrameIndex(sibling.runDetail.id, siblingFrames, sBase)
+          : null;
+        const sMeshIndex = sCachedMeshIndex ?? sBase;
+        const sMeshFrame = siblingFrames[sMeshIndex] ?? sFrameBase;
+        const sMeshNext = sMeshIndex === sBase ? sFrameNext : sMeshFrame;
+        const sMeshInterpolation = sMeshIndex === sBase ? interpolation : 0;
+        return (
+          <group key={sibling.runDetail.id}>
+            {props.showMesh ? (
+              <MeshPreloader
+                runId={sibling.runDetail.id}
+                frames={siblingFrames}
+                frameIndex={sBase}
+              />
+            ) : null}
+            <MeshBody
+              runId={sibling.runDetail.id}
+              frame={interpolateFrame(sFrameBase, sFrameNext, interpolation)}
+              meshFrame={sMeshFrame}
+              nextMeshFrame={sMeshNext}
+              meshInterpolation={sMeshInterpolation}
+              position={position}
+              pivot={pivot}
+              meshPivot={pivot}
+              quaternion={upright}
+              anchor={anchor}
+              showMesh={props.showMesh}
+              showJoints={false}
+              showBones={props.showBones}
+              meshOpacity={props.meshOpacity}
+              selectedJointIndices={[]}
+              color={sibling.color}
+            />
+          </group>
+        );
+      })}
       <SceneControls focus={focus} resetKey={props.runDetail.id} />
     </>
   );

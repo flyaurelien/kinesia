@@ -51,6 +51,9 @@ type CreateOptions = {
   // Absolute path to the chosen subject's dense per-frame box track from the
   // detect step (validated server-side); drives the run via --subject-track-file.
   subjectTrackFile?: string | null;
+  // Which subject of that file this run reconstructs (multi-subject selections
+  // create one job per subject; siblings share the track file).
+  subjectIndex?: number | null;
 };
 
 type JobStore = {
@@ -720,6 +723,9 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
       ...(options.subjectTrackFile
         ? ["--subject-track-file", options.subjectTrackFile]
         : []),
+      ...(options.subjectTrackFile && (options.subjectIndex ?? 0) > 0
+        ? ["--subject-index", String(options.subjectIndex ?? 0)]
+        : []),
       ...(maskTimeRangesArg ? ["--mask-time-ranges", maskTimeRangesArg] : []),
       ...(!renderPreview ? ["--no-preview"] : []),
       ...(job.sam3TextPrompts.length > 0 ? ["--sam3-text-prompts", job.sam3TextPrompts.join(",")] : []),
@@ -847,7 +853,14 @@ export async function createJobFromExistingUpload(
   const now = nowIso();
   const target = normalizeTarget(inferenceTargetRaw);
   const sourceBase = safeToken(runName || path.basename(fileName, path.extname(fileName)));
-  const baseRun = sourceBase.endsWith("_processed") ? sourceBase : `${sourceBase}_processed`;
+  // Multi-subject selections create one run per subject — suffix the run id so
+  // sibling runs are distinguishable at a glance ("..._processed_person2").
+  const subjectSuffix =
+    options.subjectTrackFile && (options.subjectIndex ?? 0) > 0
+      ? `_person${(options.subjectIndex ?? 0) + 1}`
+      : "";
+  const baseRun =
+    (sourceBase.endsWith("_processed") ? sourceBase : `${sourceBase}_processed`) + subjectSuffix;
   const runId = await uniqueRunId(baseRun);
   const id = crypto.randomUUID();
   const directory = runDir(runId);

@@ -1,4 +1,15 @@
 // Lightweight overview of a run for list/index views (no per-frame data).
+// Which chosen subject a run reconstructs. Multi-subject selections spawn one
+// run per subject; sibling runs share `trackFile` and the viewer reunites them
+// in a single 3D scene, colouring each by its detect-step palette colour.
+export type RunSubject = {
+  index: number;
+  id: string | null;
+  label: string | null;
+  color: string | null;
+  trackFile: string | null;
+};
+
 export type RunSummary = {
   id: string;
   processedFrames: number;
@@ -9,6 +20,7 @@ export type RunSummary = {
   inferenceTarget?: "body" | "hand" | null;
   latestAnalysisId?: string | null;
   qaStatus?: string | null;
+  subject?: RunSubject | null;
 };
 
 // Reference point used to ground the reconstructed scene in world space.
@@ -85,6 +97,7 @@ export type RunDetail = {
   inputVideoUrl: string | null;
   previewVideoUrl: string | null;
   previewVideoTimebase: "processed" | "source";
+  subject?: RunSubject | null;
   signals: RunSignal[];
   frames: RunFrame[];
   analyses?: Array<{

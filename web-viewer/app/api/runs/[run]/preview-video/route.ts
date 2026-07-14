@@ -11,6 +11,9 @@ export const dynamic = "force-dynamic";
 // Per-run subfolder holding derived web-only assets (kept out of the run's primary outputs).
 const WEB_CACHE_DIR = ".web_cache";
 const WEB_PANELS_FILE = "preview_web_panels_v1.mp4";
+// The composite `_processed.mp4` is a 2x2 grid whose top-right tile is the
+// segmentation panel — cropping it out yields the viewer's Segmentation tab.
+const SEGMENTATION_FILE = "preview_segmentation_v1.mp4";
 const VIDEO_CACHE_CONTROL = "public, max-age=3600";
 
 // Run ffmpeg with the given args, rejecting (with the tail of stderr) on any non-zero exit.
@@ -47,14 +50,18 @@ async function waitForFreshFile(filePath: string, minMtimeMs: number): Promise<b
   return false;
 }
 
-// Build (and cache) a portrait side-by-side panels preview from the source video, transcoding
-// only when the cache is missing/stale. A lock file serializes concurrent requests; on any
-// failure (or losing the lock race) we fall back to streaming the original source.
-async function ensureWebPanelsPreview(sourcePath: string): Promise<string> {
+// Build (and cache) a derived preview from the source video, transcoding only
+// when the cache is missing/stale. A lock file serializes concurrent requests;
+// on any failure (or losing the lock race) we fall back to streaming the source.
+async function ensureDerivedPreview(
+  sourcePath: string,
+  cacheFileName: string,
+  filterArgs: string[],
+): Promise<string> {
   const sourceStat = await stat(sourcePath);
   const runDir = path.dirname(sourcePath);
   const cacheDir = path.join(runDir, WEB_CACHE_DIR);
-  const outPath = path.join(cacheDir, WEB_PANELS_FILE);
+  const outPath = path.join(cacheDir, cacheFileName);
   const lockPath = `${outPath}.lock`;
 
   const cached = await stat(outPath).catch(() => null);
@@ -78,14 +85,7 @@ async function ensureWebPanelsPreview(sourcePath: string): Promise<string> {
       "-y",
       "-i",
       sourcePath,
-      "-filter_complex",
-      [
-        "[0:v]crop=w=iw/2:h=ih/2:x=iw/2:y=0,scale=540:960:flags=lanczos[left]",
-        "[0:v]crop=w=iw/2:h=ih/2:x=0:y=0,scale=540:960:flags=lanczos[right]",
-        "[left][right]hstack=inputs=2[v]",
-      ].join(";"),
-      "-map",
-      "[v]",
+      ...filterArgs,
       "-an",
       "-c:v",
       "libx264",
@@ -112,6 +112,29 @@ async function ensureWebPanelsPreview(sourcePath: string): Promise<string> {
   }
 }
 
+// Portrait side-by-side panels render (mesh overlay + segmentation tiles).
+async function ensureWebPanelsPreview(sourcePath: string): Promise<string> {
+  return ensureDerivedPreview(sourcePath, WEB_PANELS_FILE, [
+    "-filter_complex",
+    [
+      "[0:v]crop=w=iw/2:h=ih/2:x=iw/2:y=0,scale=540:960:flags=lanczos[left]",
+      "[0:v]crop=w=iw/2:h=ih/2:x=0:y=0,scale=540:960:flags=lanczos[right]",
+      "[left][right]hstack=inputs=2[v]",
+    ].join(";"),
+    "-map",
+    "[v]",
+  ]);
+}
+
+// The composite's top-right tile only: the tinted segmentation panel at the
+// source video's native size (the viewer's Segmentation tab).
+async function ensureSegmentationPreview(sourcePath: string): Promise<string> {
+  return ensureDerivedPreview(sourcePath, SEGMENTATION_FILE, [
+    "-vf",
+    "crop=w=iw/2:h=ih/2:x=iw/2:y=0",
+  ]);
+}
+
 // Stream a run's preview video, honoring HTTP range requests so the player can seek.
 // The optional `variant=web-panels` query selects the cached side-by-side panels render.
 export async function GET(
@@ -126,7 +149,9 @@ export async function GET(
     const filePath =
       variant === "web-panels"
         ? await ensureWebPanelsPreview(sourcePath)
-        : sourcePath;
+        : variant === "segmentation"
+          ? await ensureSegmentationPreview(sourcePath)
+          : sourcePath;
     const effectiveContentType = filePath.endsWith(".mp4") ? "video/mp4" : contentType;
     const fileStat = await stat(filePath);
     const fileSize = fileStat.size;
