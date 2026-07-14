@@ -50,6 +50,7 @@ export function RunStep() {
     subjectPrompt,
     segments,
     stagedUpload,
+    detect,
     detectTrackFile,
     activeJobRunId,
   } = state;
@@ -132,29 +133,42 @@ export function RunStep() {
         formData.append("maskedSegments", JSON.stringify(masked));
       }
 
-      // The detect step produced a dense per-frame box track for exactly the
-      // chosen subject — feed it to the run so it reconstructs that person.
-      if (detectTrackFile) {
-        formData.append("subjectTrackFile", detectTrackFile);
+      // The detect step produced a dense per-frame box track for the chosen
+      // subject(s). Multi-subject selections spawn ONE JOB PER SUBJECT (the
+      // pipeline reconstructs one person per run); the jobs queue serialises
+      // them and the viewer reunites the sibling runs in a single 3D scene.
+      const subjectCount = detectTrackFile
+        ? Math.max(1, detect?.selectedSubjects.length ?? 1)
+        : 1;
+      const firstJobs: Job[] = [];
+      for (let subjectIndex = 0; subjectIndex < subjectCount; subjectIndex += 1) {
+        const fd = new FormData();
+        formData.forEach((value, key) => fd.append(key, value));
+        if (detectTrackFile) {
+          fd.append("subjectTrackFile", detectTrackFile);
+          fd.append("subjectIndex", String(subjectIndex));
+          fd.append("subjectCount", String(subjectCount));
+        }
+        const resp = await apiFetch("/api/jobs", { method: "POST", body: fd });
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => "");
+          throw new Error(`Job creation failed (${resp.status}) ${errText}`);
+        }
+        const json = (await resp.json()) as { job?: Job };
+        if (!json.job) {
+          throw new Error("Job creation returned no job object");
+        }
+        firstJobs.push(json.job);
       }
-
-      const resp = await apiFetch("/api/jobs", { method: "POST", body: formData });
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => "");
-        throw new Error(`Job creation failed (${resp.status}) ${errText}`);
-      }
-      const json = (await resp.json()) as { job?: Job };
-      if (!json.job) {
-        throw new Error("Job creation returned no job object");
-      }
-      setSubmittedRunId(json.job.runId);
-      setSelectedRunId(json.job.runId);
-      dispatch({ type: "set_active_run_id", runId: json.job.runId });
+      const primary = firstJobs[0];
+      setSubmittedRunId(primary.runId);
+      setSelectedRunId(primary.runId);
+      dispatch({ type: "set_active_run_id", runId: primary.runId });
       await loadJobs();
       // Drop straight into the full viewer on the just-launched run, which shows
       // live progress + the 3D/kinematics building up — the embedded run-step
       // view is redundant with it.
-      actions.onViewResults?.(json.job.runId);
+      actions.onViewResults?.(primary.runId);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -168,6 +182,7 @@ export function RunStep() {
     loadJobs,
     segments,
     stagedUpload,
+    detect,
     detectTrackFile,
     subjectPrompt,
   ]);

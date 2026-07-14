@@ -84,6 +84,22 @@ export async function POST(request: Request, { params }: { params: { id: string 
     ];
   };
 
+  // Track colours (from the detect palette) ride along so each subject's run
+  // renders its previews/meshes in the colour the user saw in the wizard.
+  let trackColor = new Map<number, string>();
+  try {
+    const tracksRaw = JSON.parse(await fs.readFile(path.join(dir, "tracks.json"), "utf-8")) as {
+      tracks?: Array<{ id?: unknown; color?: unknown }>;
+    };
+    trackColor = new Map(
+      (tracksRaw.tracks ?? [])
+        .filter((t) => Number.isFinite(Number(t.id)) && typeof t.color === "string")
+        .map((t) => [Number(t.id), String(t.color)]),
+    );
+  } catch {
+    trackColor = new Map();
+  }
+
   const subjects = subjectReqs.map((req, i) => {
     const wanted = new Set(req.trackIds);
     const frames: Record<string, [number, number, number, number]> = {};
@@ -96,7 +112,14 @@ export async function POST(request: Request, { params }: { params: { id: string 
       }
       if (best) frames[String(line.f)] = toPx(best.b);
     }
-    return { subjectId: req.subjectId, label: i + 1, frameCount: Object.keys(frames).length, frames };
+    const color = req.trackIds.map((tid) => trackColor.get(tid)).find(Boolean) ?? "";
+    return {
+      subjectId: req.subjectId,
+      label: i + 1,
+      color,
+      frameCount: Object.keys(frames).length,
+      frames,
+    };
   });
 
   const totalFrames = subjects.reduce((n, s) => n + s.frameCount, 0);
@@ -114,5 +137,11 @@ export async function POST(request: Request, { params }: { params: { id: string 
     trackFilePath,
     subjectCount: subjects.length,
     frameCounts: subjects.map((s) => s.frameCount),
+    subjects: subjects.map((s) => ({
+      subjectId: s.subjectId,
+      label: s.label,
+      color: s.color,
+      frameCount: s.frameCount,
+    })),
   });
 }

@@ -793,7 +793,8 @@ button:disabled {
 }
 
 .vo-box {
-  fill: rgba(250, 204, 21, 0.06);
+  /* Stroke colour comes inline from each subject's palette colour. */
+  fill: rgba(255, 255, 255, 0.05);
   stroke: #facc15;
   stroke-width: 2;
   stroke-dasharray: 6 4;

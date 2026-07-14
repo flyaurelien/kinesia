@@ -935,7 +935,11 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
   const [signalPickerOpen, setSignalPickerOpen] = useState(false);
   const [plotLayoutMode, setPlotLayoutMode] = useState<"stacked" | "overlay">("overlay");
   // Which view fills the left media pane (3D stays on the right).
-  const [leftView, setLeftView] = useState<"video" | "box">("box");
+  const [leftView, setLeftView] = useState<"video" | "box" | "seg">("box");
+  // Sibling runs of the same multi-subject selection (same chosen-subject track
+  // file) — rendered together with the primary run in one 3D scene and as
+  // extra coloured boxes on the tracking overlay.
+  const [siblingDetails, setSiblingDetails] = useState<RunDetail[]>([]);
   // Left/right media split, % width of the (small) source-video pane; the 3D
   // reconstruction fills the rest of the media row.
   const [mediaColPct, setMediaColPct] = useState(26);
@@ -1357,6 +1361,47 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
       abortController.abort();
     };
   }, [selectedRunId]);
+
+  // Load the sibling runs of a multi-subject selection (same chosen-subject
+  // track file) so all subjects appear together in the 3D scene and overlay.
+  const subjectTrackFile = runDetail?.subject?.trackFile ?? null;
+  const siblingIdsKey = useMemo(() => {
+    if (!runDetail || !subjectTrackFile) {
+      return "";
+    }
+    return runs
+      .filter((r) => r.subject?.trackFile === subjectTrackFile && r.id !== runDetail.id)
+      .map((r) => r.id)
+      .sort()
+      .join("|");
+  }, [runDetail, runs, subjectTrackFile]);
+  useEffect(() => {
+    if (!siblingIdsKey) {
+      setSiblingDetails([]);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      siblingIdsKey.split("|").map(async (id) => {
+        try {
+          const res = await apiFetch(`/api/runs/${encodeURIComponent(id)}`, { cache: "no-store" });
+          if (!res.ok) {
+            return null;
+          }
+          return ((await res.json()) as RunDetailResponse).run;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((rows) => {
+      if (!cancelled) {
+        setSiblingDetails(rows.filter((r): r is RunDetail => r !== null));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [siblingIdsKey]);
 
   useEffect(() => {
     if (!selectedRunId || !activeJobForRun) {
@@ -2860,24 +2905,50 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                     <button type="button" className={leftView === "box" ? "active" : ""} onClick={() => setLeftView("box")}>
                       Tracking box
                     </button>
+                    <button type="button" className={leftView === "seg" ? "active" : ""} onClick={() => setLeftView("seg")}>
+                      Segmentation
+                    </button>
                   </div>
-                  {runDetail.previewVideoUrl ? (
-                    <video
-                      key={runDetail.id}
-                      ref={videoRef}
-                      src={apiUrl(runDetail.previewVideoUrl) ?? undefined}
-                      muted
-                      playsInline
-                      preload="auto"
-                      controls={false}
-                      disablePictureInPicture
-                    />
-                  ) : (
-                    <div className="media-pane-empty">No preview video for this run.</div>
-                  )}
+                  {(() => {
+                    // Video + Tracking box show the CLEAN source video (the
+                    // exact file the pipeline consumed, so the timeline maps
+                    // 1:1 to the records); Segmentation shows the tinted
+                    // segmentation render derived from the processed video.
+                    const leftVideoUrl =
+                      leftView === "seg"
+                        ? runDetail.previewVideoUrl
+                          ? `${runDetail.previewVideoUrl}?variant=segmentation`
+                          : null
+                        : runDetail.inputVideoUrl ?? runDetail.previewVideoUrl;
+                    return leftVideoUrl ? (
+                      <video
+                        key={`${runDetail.id}:${leftVideoUrl}`}
+                        ref={videoRef}
+                        src={apiUrl(leftVideoUrl) ?? undefined}
+                        muted
+                        playsInline
+                        preload="auto"
+                        controls={false}
+                        disablePictureInPicture
+                      />
+                    ) : (
+                      <div className="media-pane-empty">No preview video for this run.</div>
+                    );
+                  })()}
                   {leftView === "box" ? (
                     <VideoTrackingOverlay
-                      frame={runDetail.frames[safeFrameIndex] ?? null}
+                      subjects={[
+                        {
+                          frame: runDetail.frames[safeFrameIndex] ?? null,
+                          color: runDetail.subject?.color ?? null,
+                          label: runDetail.subject?.label ? `Person ${runDetail.subject.label}` : null,
+                        },
+                        ...siblingDetails.map((sib) => ({
+                          frame: sib.frames[safeFrameIndex] ?? null,
+                          color: sib.subject?.color ?? null,
+                          label: sib.subject?.label ? `Person ${sib.subject.label}` : null,
+                        })),
+                      ]}
                       videoWidth={runDetail.videoWidth}
                       videoHeight={runDetail.videoHeight}
                     />
@@ -2908,6 +2979,11 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                       meshOpacity={meshOpacityPercent / 100}
                       selectedJointIndices={activePlotJointIndices}
                       onJointPick={toggleActiveJoint}
+                      subjectColor={runDetail.subject?.color ?? null}
+                      siblings={siblingDetails.map((sib) => ({
+                        runDetail: sib,
+                        color: sib.subject?.color ?? null,
+                      }))}
                     />
                   </div>
                 </div>

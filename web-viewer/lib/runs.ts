@@ -15,9 +15,30 @@ import {
   runsRoot,
   usesConfiguredRunsRoot,
 } from "./store";
-import type { RunDetail, RunFrame, RunSignal, RunSummary } from "./types";
+import type { RunDetail, RunFrame, RunSignal, RunSubject, RunSummary } from "./types";
 
 type JsonRecord = Record<string, unknown>;
+
+// Parse the run's chosen-subject record (written by the pipeline into both the
+// metadata and the manifest). Null when the run predates subjects or was not
+// driven by a detect-step selection.
+function subjectFromRecord(raw: unknown): RunSubject | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const rec = raw as JsonRecord;
+  const trackFile = typeof rec.track_file === "string" && rec.track_file ? rec.track_file : null;
+  if (!trackFile && rec.label == null && rec.color == null) {
+    return null;
+  }
+  return {
+    index: Number.isFinite(Number(rec.index)) ? Number(rec.index) : 0,
+    id: rec.id != null ? String(rec.id) : null,
+    label: rec.label != null ? String(rec.label) : null,
+    color: typeof rec.color === "string" && rec.color ? rec.color : null,
+    trackFile,
+  };
+}
 
 const VIDEO_EXTENSIONS = [".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"];
 const MESH_DIR = "meshes";
@@ -318,6 +339,7 @@ export async function listRuns(): Promise<RunSummary[]> {
           quality && typeof quality === "object" && typeof (quality as JsonRecord).status === "string"
             ? String((quality as JsonRecord).status)
             : null,
+        subject: subjectFromRecord(manifest?.subject ?? metadata?.subject),
       });
     } catch {
       // A recovered legacy folder can contain partial JSON; skip it instead of breaking the UI.
@@ -853,6 +875,7 @@ export async function getRunDetail(runIdRaw: string, analysisId?: string | null)
     inputVideoUrl: inputVideo ? `/api/runs/${encodeURIComponent(runId)}/input-video` : null,
     previewVideoUrl: previewVideo ? `/api/runs/${encodeURIComponent(runId)}/preview-video` : null,
     previewVideoTimebase,
+    subject: subjectFromRecord(metadata?.subject ?? manifest?.subject),
     signals,
     frames: displayFrames,
     analyses: analysesFromManifest(manifest),
