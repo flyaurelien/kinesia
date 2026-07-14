@@ -71,3 +71,6 @@ vendor/mlx_sam3/pyproject.toml
 
 # Kinesia local
 /tracking_box.mp4
+# iCloud collision copies
+* 2
+* 2.*

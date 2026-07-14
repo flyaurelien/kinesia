@@ -84,46 +84,83 @@ _PALETTE = [
     "#fb7185", "#4ade80", "#38bdf8", "#facc15", "#c084fc",
 ]
 
-# ── Tracking: PURE-APPEARANCE global gallery matching ────────────────────────
-# Identity is decided ONLY by appearance, NEVER by position — so any camera angle,
-# any cut, any re-arrangement of the people works. Each identity accumulates a
-# GALLERY of ALL its raw 256-d SAM3 embeddings over the whole history (no average,
-# no cap — RAM is cheap and detail matters). At frame t every detection is scored
-# against EVERY identity's full gallery (the best-K matching exemplars) and matched
-# globally (Hungarian). Because identity is recomputed from scratch every frame
-# against the entire clean history, a handful of bad frames can never poison the
-# rest of the video, and a person who left / changed pose / changed angle is still
-# recognised the instant any of their past views matches again. A detection that
-# overlaps another (a crossing) is matched but NOT banked — its embedding is
-# contaminated by the other person, so it must never enter the clean gallery.
+# ── Tracking: position-first cascade with appearance re-identification ──────
+# Two people crossing paths is the case that matters, and appearance is the WORST
+# signal exactly there: the boxes blend, the embeddings mix, and a confident-wrong
+# match swaps the identities for the rest of the clip. Position is the OPPOSITE:
+# on contiguous frames people cannot teleport, so a track's constant-velocity
+# prediction overlaps its own person overwhelmingly better than the other one —
+# crossings included. Hence a cascade (the BoT-SORT/ByteTrack recipe):
+#
+#   1. ACTIVE tracks (seen recently) are matched to detections by PREDICTED-BOX
+#      IoU (Hungarian). Appearance only breaks ties, and only on detections that
+#      are ISOLATED (not overlapping another detection) — in a crossing blend it
+#      is contaminated, so there it is ignored entirely.
+#   2. Detections no active track claims (and tracks whose IoU gate failed —
+#      e.g. after a hard scene cut, where position is meaningless) fall back to
+#      appearance-only re-identification against the full gallery history.
+#   3. A leftover detection becomes a NEW identity only if it does not
+#      substantially overlap any existing track — a crossing fragment (the box
+#      hugging two half-people) must never be born as a ghost identity.
+#
+# Galleries stay unbounded (every distinct view of a person, no averaging), but a
+# view is MEMORISED only when the detection is isolated — an overlapped view is
+# displayed yet never banked, so a crossing can never poison the history that
+# appearance re-ID depends on.
 
-_MATCH_COS = 0.84        # accept a detection↔identity match at/above this top-K sim;
-                         # below it the detection is a NEW identity (mergeable split,
-                         # never a guessed swap). Same person ~0.86-0.99 (full gallery
-                         # almost always finds a close past view) vs different ~0.72-0.83.
-_BANK_MARGIN = 0.05      # a view is MEMORISED only if its identity clearly beats every
-                         # other (margin >= this). An ambiguous detection (a crossing /
-                         # occlusion blend — the swap source) is still displayed but NOT
-                         # banked, so a real gallery never ingests the other person and
-                         # the top-K match stays clean. Attachment itself is unchanged,
-                         # so this never fragments. Measured: clean same-person margins
-                         # ~0.13; contaminating/blend views live below ~0.05 (down to <0).
+_MATCH_COS = 0.84        # appearance re-ID threshold (stage 2): same person
+                         # ~0.86-0.99 vs different ~0.72-0.83 on this backbone.
+_MATCH_COS_LOW = 0.76    # second-chance re-ID threshold for tracks lost only
+                         # MOMENTS ago (within the active window) — right after a
+                         # scene cut the same person can dip below the strict
+                         # threshold (backlight, scale); a recently-present person
+                         # is near-certainly still there, so the Hungarian-best
+                         # pairing is accepted at this laxer bar WITH a margin.
+_MATCH_LOW_MARGIN = 0.03 # ...but only when it beats the runner-up by this much.
+_MATCH_COS_FLOOR = 0.60  # last-resort pairing floor (stage 2c): after a camera
+                         # change the SAME person from a new angle (e.g. from
+                         # behind) can sit well below the lax bar; when recently-
+                         # seen tracks and unclaimed detections remain, pairing
+                         # them beats fragmenting a real person into a ghost id.
+                         # Never applied during a dissolve frame (blends could
+                         # lock in an error) and never blindly: Hungarian-optimal
+                         # with a per-track winner margin.
+_TELEPORT_VEL = 40.0     # px/frame; an implausible per-frame displacement (scene
+                         # cut) resets the velocity instead of poisoning the EMA.
+_BANK_MARGIN = 0.05      # additionally require the matched identity to beat every
+                         # rival by this margin before a view enters the gallery.
 _GALLERY_TOPK = 5        # appearance = mean of the top-K best-matching gallery views
 _DEDUP_COS = 0.992       # skip only a near-identical view (keeps every real pose/angle)
 _N_INIT = 2              # detections before an identity is confirmed (surfaced)
 _MIN_SURFACE_FRAMES = 2
-# Motion continuity: a light position term added to the appearance assignment so
-# that at a crossing — where blended embeddings match BOTH galleries equally and
-# pure-appearance Hungarian can flip — each identity stays with the detection
-# nearest its last box instead of teleporting onto the other person. It only
-# breaks ties (appearance still must clear _MATCH_COS) and is disabled for stale
-# tracks, so re-identification after a real absence remains appearance-only.
-_MOTION_WEIGHT = 0.8
-_MOTION_RECENCY_FRAMES = 30
-_VEL_REF = 4.0           # px/frame at which an identity counts as "clearly moving";
-                         # only moving identities get the motion override, so a swap
-                         # during a walking crossing is fixed while a stationary
-                         # close-encounter stays pure-appearance (no frame loss)
+_ACTIVE_RECENCY = 75     # VIDEO FRAMES since last sighting for a track to count as
+                         # ACTIVE (position still meaningful, second-chance re-ID
+                         # eligible): 3 s at 25 fps — enough to coast through a
+                         # dissolve transition (~1.2 s) or a short occlusion.
+                         # Beyond it, re-ID is strict appearance-only (stage 2).
+_IOU_GATE = 0.10         # minimum predicted-box IoU for a stage-1 position match
+_APP_TIEBREAK = 0.35     # appearance weight inside the stage-1 cost (isolated dets
+                         # only) — position dominates, appearance orders near-ties.
+_CROSS_IOU = 0.30        # detection-detection overlap at/above which the pair is a
+                         # crossing blend: appearance is ignored and never banked.
+_NEW_ID_MAX_IOU = 0.35   # a leftover detection overlapping an existing track above
+                         # this spawns NO identity (crossing fragment — suppressed).
+_SCENE_CUT_DIFF = 28.0   # mean |Δgray| (0-255) between consecutive processed frames
+                         # (32x18 downsample) above which the frame is a hard cut:
+                         # position is void there. Walking at stride 5 stays ~3-12;
+                         # a white flash or a room change jumps to 60-120.
+
+
+def _frame_signature(frame_bgr: np.ndarray) -> np.ndarray:
+    """Tiny grayscale thumbnail used to detect hard scene cuts."""
+    small = cv2.resize(frame_bgr, (32, 18), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+
+def _is_scene_change(sig: np.ndarray, prev_sig: np.ndarray | None) -> bool:
+    if prev_sig is None:
+        return False
+    return float(np.abs(sig - prev_sig).mean()) >= _SCENE_CUT_DIFF
 
 
 class _Track:
@@ -133,8 +170,9 @@ class _Track:
     tie-break so two people can't swap identities at a crossing."""
 
     __slots__ = (
-        "id", "color", "box", "vel", "gallery", "_gmat", "hits", "confirmed",
-        "first_frame", "last_frame", "frame_count", "rep_frame", "rep_area",
+        "id", "color", "box", "vel", "pos_valid", "gallery", "_gmat", "tab",
+        "hits", "confirmed", "first_frame", "last_frame", "frame_count",
+        "rep_frame", "rep_area",
     )
 
     def __init__(self, tid: int, frame_idx: int, box_xyxy: np.ndarray, feat):
@@ -142,9 +180,15 @@ class _Track:
         self.color = _PALETTE[tid % len(_PALETTE)]
         self.box = _xyxy_to_cxcywh(box_xyxy)
         self.vel = np.zeros(2, dtype=np.float32)  # per-frame centre velocity (cx, cy)
+        # False after a scene cut: the box belongs to the OLD scene, so position
+        # matching is forbidden until appearance re-anchors this identity.
+        self.pos_valid = True
         # Gallery of RAW unit embeddings — every view, un-averaged, uncapped.
         self.gallery: list[np.ndarray] = []
         self._gmat: np.ndarray | None = None  # cached stack of `gallery` for matching
+        # Clothing-colour samples (trousers LAB a*/b*) from ISOLATED detections —
+        # the cross-segment identity descriptor (see _trousers_ab).
+        self.tab: list[tuple[float, float]] = []
         if feat is not None:
             self.gallery.append(_l2norm(feat))
         self.hits = 1
@@ -202,11 +246,19 @@ class _Track:
         # EMA the per-frame centre velocity from the observed displacement.
         step = max(1, int(frame_idx) - int(self.last_frame))
         inst_vel = (new_box[:2] - self.box[:2]) / float(step)
-        self.vel = inst_vel.astype(np.float32) if self.frame_count <= 1 else (0.6 * self.vel + 0.4 * inst_vel).astype(np.float32)
+        if float(np.hypot(inst_vel[0], inst_vel[1])) > _TELEPORT_VEL:
+            # Implausible jump (scene cut / re-ID across a hard reposition):
+            # position history is void — restart motion instead of poisoning it.
+            self.vel = np.zeros(2, dtype=np.float32)
+        elif self.frame_count <= 1:
+            self.vel = inst_vel.astype(np.float32)
+        else:
+            self.vel = (0.6 * self.vel + 0.4 * inst_vel).astype(np.float32)
         self.box = new_box
         if e_unit is not None:                        # bank every view (measured: a
             self._add(e_unit)                         # few degraded ones dilute, even
                                                       # enrich, and never erode the margin)
+        self.pos_valid = True  # an accepted match anchors the box in the current scene
         self.hits += 1
         if self.hits >= _N_INIT:
             self.confirmed = True
@@ -222,18 +274,18 @@ class TrackManager:
     def __init__(
         self,
         min_surface_frames: int = _MIN_SURFACE_FRAMES,
-        motion_weight: float = _MOTION_WEIGHT,
-        motion_recency: int = _MOTION_RECENCY_FRAMES,
+        active_recency: int = _ACTIVE_RECENCY,
+        app_tiebreak: float = _APP_TIEBREAK,
     ):
         self.tracks: list[_Track] = []
         self._next_id = 0
         # An identity must be present for at least this many detection-points to
         # surface (computed from a duration-in-seconds so it scales with fps/stride).
         self.min_surface_frames = max(1, int(min_surface_frames))
-        # Motion-continuity tie-break (see constants); instance-level so it can be
-        # tuned offline by replaying cached detections without re-running SAM3.
-        self.motion_weight = float(motion_weight)
-        self.motion_recency = int(motion_recency)
+        # Cascade knobs (instance-level so cached detections can be replayed
+        # offline with different values without re-running SAM3).
+        self.active_recency = int(active_recency)
+        self.app_tiebreak = float(app_tiebreak)
 
     def _new_track(self, frame_idx: int, box: np.ndarray, e_unit) -> _Track:
         t = _Track(self._next_id, frame_idx, box, e_unit)
@@ -241,18 +293,33 @@ class TrackManager:
         self.tracks.append(t)
         return t
 
-    def update(self, frame_idx: int, dets: list[dict]) -> list[tuple[int, np.ndarray]]:
-        """Assign identities to this frame's detections — PURE APPEARANCE, no position.
+    def update(
+        self,
+        frame_idx: int,
+        dets: list[dict],
+        scene_change: bool = False,
+    ) -> list[tuple[int, np.ndarray]]:
+        """Assign identities to this frame's detections — position-first cascade.
 
-        Every detection is scored against EVERY existing identity's full gallery
-        (top-K best-matching views), then matched globally (Hungarian) so two people
-        in the same frame always land on two different identities. A pair is accepted
-        only if the appearance similarity reaches ``_MATCH_COS``; otherwise the
-        detection starts a NEW identity (a mergeable split — never a guessed swap).
-        Because each frame is decided from scratch against the whole history (the only
-        state) and similarity is the mean of the top-K best gallery views, a handful of
-        degraded frames can't poison anything — measured: banking every view (occluded
-        / fade included) leaves the galleries unimodal and the margin unchanged."""
+        Stage 1: ACTIVE tracks (seen within ``active_recency`` detection-points)
+        are matched by predicted-box IoU (Hungarian, gated at ``_IOU_GATE``);
+        appearance only orders near-ties and only for ISOLATED detections — in a
+        crossing blend it is contaminated, so position alone decides there.
+        On a ``scene_change`` frame (hard cut) position is MEANINGLESS — two
+        people can coincidentally land where the other stood — so stage 1 is
+        skipped entirely and the frame is resolved by appearance alone.
+        Stage 2: whatever stage 1 left (stale tracks, post-cut frames where every
+        IoU gate fails) is matched by appearance against the full gallery history
+        (strict ``_MATCH_COS``); a second pass re-attaches tracks lost only
+        moments ago at the laxer ``_MATCH_COS_LOW`` with a winner margin — right
+        after a cut the same person can dip below the strict bar, and losing them
+        to a brand-new identity is the worse error.
+        Stage 3: a leftover detection spawns a NEW identity only if it does not
+        overlap an existing track above ``_NEW_ID_MAX_IOU``; otherwise it is a
+        crossing fragment and is SUPPRESSED (returned with id -1, never written).
+
+        Returns one ``(track_id, bbox)`` per detection; ``track_id`` is -1 for
+        suppressed crossing fragments."""
         assigned: dict[int, int] = {}
         unmatched_d = set(range(len(dets)))
 
@@ -262,62 +329,172 @@ class TrackManager:
             for d in dets
         ]
 
-        def attach(t: _Track, j: int, bankable: bool) -> None:
-            # bankable=False → the box/id are assigned and displayed, but the (blended,
-            # ambiguous) embedding is NOT memorised, so the gallery stays clean.
+        # A detection is ISOLATED when it does not overlap any other detection in
+        # this frame — only then is its embedding trustworthy (tie-breaks) and
+        # bankable (gallery growth). In a crossing, both blend and must be ignored.
+        n = len(dets)
+        isolated = [True] * n
+        for a in range(n):
+            for b in range(a + 1, n):
+                if _iou_xyxy(dets[a]["bbox"], dets[b]["bbox"]) >= _CROSS_IOU:
+                    isolated[a] = isolated[b] = False
+
+        sim_cache: dict[tuple[int, int], float] = {}
+
+        def sim(t: _Track, j: int) -> float:
+            key = (t.id, j)
+            if key not in sim_cache:
+                sim_cache[key] = t.appearance(embs[j]) if embs[j] is not None else 0.0
+            return sim_cache[key]
+
+        def attach(t: _Track, j: int) -> None:
+            # Bank the view only when the detection is isolated AND its identity
+            # clearly beats every rival — the gallery must never ingest a blend.
+            bankable = isolated[j] and not scene_change
+            if bankable and len(self.tracks) > 1:
+                s = sim(t, j)
+                rival = max((sim(o, j) for o in self.tracks if o.id != t.id), default=0.0)
+                bankable = (s - rival) >= _BANK_MARGIN
             t.update(frame_idx, dets[j]["bbox"], embs[j] if bankable else None)
+            if not scene_change and dets[j].get("tab") is not None and _strip_clear(dets, j):
+                t.tab.append(dets[j]["tab"])
+            if scene_change:
+                # A dissolve-frame box is a blend of two scenes: displaying it is
+                # fine, but it must NOT re-validate position — otherwise stage 1
+                # resumes on the first stable frame anchored to a blend and can
+                # grab the wrong person. Position revalidates only from a stable
+                # frame (update() above flips it back on the next clean attach).
+                t.pos_valid = False
             assigned[j] = t.id
             unmatched_d.discard(j)
 
-        # GLOBAL appearance assignment over ALL known identities × this frame's dets.
-        ids = list(self.tracks)
-        if ids and dets:
-            sim = np.zeros((len(ids), len(dets)), dtype=np.float32)
-            for i, t in enumerate(ids):
-                for j in range(len(dets)):
-                    sim[i, j] = t.appearance(embs[j]) if embs[j] is not None else 0.0
-            # Decouple two decisions so motion fixes crossings WITHOUT fragmenting:
-            #  (1) whether a detection is a NEW identity — appearance-only (its best
-            #      gallery match must clear _MATCH_COS), exactly as before; motion
-            #      never spawns identities.
-            #  (2) WHICH known identity a matchable detection attaches to — appearance
-            #      + a light motion-continuity term, so at a crossing (blended
-            #      embeddings that match both galleries) each identity stays with the
-            #      detection nearest its last box instead of teleporting.
-            matchable = [j for j in range(len(dets)) if float(sim[:, j].max()) >= _MATCH_COS]
-            if matchable:
-                # Motion override is gated by VELOCITY CONFIDENCE: only a clearly-
-                # moving identity gets it. At a walking crossing the blended embedding
-                # can confidently match the WRONG gallery, but the two walkers' velocity
-                # predictions are well-separated, so motion corrects it; a near-stationary
-                # close-encounter (unreliable prediction) stays pure-appearance, so
-                # identity continuity is never perturbed there (no frame loss).
-                cost = np.zeros((len(ids), len(matchable)), dtype=np.float32)
-                for i, t in enumerate(ids):
-                    recent = (frame_idx - t.last_frame) <= self.motion_recency
-                    vmag = float(np.hypot(t.vel[0], t.vel[1]))
-                    vconf = max(0.0, min(1.0, vmag / _VEL_REF))
-                    tb = t.predict(frame_idx) if (recent and vconf > 0.0) else None
-                    for b, j in enumerate(matchable):
-                        motion = (
-                            self.motion_weight * vconf * _iou_xyxy(tb, dets[j]["bbox"])
-                            if tb is not None else 0.0
-                        )
-                        cost[i, b] = sim[i, j] + motion
-                rows, cols = linear_sum_assignment(-cost)  # maximise appearance + motion
-                for i, b in zip(rows, cols):
-                    i = int(i)
-                    j = matchable[int(b)]
-                    # The detection already appearance-matches SOME identity, so it
-                    # attaches (never a spurious new track); motion only decided which.
-                    s = float(sim[i, j])
-                    rival = float(np.delete(sim[:, j], i).max()) if len(ids) > 1 else 0.0
-                    attach(ids[i], j, bankable=(s - rival >= _BANK_MARGIN))
+        # ── Stage 1: position continuity for ACTIVE tracks ──────────────────
+        if scene_change:
+            # Hard cut / dissolve frame: every stored box belongs to the OLD
+            # scene. Invalidate positions — stage 1 stays forbidden for each
+            # identity until appearance re-anchors it in the new scene (its
+            # update() flips pos_valid back). This also covers the frames right
+            # AFTER the cut, where stale predictions could coincidentally
+            # overlap the other person and steal their identity.
+            for t in self.tracks:
+                t.pos_valid = False
+        active = [
+            t for t in self.tracks
+            if t.pos_valid and (frame_idx - t.last_frame) <= self.active_recency
+        ]
+        if active and dets:
+            preds = [t.predict(frame_idx) for t in active]
+            iou = np.zeros((len(active), n), dtype=np.float32)
+            for i in range(len(active)):
+                for j in range(n):
+                    iou[i, j] = _iou_xyxy(preds[i], dets[j]["bbox"])
+            cost = np.full((len(active), n), 1e6, dtype=np.float32)
+            for i, t in enumerate(active):
+                for j in range(n):
+                    if iou[i, j] >= _IOU_GATE:
+                        tie = self.app_tiebreak * sim(t, j) if isolated[j] else 0.0
+                        cost[i, j] = -(float(iou[i, j]) + tie)
+            rows, cols = linear_sum_assignment(cost)
+            for i, j in zip(rows, cols):
+                if cost[int(i), int(j)] < 1e5:  # gate passed
+                    attach(active[int(i)], int(j))
 
-        # Anything not confidently matched to a known identity becomes a new one.
+        # ── Stage 2: appearance re-identification for everything left ───────
+        # Covers stale tracks (person left and came back) and hard scene cuts
+        # (active tracks whose IoU gate failed because the camera jumped).
+        rem_tracks = [t for t in self.tracks if t.id not in assigned.values()]
+        rem_dets = sorted(unmatched_d)
+        if rem_tracks and rem_dets:
+            app = np.zeros((len(rem_tracks), len(rem_dets)), dtype=np.float32)
+            for i, t in enumerate(rem_tracks):
+                for b, j in enumerate(rem_dets):
+                    app[i, b] = sim(t, j)
+            rows, cols = linear_sum_assignment(-app)
+            for i, b in zip(rows, cols):
+                if float(app[int(i), int(b)]) >= _MATCH_COS:
+                    attach(rem_tracks[int(i)], rem_dets[int(b)])
+
+        # ── Stage 2b: second-chance re-ID for JUST-LOST tracks ──────────────
+        # A person present moments ago (within the active window) is near-
+        # certainly still there; right after a hard cut their similarity can dip
+        # below the strict bar (backlight, scale, new room). Accept the best
+        # pairing at a laxer threshold, but only when it clearly beats the
+        # runner-up — fragmenting a real person into a ghost id is the worse error.
+        rem2_tracks = [
+            t for t in self.tracks
+            if t.id not in assigned.values()
+            and (frame_idx - t.last_frame) <= self.active_recency
+        ]
+        rem2_dets = sorted(unmatched_d)
+        if rem2_tracks and rem2_dets:
+            app2 = np.zeros((len(rem2_tracks), len(rem2_dets)), dtype=np.float32)
+            for i, t in enumerate(rem2_tracks):
+                for b, j in enumerate(rem2_dets):
+                    app2[i, b] = sim(t, j)
+            rows, cols = linear_sum_assignment(-app2)
+            for i, b in zip(rows, cols):
+                s = float(app2[int(i), int(b)])
+                runner_up = (
+                    float(np.delete(app2[:, int(b)], int(i)).max())
+                    if len(rem2_tracks) > 1 else 0.0
+                )
+                if s >= _MATCH_COS_LOW and (s - runner_up) >= _MATCH_LOW_MARGIN:
+                    attach(rem2_tracks[int(i)], rem2_dets[int(b)])
+
+        # ── Stage 2c: last-resort pairing after a camera change ─────────────
+        # A person filmed from a NEW angle (e.g. from behind after a cut) can
+        # fall below even the lax bar. If recently-seen tracks and unclaimed
+        # detections still face each other on a STABLE frame, pair them
+        # (Hungarian-optimal, floor + per-track margin) rather than fragment a
+        # real person into a ghost identity. Skipped mid-dissolve: a blend
+        # could anchor the wrong person and stage 1 would then lock the error.
+        if not scene_change:
+            rem3_tracks = [
+                t for t in self.tracks
+                if t.id not in assigned.values()
+                and (frame_idx - t.last_frame) <= self.active_recency
+            ]
+            rem3_dets = sorted(unmatched_d)
+            if rem3_tracks and rem3_dets:
+                app3 = np.zeros((len(rem3_tracks), len(rem3_dets)), dtype=np.float32)
+                for i, t in enumerate(rem3_tracks):
+                    for b, j in enumerate(rem3_dets):
+                        app3[i, b] = sim(t, j)
+                rows, cols = linear_sum_assignment(-app3)
+                for i, b in zip(rows, cols):
+                    s = float(app3[int(i), int(b)])
+                    row_margin = (
+                        s - float(np.delete(app3[int(i), :], int(b)).max())
+                        if len(rem3_dets) > 1 else 1.0
+                    )
+                    if s >= _MATCH_COS_FLOOR and row_margin >= _MATCH_LOW_MARGIN:
+                        attach(rem3_tracks[int(i)], rem3_dets[int(b)])
+
+        # ── Stage 3: births — never inside a crossing or a scene transition ─
         for j in list(unmatched_d):
+            if scene_change:
+                # Mid-dissolve frames are blends of two scenes: nobody genuinely
+                # appears there, and a blend must never become a ghost identity.
+                assigned[j] = -1
+                unmatched_d.discard(j)
+                continue
+            overlap = max(
+                (
+                    _iou_xyxy(t.predict(frame_idx), dets[j]["bbox"])
+                    for t in self.tracks
+                    if t.pos_valid  # an old-scene box must not veto a birth
+                ),
+                default=0.0,
+            )
+            if overlap >= _NEW_ID_MAX_IOU:
+                # Crossing fragment (a box hugging two half-people): suppressed —
+                # it must never be born as a ghost identity.
+                assigned[j] = -1
+                unmatched_d.discard(j)
+                continue
             t = self._new_track(frame_idx, dets[j]["bbox"], embs[j])
             assigned[j] = t.id
+            unmatched_d.discard(j)
 
         return [(assigned[j], dets[j]["bbox"]) for j in range(len(dets))]
 
@@ -335,6 +512,258 @@ class TrackManager:
             }
             for t in sorted(self.tracks, key=lambda x: x.frame_count, reverse=True)
             if t.confirmed and t.frame_count >= self.min_surface_frames
+        ]
+
+
+# ── Segment-level identity linking (montage-proof) ──────────────────────────
+# A clinical video is often a MONTAGE: several takes joined by dissolves. Within
+# one take, position continuity is near-infallible (people cannot teleport).
+# ACROSS a dissolve, position is void, and single-frame appearance right after a
+# cut can be actively misleading (backlight, tiny scale: measured wrong-person
+# sims up to 0.96). What IS reliable is the AGGREGATE: a person's whole-segment
+# gallery (dozens of views — close-ups included) matched against another
+# whole-segment gallery separates the same pair by a wide margin (measured
+# ~0.98 same vs ~0.85 cross on the reference clip).
+#
+# So: one fresh TrackManager per segment; when a segment closes, its tracklets
+# are linked to the global identities by gallery-to-gallery similarity
+# (Hungarian). The FIRST segment's ids stream live (they ARE the global ids —
+# a video without cuts behaves exactly as before); later segments are buffered
+# and flushed with FINAL global ids the moment the segment closes, so an id is
+# never rewritten after being emitted. Dissolve frames emit nothing.
+
+_LINK_MAX_DIST = 10.0    # max LAB (a*,b*) euclidean distance for a tracklet to
+                         # link to an existing identity. Measured on the reference
+                         # montage: correct links 0.4-8.9, a bystander fragment vs
+                         # a main 11.4 — so 10 accepts every true link and rejects
+                         # the impostor.
+_IDENTITY_AB_CAP = 200   # keep identity colour-sample sets bounded.
+_LINK_TARGET_MIN = 30    # an identity must carry at least this many frames of
+                         # evidence to be a LINK TARGET — a 12-frame bystander
+                         # blip with vaguely-similar colours must never attract a
+                         # main subject away from their real identity.
+_LINK_HARD_CAP = 20.0    # beyond this colour distance a link is never accepted.
+_LINK_ASSIGN_MARGIN = 6.0  # a pair above _LINK_MAX_DIST is still accepted when
+                         # the JOINT assignment demands it: banning the pair and
+                         # re-solving must cost at least this much more. Scene
+                         # lighting can shift denim's b* by >10 in absolute terms,
+                         # but the alternative pairing (swapping the two people)
+                         # stays far worse — measured margin 17.6 on the shifted
+                         # segment vs 5.5 for a bystander fragment.
+
+# Why COLOUR and not the SAM3 embeddings for cross-segment linking: measured on
+# the reference montage, whole-tracklet SAM3-embedding similarity picked the
+# WRONG person in 3 of 7 segments with high confidence (0.96-0.98) — the decoder
+# queries encode pose/scale/context more than identity. The trousers-region LAB
+# chroma (a*,b*) — khaki vs denim — separated every segment with a wide margin
+# and is nearly invariant to the lighting changes between takes.
+
+
+def _trousers_rect(box_xyxy: np.ndarray) -> tuple[float, float, float, float]:
+    """The central lower strip of a person box sampled by _trousers_ab."""
+    x1, y1, x2, y2 = (float(v) for v in box_xyxy[:4])
+    h, w = y2 - y1, x2 - x1
+    return (x1 + 0.30 * w, y1 + 0.55 * h, x2 - 0.30 * w, y1 + 0.92 * h)
+
+
+def _strip_clear(dets: list[dict], j: int) -> bool:
+    """True when detection ``j``'s trousers strip is not covered by any other
+    detection — upper bodies may overlap, but a colour sample is only taken
+    when the LEGS region itself is clearly this person's."""
+    sx1, sy1, sx2, sy2 = _trousers_rect(dets[j]["bbox"])
+    area = max(1e-6, (sx2 - sx1) * (sy2 - sy1))
+    for k, other in enumerate(dets):
+        if k == j:
+            continue
+        ox1, oy1, ox2, oy2 = (float(v) for v in other["bbox"][:4])
+        ix = max(0.0, min(sx2, ox2) - max(sx1, ox1))
+        iy = max(0.0, min(sy2, oy2) - max(sy1, oy1))
+        if ix * iy / area > 0.15:
+            return False
+    return True
+
+
+def _trousers_ab(frame_bgr: np.ndarray, box_xyxy: np.ndarray) -> tuple[float, float] | None:
+    """Median LAB (a*, b*) of the trousers region (central lower strip) of a
+    person box — a small, lighting-robust clothing-colour descriptor."""
+    x1, y1, x2, y2 = (int(v) for v in box_xyxy[:4])
+    h, w = y2 - y1, x2 - x1
+    if h < 40 or w < 12:
+        return None
+    ys, ye = y1 + int(0.55 * h), y1 + int(0.92 * h)  # trousers, avoid feet/floor
+    xs, xe = x1 + int(0.30 * w), x2 - int(0.30 * w)  # central strip only
+    crop = frame_bgr[max(0, ys):max(0, ye), max(0, xs):max(0, xe)]
+    if crop.size < 300:
+        return None
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).astype(np.float32)
+    return (
+        float(np.median(lab[..., 1]) - 128.0),
+        float(np.median(lab[..., 2]) - 128.0),
+    )
+
+
+class SegmentedIdentityTracker:
+    """Drives one TrackManager per scene segment and links tracklets globally.
+
+    ``process`` returns fully-FINAL jsonl lines ready to append (possibly none
+    while buffering, several when a segment closes)."""
+
+    def __init__(self, min_surface_frames: int, width: int, height: int, fps: float):
+        self.min_surface_frames = max(1, int(min_surface_frames))
+        self.width, self.height, self.fps = int(width), int(height), float(fps)
+        self._tm = TrackManager(min_surface_frames=1)
+        self._seg_idx = 0
+        self._in_cut = False
+        # Buffered (frame_idx, [(local_id, bbox, score), ...]) for segments > 0.
+        self._buffer: list[tuple[int, list[tuple[int, np.ndarray, float]]]] = []
+        # Global identities: gid -> {views, count, first, last, rep_frame, rep_area}
+        self._ids: dict[int, dict] = {}
+        self._next_gid = 0
+
+    # ── internals ────────────────────────────────────────────────────────────
+    def _line(self, frame_idx: int, entries: list[tuple[int, np.ndarray, float]]) -> str:
+        return json.dumps({
+            "f": frame_idx,
+            "t": round(frame_idx / self.fps, 3),
+            "dets": [
+                {"id": int(g), "b": _norm_xywh(b, self.width, self.height), "s": round(s, 3)}
+                for g, b, s in entries if g >= 0
+            ],
+        })
+
+    def _absorb(self, gid: int, t: _Track) -> None:
+        ident = self._ids.setdefault(gid, {
+            "tab": [], "count": 0, "first": t.first_frame,
+            "last": t.last_frame, "rep_frame": t.rep_frame, "rep_area": t.rep_area,
+        })
+        ident["tab"].extend(t.tab)
+        if len(ident["tab"]) > _IDENTITY_AB_CAP:
+            ident["tab"] = ident["tab"][::2]
+        ident["count"] += t.frame_count
+        ident["first"] = min(ident["first"], t.first_frame)
+        ident["last"] = max(ident["last"], t.last_frame)
+        if t.rep_area > ident["rep_area"]:
+            ident["rep_area"] = t.rep_area
+            ident["rep_frame"] = t.rep_frame
+
+    def _close_segment(self) -> list[str]:
+        """Link the finished segment's tracklets to global identities and flush
+        its buffered lines with final ids."""
+        tm, buf = self._tm, self._buffer
+        self._tm = TrackManager(min_surface_frames=1)
+        self._buffer = []
+        seg_was_first = (self._seg_idx == 0)
+        self._seg_idx += 1
+
+        if seg_was_first:
+            # Segment-0 local ids streamed live and ARE the global ids.
+            for t in tm.tracks:
+                self._absorb(t.id, t)
+            self._next_gid = max(self._next_gid, tm._next_id)
+            return []
+
+        # Link tracklets → identities by whole-tracklet CLOTHING COLOUR (median
+        # trousers a*/b*): the only signal measured to order every segment of
+        # the reference montage correctly (SAM3 embeddings picked the wrong
+        # person in 3/7 segments — see the note at _trousers_ab).
+        tracklets = [t for t in tm.tracks]
+        mapping: dict[int, int] = {}
+        cand = [t for t in tracklets if len(t.tab) >= 3]
+        usable = [
+            g for g, ident in self._ids.items()
+            if len(ident["tab"]) >= 3 and ident["count"] >= _LINK_TARGET_MIN
+        ]
+        if cand and usable:
+            def med(samples: list[tuple[float, float]]) -> np.ndarray:
+                arr = np.asarray(samples, dtype=np.float32)
+                return np.median(arr, axis=0)
+            dist = np.zeros((len(cand), len(usable)), dtype=np.float32)
+            for i, t in enumerate(cand):
+                ct = med(t.tab)
+                for jj, g in enumerate(usable):
+                    dist[i, jj] = float(np.linalg.norm(ct - med(self._ids[g]["tab"])))
+            rows, cols = linear_sum_assignment(dist)
+            opt_total = float(dist[rows, cols].sum())
+            for i, jj in zip(rows, cols):
+                d0 = float(dist[int(i), int(jj)])
+                accept = d0 <= _LINK_MAX_DIST
+                if not accept and d0 <= _LINK_HARD_CAP:
+                    # Assignment-margin rescue: absolute colour can drift with a
+                    # scene's lighting, but if forbidding this pair forces a much
+                    # worse JOINT assignment, the pairing itself is unambiguous.
+                    banned = dist.copy()
+                    banned[int(i), int(jj)] = 1e6
+                    r2, c2 = linear_sum_assignment(banned)
+                    alt_total = float(banned[r2, c2].sum())
+                    accept = (alt_total - opt_total) >= _LINK_ASSIGN_MARGIN
+                if accept:
+                    mapping[cand[int(i)].id] = usable[int(jj)]
+        for t in tracklets:
+            gid = mapping.get(t.id)
+            if gid is None:
+                # New identity — but only if it carries enough presence to ever
+                # surface; a sub-threshold blip stays local (dropped from output).
+                if t.frame_count < self.min_surface_frames:
+                    mapping[t.id] = -1
+                    continue
+                gid = self._next_gid
+                self._next_gid += 1
+                mapping[t.id] = gid
+            self._absorb(gid, t)
+
+        lines = []
+        for frame_idx, entries in buf:
+            remapped = [(mapping.get(lid, -1), b, s) for lid, b, s in entries]
+            lines.append(self._line(frame_idx, remapped))
+        return lines
+
+    # ── public API ────────────────────────────────────────────────────────────
+    def process(
+        self, frame_idx: int, dets: list[dict], scene_change: bool
+    ) -> list[str]:
+        out: list[str] = []
+        if scene_change:
+            # Dissolve frame: blends of two scenes — emit nothing, and remember
+            # that the running segment must close at the next stable frame.
+            self._in_cut = True
+            return out
+        if self._in_cut:
+            self._in_cut = False
+            out.extend(self._close_segment())
+        res = self._tm.update(frame_idx, dets)
+        entries = [
+            (tid, bbox, float(dets[j].get("score", 1.0)))
+            for j, (tid, bbox) in enumerate(res)
+        ]
+        if self._seg_idx == 0:
+            out.append(self._line(frame_idx, entries))
+        else:
+            self._buffer.append((frame_idx, entries))
+        return out
+
+    def finalize(self) -> list[str]:
+        return self._close_segment()
+
+    def summary(self) -> list[dict]:
+        # Closed/linked identities + (only while still in segment 0) the live
+        # tracklets, whose local ids are already the global ids.
+        rows: dict[int, dict] = {}
+        for gid, ident in self._ids.items():
+            rows[gid] = {
+                "id": gid, "color": _PALETTE[gid % len(_PALETTE)],
+                "firstFrame": int(ident["first"]), "lastFrame": int(ident["last"]),
+                "frameCount": int(ident["count"]), "repFrame": int(ident["rep_frame"]),
+            }
+        if self._seg_idx == 0:
+            for t in self._tm.tracks:
+                rows[t.id] = {
+                    "id": t.id, "color": _PALETTE[t.id % len(_PALETTE)],
+                    "firstFrame": int(t.first_frame), "lastFrame": int(t.last_frame),
+                    "frameCount": int(t.frame_count), "repFrame": int(t.rep_frame),
+                }
+        return [
+            r for r in sorted(rows.values(), key=lambda r: -r["frameCount"])
+            if r["frameCount"] >= max(self.min_surface_frames, _N_INIT)
         ]
 
 # ── MLX SAM3 detection ───────────────────────────────────────────────────────
@@ -445,7 +874,9 @@ def run(args: argparse.Namespace) -> int:
     min_surface_frames = max(1, round(min_duration_sec * fps / stride)) if min_duration_sec > 0 else 1
 
     write_progress("loading", 0, -1)
-    tm = TrackManager(min_surface_frames=min_surface_frames)
+    tracker = SegmentedIdentityTracker(
+        min_surface_frames=min_surface_frames, width=width, height=height, fps=fps,
+    )
     processor = _build_processor(float(args.confidence))
     prompt = args.prompt or "person"
     # Encode the (constant) text prompt once; reused every frame.
@@ -459,6 +890,10 @@ def run(args: argparse.Namespace) -> int:
     processed = 0
     last_frame = -1
     frame_idx = -1
+    prev_sig: np.ndarray | None = None  # scene-cut detector state
+    # Optional: capture raw SAM3 detections+embeddings per frame for offline
+    # tracker development/validation (set KINESIA_DUMP_RAW=1).
+    raw_dump = [] if os.environ.get("KINESIA_DUMP_RAW") == "1" else None
     t_start = time.perf_counter()
     try:
         while not _STOP:
@@ -474,48 +909,65 @@ def run(args: argparse.Namespace) -> int:
             if not ok or frame is None:
                 continue
 
+            sig = _frame_signature(frame)
+            scene_change = _is_scene_change(sig, prev_sig)
+            prev_sig = sig
+
             boxes, scores, embs = detect_persons(processor, frame, prompt, text_cache)
             dets = []
             for i in range(len(boxes)):
+                bbox = _clip_xyxy(boxes[i], width, height)
                 dets.append({
-                    "bbox": _clip_xyxy(boxes[i], width, height),
+                    "bbox": bbox,
                     "emb": embs[i] if i < len(embs) else None,
                     "score": float(scores[i]) if i < len(scores) else 1.0,
+                    # Clothing-colour descriptor for cross-segment identity linking.
+                    "tab": _trousers_ab(frame, bbox),
                 })
-            assigned = tm.update(frame_idx, dets)
+            if raw_dump is not None:
+                raw_dump.append({
+                    "f": frame_idx,
+                    "cut": bool(scene_change),
+                    "boxes": [np.asarray(d["bbox"], dtype=np.float32).tolist() for d in dets],
+                    "embs": [
+                        (np.asarray(d["emb"], dtype=np.float32).tolist() if d["emb"] is not None else None)
+                        for d in dets
+                    ],
+                })
 
-            line = {
-                "f": frame_idx,
-                "t": round(frame_idx / fps, 3),
-                "dets": [
-                    {"id": tid, "b": _norm_xywh(bbox, width, height), "s": round(dets[i]["score"], 3)}
-                    for i, (tid, bbox) in enumerate(assigned)
-                ],
-            }
-            frames_file.write(json.dumps(line) + "\n")
+            for line in tracker.process(frame_idx, dets, scene_change):
+                frames_file.write(line + "\n")
             processed += 1
             last_frame = frame_idx
             if processed % 5 == 0:
                 write_progress("running", processed, last_frame)
-                _write_json(tracks_path, {"tracks": tm.summary()})
+                _write_json(tracks_path, {"tracks": tracker.summary()})
     finally:
-        frames_file.flush()
-        frames_file.close()
-        cap.release()
+        # Close the last open segment so every buffered line lands with its
+        # FINAL linked identity before the terminal status is written.
+        try:
+            for line in tracker.finalize():
+                frames_file.write(line + "\n")
+        finally:
+            frames_file.flush()
+            frames_file.close()
+            cap.release()
 
-    _write_json(tracks_path, {"tracks": tm.summary()})
-    if os.environ.get("KINESIA_DUMP_GALLERIES") == "1":
-        import numpy as _np
-        _np.savez(
-            Path(args.out_dir) / "galleries.npz",
-            **{f"id{t.id}": _np.stack(t.gallery) for t in tm.tracks if t.gallery},
-        )
+    _write_json(tracks_path, {"tracks": tracker.summary()})
+    if raw_dump is not None:
+        import pickle as _pickle
+        with open(Path(args.out_dir) / "raw_dets.pkl", "wb") as _f:
+            _pickle.dump(
+                {"raw": raw_dump, "width": width, "height": height, "fps": fps, "stride": stride},
+                _f,
+            )
+        print(json.dumps({"raw_dump_frames": len(raw_dump)}))
     status = "stopped" if _STOP else "completed"
     write_progress(status, processed, last_frame)
     elapsed = time.perf_counter() - t_start
     print(json.dumps({
         "ok": True, "status": status, "processed": processed,
-        "tracks": len(tm.summary()), "elapsed_sec": round(elapsed, 1),
+        "tracks": len(tracker.summary()), "elapsed_sec": round(elapsed, 1),
         "per_frame_ms": round(1000 * elapsed / max(1, processed), 0),
     }))
     return 0
