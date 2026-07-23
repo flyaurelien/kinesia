@@ -74,3 +74,4 @@ vendor/mlx_sam3/pyproject.toml
 # iCloud collision copies
 * 2
 * 2.*
+.claude/
