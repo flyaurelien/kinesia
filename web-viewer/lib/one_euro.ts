@@ -11,7 +11,7 @@ export type OneEuroParams = {
   dCutoff: number; // Hz — cutoff for the internal derivative estimate
 };
 
-function smoothingAlpha(cutoffHz: number, dtSec: number): number {
+export function smoothingAlpha(cutoffHz: number, dtSec: number): number {
   const tau = 1 / (2 * Math.PI * Math.max(1e-6, cutoffHz));
   return 1 / (1 + tau / Math.max(1e-6, dtSec));
 }

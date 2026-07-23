@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 
 import { apiFetch } from "../lib/api-client";
-import { filterSeries } from "../lib/one_euro";
+import { filterSeries, smoothingAlpha } from "../lib/one_euro";
 import type { RunDetail, RunFrame } from "../lib/types";
 
 type DisplayAnchor = {
@@ -68,6 +68,16 @@ const ROOT_FILTER_Z = { minCutoff: 1.2, beta: 0.4, dCutoff: 1.0 };
 const GROUND_PERCENTILE = 0.1;
 const CONTACT_SNAP_M = 0.05;
 const LIFT_FILTER = { minCutoff: 1.5, beta: 0.6, dCutoff: 1.0 };
+// Display-time One-Euro on the mesh vertex buffer (body-relative, i.e. after
+// pivot subtraction, so trajectory motion is untouched): residual per-frame
+// POSE noise — limbs faintly wiggling, hallucinated legs trembling — melts
+// away at rest, while a fast real gesture (metres/second) raises the cutoff
+// far above the floor and passes through essentially unfiltered.
+const VERTEX_FILTER = { minCutoff: 1.5, beta: 3.0, dCutoff: 1.0 };
+const VERTEX_FILTER_MAX_STEP_FRAMES = 6; // seek/jump => reset instead of blending
+// Filter for the upright-correction TARGET (the body-up vector): posture
+// changes are slow, shoulder-line wobble is not.
+const UPRIGHT_FILTER = { minCutoff: 0.4, beta: 1.0, dCutoff: 1.0 };
 const BODY_BONE_SEGMENTS: Array<[number, number]> = [
   [69, 0],
   [0, 1],
@@ -461,20 +471,22 @@ function frameHasMeaningfulRoot(frame: RunFrame): boolean {
 
 // Rotation that stands the body upright by aligning its hip->shoulder (or foot->shoulder) axis with world up;
 // returns identity for small tilts or when the required joints are missing.
-function bodyUprightQuaternion(frame: RunFrame | null, anchor: DisplayAnchor | null): THREE.Quaternion {
+// Raw body-up direction (shoulder centre relative to feet/hips) in viewer
+// space; null when the joints are unavailable.
+function bodyUpVector(frame: RunFrame | null, anchor: DisplayAnchor | null): THREE.Vector3 | null {
   if (frame?.subjectPresent === false) {
-    return new THREE.Quaternion();
+    return null;
   }
   const joints = frame?.jointsCam ?? null;
   if (!joints || joints.length < 15) {
-    return new THREE.Quaternion();
+    return null;
   }
   const leftHip = joints[9] ? camToWorld(joints[9], anchor) : null;
   const rightHip = joints[10] ? camToWorld(joints[10], anchor) : null;
   const leftShoulder = joints[5] ? camToWorld(joints[5], anchor) : null;
   const rightShoulder = joints[6] ? camToWorld(joints[6], anchor) : null;
   if (!leftHip || !rightHip || !leftShoulder || !rightShoulder) {
-    return new THREE.Quaternion();
+    return null;
   }
   const hipCenter = leftHip.clone().add(rightHip).multiplyScalar(0.5);
   const shoulderCenter = leftShoulder.clone().add(rightShoulder).multiplyScalar(0.5);
@@ -489,16 +501,29 @@ function bodyUprightQuaternion(frame: RunFrame | null, anchor: DisplayAnchor | n
   const trunkUp = shoulderCenter.clone().sub(hipCenter);
   const fullBodyUp = footCenter ? shoulderCenter.clone().sub(footCenter) : trunkUp;
   const bodyUp = fullBodyUp.length() > 1e-5 ? fullBodyUp : trunkUp;
-  if (bodyUp.length() < 1e-5) {
+  return bodyUp.length() > 1e-5 ? bodyUp.normalize() : null;
+}
+
+// Upright correction from an up vector, with a graduated fade: a SMALL tilt is
+// reconstruction lean error and gets fully straightened, but a LARGE tilt is a
+// real posture — bending down, a floor roll, a fall — and must be shown as-is.
+function uprightFromUp(bodyUp: THREE.Vector3 | null): THREE.Quaternion {
+  if (!bodyUp) {
     return new THREE.Quaternion();
   }
-  bodyUp.normalize();
   const worldUp = new THREE.Vector3(0, 0, 1);
   const tilt = bodyUp.angleTo(worldUp);
   if (!Number.isFinite(tilt) || tilt < THREE.MathUtils.degToRad(2)) {
     return new THREE.Quaternion();
   }
-  return new THREE.Quaternion().setFromUnitVectors(bodyUp, worldUp);
+  const fadeStart = THREE.MathUtils.degToRad(25);
+  const fadeEnd = THREE.MathUtils.degToRad(50);
+  const full = new THREE.Quaternion().setFromUnitVectors(bodyUp, worldUp);
+  if (tilt <= fadeStart) {
+    return full;
+  }
+  const weight = tilt >= fadeEnd ? 0 : 1 - (tilt - fadeStart) / (fadeEnd - fadeStart);
+  return new THREE.Quaternion().slerp(full, weight);
 }
 
 // Angle (radians) of the shortest rotation between two quaternions.
@@ -508,57 +533,190 @@ function quaternionAngle(a: THREE.Quaternion, b: THREE.Quaternion): number {
 
 // Per-frame upright rotations, temporally smoothed: reject implausibly large raw tilts and slerp toward
 // each candidate (more slowly across big jumps) so the standing-up correction doesn't jitter during playback.
-function stableUprightQuaternions(frames: RunFrame[], anchor: DisplayAnchor | null): THREE.Quaternion[] {
+function stableUprightQuaternions(
+  frames: RunFrame[],
+  anchor: DisplayAnchor | null,
+  fps: number,
+): THREE.Quaternion[] {
   const identity = new THREE.Quaternion();
   const maxRawTilt = THREE.MathUtils.degToRad(70);
   const maxJump = THREE.MathUtils.degToRad(28);
+  // One-Euro the UP-VECTOR TARGET itself: it is derived from the shoulder
+  // line, which wobbles with every gesture, and the correction rotates the
+  // whole body about the pelvis — target noise reads as the head swaying
+  // forward/back. Real posture changes are slow and pass through.
+  const ups = frames.map((frame) => bodyUpVector(frame, anchor));
+  const xs = filterSeries(ups.map((u) => (u ? u.x : null)), fps, UPRIGHT_FILTER);
+  const ys = filterSeries(ups.map((u) => (u ? u.y : null)), fps, UPRIGHT_FILTER);
+  const zs = filterSeries(ups.map((u) => (u ? u.z : null)), fps, UPRIGHT_FILTER);
   const out: THREE.Quaternion[] = [];
-  for (const frame of frames) {
-    const raw = bodyUprightQuaternion(frame, anchor);
+  for (let index = 0; index < frames.length; index += 1) {
+    const x = xs[index];
+    const y = ys[index];
+    const z = zs[index];
+    const filteredUp =
+      x !== null && y !== null && z !== null
+        ? new THREE.Vector3(x, y, z)
+        : null;
+    const up = filteredUp && filteredUp.length() > 1e-5 ? filteredUp.normalize() : null;
+    const raw = uprightFromUp(up);
     const rawTilt = quaternionAngle(identity, raw);
-    const candidate = Number.isFinite(rawTilt) && rawTilt <= maxRawTilt ? raw : (out.at(-1) ?? identity);
+    const candidate =
+      up && Number.isFinite(rawTilt) && rawTilt <= maxRawTilt ? raw : (out.at(-1) ?? identity);
     if (out.length === 0) {
       out.push(candidate.clone());
       continue;
     }
     const previous = out[out.length - 1];
     const jump = quaternionAngle(previous, candidate);
-    // Slow slew: the tilt target is derived from the shoulder line, which
-    // wobbles whenever an arm is raised — the rotation is applied about the
-    // pelvis, so target noise swings the whole body. Real posture changes are
-    // slow; tracking them at a fraction of the old rate removes the wobble
-    // without visibly lagging genuine lean.
-    const alpha = jump > maxJump ? 0.08 : 0.2;
+    const alpha = jump > maxJump ? 0.1 : 0.25;
     out.push(previous.clone().slerp(candidate, alpha).normalize());
   }
   return out;
 }
 
-// Lowest foot-joint height (after pivot subtraction and the upright rotation) so the body can be dropped
-// onto the grid; null when no foot joints are available.
-function footJointGroundOffset(
+// ── Sole-pitch calibration ───────────────────────────────────────────────────
+// Even after the trunk is straightened, the reconstructed bodies often stand
+// "on their heels": monocular reconstruction (with its guessed focal length)
+// biases the whole body backward, and a rigid trunk correction cannot flatten
+// the FEET. Physics again provides the target: a planted foot's sole
+// (heel -> toe) must be horizontal. Measure the median signed sole pitch over
+// all contact frames (a per-run constant — it is a systematic bias, not
+// noise) and counter-rotate the body about the HIP AXIS, which makes the fix
+// independent of which way the person is facing.
+
+const SOLE_PITCH_MIN_RAD = THREE.MathUtils.degToRad(1.5); // below: leave as-is
+const SOLE_PITCH_MAX_RAD = THREE.MathUtils.degToRad(20); // safety clamp (measured
+// bias on real footage is ~14-15 deg, remarkably consistent across subjects)
+
+// Horizontalized hip axis of a frame after the upright rotation (unit), or null.
+function hipAxisAfter(
+  frame: RunFrame,
+  anchor: DisplayAnchor | null,
+  upright: THREE.Quaternion,
+): THREE.Vector3 | null {
+  const joints = frame.jointsCam ?? null;
+  if (!joints || !joints[9] || !joints[10] || frame.subjectPresent === false) {
+    return null;
+  }
+  const axis = camToWorld(joints[10], anchor)
+    .sub(camToWorld(joints[9], anchor))
+    .applyQuaternion(upright);
+  axis.z = 0;
+  return axis.length() > 1e-4 ? axis.normalize() : null;
+}
+
+// Sole (heel -> big toe) pitch of one planted foot after upright, in radians;
+// positive = toes above heel. Null when unusable.
+function solePitch(
+  frame: RunFrame,
+  anchor: DisplayAnchor | null,
+  upright: THREE.Quaternion,
+  toeIndex: number,
+  heelIndex: number,
+): number | null {
+  const joints = frame.jointsCam ?? null;
+  if (!joints || !joints[toeIndex] || !joints[heelIndex]) {
+    return null;
+  }
+  const v = camToWorld(joints[toeIndex], anchor)
+    .sub(camToWorld(joints[heelIndex], anchor))
+    .applyQuaternion(upright);
+  const horizontal = Math.hypot(v.x, v.y);
+  if (horizontal < 0.05) {
+    return null; // degenerate (foot seen end-on)
+  }
+  return Math.atan2(v.z, horizontal);
+}
+
+// Median signed sole-pitch of the run's planted feet (radians), with the
+// rotation SIGN resolved empirically: of the two candidate corrections about
+// the hip axis, keep the one that actually flattens a representative sole.
+function computeSolePitchFix(
+  frames: RunFrame[],
+  anchor: DisplayAnchor | null,
+  uprights: THREE.Quaternion[],
+  videoHeight: number | null,
+): number {
+  const samples: number[] = [];
+  let representative: { frame: RunFrame; upright: THREE.Quaternion } | null = null;
+  for (let index = 0; index < frames.length; index += 1) {
+    const frame = frames[index];
+    if (!feetVisible(frame, videoHeight)) {
+      continue;
+    }
+    const support = frame.footContact?.support;
+    if (support !== "left" && support !== "right" && support !== "both") {
+      continue;
+    }
+    const upright = uprights[index] ?? new THREE.Quaternion();
+    const feet: Array<[number, number]> = [];
+    if (support === "left" || support === "both") {
+      feet.push([15, 17]);
+    }
+    if (support === "right" || support === "both") {
+      feet.push([18, 20]);
+    }
+    for (const [toe, heel] of feet) {
+      const pitch = solePitch(frame, anchor, upright, toe, heel);
+      if (pitch !== null && Number.isFinite(pitch)) {
+        samples.push(pitch);
+        representative = representative ?? { frame, upright };
+      }
+    }
+  }
+  if (samples.length < 10 || !representative) {
+    return 0;
+  }
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)];
+  if (Math.abs(median) < SOLE_PITCH_MIN_RAD) {
+    return 0;
+  }
+  const magnitude = Math.min(Math.abs(median), SOLE_PITCH_MAX_RAD);
+  // Resolve the rotation sign on real data instead of reasoning about axis
+  // handedness: pick the candidate that reduces the representative sole pitch.
+  const axis = hipAxisAfter(representative.frame, anchor, representative.upright);
+  if (!axis) {
+    return 0;
+  }
+  const measure = (angle: number): number => {
+    const fixed = new THREE.Quaternion()
+      .setFromAxisAngle(axis, angle)
+      .multiply(representative!.upright);
+    const p = solePitch(representative!.frame, anchor, fixed, 15, 17) ??
+      solePitch(representative!.frame, anchor, fixed, 18, 20);
+    return p === null ? Number.POSITIVE_INFINITY : Math.abs(p);
+  };
+  return measure(magnitude) <= measure(-magnitude) ? magnitude : -magnitude;
+}
+
+// Lowest BODY-joint height (after pivot subtraction and the upright rotation)
+// so the body's lowest contact point can be dropped onto the grid. Whole body,
+// not just the feet: during a floor roll the torso is the contact point — a
+// foot-only rule would push the body below the grid. Standing/walking the
+// lowest joint IS a foot, so gait is unchanged. Null when joints are missing.
+function bodyGroundOffset(
   frame: RunFrame | null,
   quaternion: THREE.Quaternion,
   anchor: DisplayAnchor | null,
   pivot: THREE.Vector3,
 ): number | null {
   const joints = frame?.jointsCam ?? null;
-  if (!joints || joints.length < 15) {
+  if (!joints || joints.length === 0) {
     return null;
   }
-  const footIndices = [13, 14, 15, 16, 17, 18, 19, 20];
-  const zValues: number[] = [];
-  for (const index of footIndices) {
-    const joint = joints[index];
+  let min: number | null = null;
+  for (const joint of joints) {
     if (!joint) {
       continue;
     }
     const p = camToWorld(joint, anchor).sub(pivot).applyQuaternion(quaternion);
-    if (Number.isFinite(p.z)) {
-      zValues.push(p.z);
+    if (Number.isFinite(p.z) && (min === null || p.z < min)) {
+      min = p.z;
     }
   }
-  return zValues.length > 0 ? Math.min(...zValues) : null;
+  return min;
 }
 
 // Absolute (viewer-space, pre-pivot) height of the lowest foot joint of a frame.
@@ -579,6 +737,42 @@ function lowestFootViewerZ(frame: RunFrame, anchor: DisplayAnchor | null): numbe
     }
   }
   return min;
+}
+
+// Absolute height of the lowest joint of the WHOLE body. This — not the feet —
+// is the right reference for ground contact in general: during a floor roll
+// the torso is the lowest point (feet are in the air; a foot-based rule would
+// wrongly hoist the body), while standing/walking the lowest body joint IS a
+// foot, so ordinary gait behaves identically.
+function lowestBodyViewerZ(frame: RunFrame, anchor: DisplayAnchor | null): number | null {
+  const joints = frame.jointsCam ?? null;
+  if (!joints || joints.length === 0 || frame.subjectPresent === false) {
+    return null;
+  }
+  let min: number | null = null;
+  for (const joint of joints) {
+    if (!joint) {
+      continue;
+    }
+    const z = camToWorld(joint, anchor).z;
+    if (Number.isFinite(z) && (min === null || z < min)) {
+      min = z;
+    }
+  }
+  return min;
+}
+
+// Whether the subject's feet are actually IN the picture. SAM 3D Body predicts
+// a full SMPL body even when the video is framed at the waist: the legs below
+// the crop are HALLUCINATED and jitter freely. Any logic that trusts foot
+// joints (ground contact, support anchoring, foot-based grounding) must be
+// gated on this — a detection box clipped by the bottom edge of the frame
+// means the lower body is cut off.
+function feetVisible(frame: RunFrame, videoHeight: number | null): boolean {
+  if (!frame.bbox || !videoHeight) {
+    return false;
+  }
+  return frame.bbox[3] < videoHeight * 0.985;
 }
 
 // Support-foot horizontal anchoring (a zero-velocity update, as used in
@@ -634,11 +828,17 @@ function footXY(
 
 // Which foot (if any) is in ground contact on this frame. Prefers the
 // analysis-provided contact labels; falls back to the lowest-foot clearance.
+// Contact labels are themselves derived from foot joints, so a frame whose
+// feet are OUT OF THE PICTURE (hallucinated legs) can never claim support.
 function frameSupport(
   frame: RunFrame,
   anchor: DisplayAnchor | null,
   ground: number | null,
+  videoHeight: number | null,
 ): "left" | "right" | "both" | "none" {
+  if (!feetVisible(frame, videoHeight)) {
+    return "none";
+  }
   const stored = frame.footContact?.support;
   if (stored === "left" || stored === "right" || stored === "both") {
     return stored;
@@ -657,11 +857,12 @@ function anchoredTrajectory(
   frames: RunFrame[],
   rawRoots: THREE.Vector3[],
   anchor: DisplayAnchor | null,
+  videoHeight: number | null,
 ): THREE.Vector3[] {
   // Ground estimate for the contact fallback (same as computeLiftSeries).
   const heights: number[] = [];
   for (const frame of frames) {
-    const z = lowestFootViewerZ(frame, anchor);
+    const z = lowestBodyViewerZ(frame, anchor);
     if (z !== null) {
       heights.push(z);
     }
@@ -678,7 +879,7 @@ function anchoredTrajectory(
   const out: THREE.Vector3[] = [];
   for (let index = 0; index < frames.length; index += 1) {
     const frame = frames[index];
-    const support = frameSupport(frame, anchor, ground);
+    const support = frameSupport(frame, anchor, ground, videoHeight);
     const indices =
       support === "left"
         ? LEFT_FOOT_JOINTS
@@ -717,8 +918,9 @@ function filteredDisplayTrajectory(
   rawRoots: THREE.Vector3[],
   anchor: DisplayAnchor | null,
   fps: number,
+  videoHeight: number | null,
 ): THREE.Vector3[] {
-  const anchored = anchoredTrajectory(frames, rawRoots, anchor);
+  const anchored = anchoredTrajectory(frames, rawRoots, anchor, videoHeight);
   const xs = filterSeries(anchored.map((p) => p.x), fps, ROOT_FILTER_X);
   const ys = filterSeries(anchored.map((p) => p.y), fps, ROOT_FILTER_Y);
   const zs = filterSeries(anchored.map((p) => p.z), fps, ROOT_FILTER_Z);
@@ -748,11 +950,17 @@ function computeLiftSeries(
   frames: RunFrame[],
   anchor: DisplayAnchor | null,
   fps: number,
+  videoHeight: number | null,
 ): number[] {
   const rawClearance: Array<number | null> = new Array(frames.length).fill(null);
   const heights: number[] = [];
   for (let index = 0; index < frames.length; index += 1) {
-    const z = lowestFootViewerZ(frames[index], anchor);
+    // Clearance of the lowest BODY joint (not just the feet): a floor roll's
+    // reference is the torso; a jump raises every joint. Frames whose lower
+    // body is cut off by the picture edge contribute nothing — hallucinated
+    // legs would inject pure noise.
+    const frame = frames[index];
+    const z = feetVisible(frame, videoHeight) ? lowestBodyViewerZ(frame, anchor) : null;
     rawClearance[index] = z;
     if (z !== null) {
       heights.push(z);
@@ -779,6 +987,8 @@ function MeshGeometry({
   anchor,
   meshOpacity,
   color,
+  frameCursor,
+  fps,
 }: {
   runId: string;
   meshFile: string;
@@ -788,6 +998,8 @@ function MeshGeometry({
   anchor: DisplayAnchor | null;
   meshOpacity: number;
   color?: string | null;
+  frameCursor: number;
+  fps: number;
 }) {
   const [faces, setFaces] = useState<Uint32Array | null>(null);
   const [verticesState, setVerticesState] = useState<{ meshFile: string; vertices: Float32Array } | null>(null);
@@ -847,6 +1059,13 @@ function MeshGeometry({
 
   const vertices = cachedMeshVertices(runId, meshFile) ?? (verticesState?.meshFile === meshFile ? verticesState.vertices : null);
   const nextVertices = nextMeshFile ? cachedMeshVertices(runId, nextMeshFile) : null;
+  // Temporal vertex filter state: previous body-relative positions +
+  // derivative estimates, advanced as the playhead moves forward.
+  const vertexFilterRef = useRef<{
+    positions: Float32Array;
+    derivs: Float32Array;
+    cursor: number;
+  } | null>(null);
   const geometry = useMemo(() => {
     if (!faces || !vertices) {
       return null;
@@ -867,17 +1086,60 @@ function MeshGeometry({
     }
     next.applyMatrix4(DISPLAY_YAW_CLOCKWISE_90);
     next.translate(-pivot.x, -pivot.y, -pivot.z);
+
+    // One-Euro the BODY-RELATIVE vertex buffer (root already subtracted, so
+    // this touches pose only, never the trajectory). Advances with the
+    // playhead; a seek, a rewind, or a long gap resets instead of blending
+    // across it.
+    const array = next.getAttribute("position").array as Float32Array;
+    const state = vertexFilterRef.current;
+    const stepFrames = state ? frameCursor - state.cursor : 0;
+    if (
+      !state ||
+      state.positions.length !== array.length ||
+      stepFrames <= 0 ||
+      stepFrames > VERTEX_FILTER_MAX_STEP_FRAMES
+    ) {
+      vertexFilterRef.current = {
+        positions: array.slice(),
+        derivs: new Float32Array(array.length),
+        cursor: frameCursor,
+      };
+    } else {
+      const dt = stepFrames / Math.max(1, fps);
+      const aD = smoothingAlpha(VERTEX_FILTER.dCutoff, dt);
+      const { positions: prev, derivs } = state;
+      for (let index = 0; index < array.length; index += 1) {
+        const raw = array[index];
+        const dRaw = (raw - prev[index]) / dt;
+        const deriv = derivs[index] + aD * (dRaw - derivs[index]);
+        derivs[index] = deriv;
+        const cutoff = VERTEX_FILTER.minCutoff + VERTEX_FILTER.beta * Math.abs(deriv);
+        const a = smoothingAlpha(cutoff, dt);
+        const filtered = prev[index] + a * (raw - prev[index]);
+        prev[index] = filtered;
+        array[index] = filtered;
+      }
+      state.cursor = frameCursor;
+    }
+
     next.computeBoundingSphere();
     return next;
-  }, [anchor, faces, meshInterpolation, nextVertices, pivot, vertices]);
+  }, [anchor, faces, fps, frameCursor, meshInterpolation, nextVertices, pivot, vertices]);
   // STICKY geometry: while the exact frame's vertices are still loading (or
   // were evicted), keep showing the last built pose instead of returning null —
   // a blinking mesh is far more jarring than a briefly frozen one.
+  // Disposal is deferred to AFTER commit: the R3F render loop can draw the
+  // previous tree between render and commit, so disposing mid-render throws
+  // inside the frame loop and the error boundary tears the scene down.
   const lastGeometryRef = useRef<THREE.BufferGeometry | null>(null);
-  if (geometry && geometry !== lastGeometryRef.current) {
-    lastGeometryRef.current?.dispose();
-    lastGeometryRef.current = geometry;
-  }
+  useEffect(() => {
+    if (geometry && geometry !== lastGeometryRef.current) {
+      const previous = lastGeometryRef.current;
+      lastGeometryRef.current = geometry;
+      previous?.dispose();
+    }
+  }, [geometry]);
   useEffect(
     () => () => {
       lastGeometryRef.current?.dispose();
@@ -956,6 +1218,9 @@ function MeshBody({
   onJointPick,
   color,
   lift = 0,
+  feetTrusted,
+  frameCursor,
+  fps,
 }: {
   runId: string;
   frame: RunFrame;
@@ -975,25 +1240,36 @@ function MeshBody({
   onJointPick?: (jointIndex: number) => void;
   color?: string | null;
   lift?: number;
+  feetTrusted?: boolean;
+  frameCursor: number;
+  fps: number;
 }) {
   const subjectVisible = frame.subjectPresent !== false;
-  const jointOffset = useMemo(() => footJointGroundOffset(frame, quaternion, anchor, pivot), [anchor, frame, pivot, quaternion]);
-  // When foot joints briefly drop out, HOLD the last known offset instead of
+  const jointOffset = useMemo(() => bodyGroundOffset(frame, quaternion, anchor, pivot), [anchor, frame, pivot, quaternion]);
+  // When joints briefly drop out, HOLD the last known offset instead of
   // coalescing to 0 — 0 put the PELVIS on the floor and the body visibly sank
-  // for the gap, then popped back.
-  const lastOffsetRef = useRef(0);
+  // for the gap, then popped back. While the lower body is cut off by the
+  // picture edge (feetTrusted=false), the model's PREDICTED legs still carry
+  // real information (MHR extrapolates leg pose from the torso) but tremble
+  // frame to frame — so the height TRACKS the prediction slowly instead of
+  // following it raw: sustained posture changes show, per-frame jitter dies.
+  const lastOffsetRef = useRef<number | null>(null);
   if (jointOffset !== null) {
-    lastOffsetRef.current = jointOffset;
+    if (feetTrusted !== false || lastOffsetRef.current === null) {
+      lastOffsetRef.current = jointOffset;
+    } else {
+      lastOffsetRef.current += 0.03 * (jointOffset - lastOffsetRef.current);
+    }
   }
   // Z places the lowest foot on the grid, PLUS the subject's lift above the
   // run's ground plane — zero in contact, positive during flight, so jumps
   // actually leave the floor. XY comes from ViewerScene's filtered root.
   const groundedPosition = useMemo(() => {
     const p = position.clone();
-    p.z = -(jointOffset ?? lastOffsetRef.current) + lift;
+    p.z = -(lastOffsetRef.current ?? jointOffset ?? 0) + lift;
     return p;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jointOffset, lift, position]);
+  }, [jointOffset, lift, position, feetTrusted]);
 
   const joints = useMemo(
     () => subjectVisible ? (frame.jointsCam ?? []).map((joint) => camToWorld(joint, anchor).sub(pivot)) : [],
@@ -1013,6 +1289,8 @@ function MeshBody({
           anchor={anchor}
           meshOpacity={meshOpacity}
           color={color}
+          frameCursor={frameCursor}
+          fps={fps}
         />
       ) : null}
       {showBones ? <SkeletonBones joints={joints} /> : null}
@@ -1207,14 +1485,21 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         rawRootPositions,
         anchor,
         Math.max(1, props.runDetail.fps || 30),
+        props.runDetail.videoHeight,
       ),
-    [anchor, props.runDetail.fps, props.runDetail.frames, rawRootPositions],
+    [anchor, props.runDetail.fps, props.runDetail.frames, props.runDetail.videoHeight, rawRootPositions],
   );
   // Vertical placement: per-subject lift above the run's fixed ground plane —
   // zero in contact (feet snap to the grid), free during flight (jumps rise).
   const liftSeries = useMemo(
-    () => computeLiftSeries(props.runDetail.frames, anchor, Math.max(1, props.runDetail.fps || 30)),
-    [anchor, props.runDetail.frames, props.runDetail.fps],
+    () =>
+      computeLiftSeries(
+        props.runDetail.frames,
+        anchor,
+        Math.max(1, props.runDetail.fps || 30),
+        props.runDetail.videoHeight,
+      ),
+    [anchor, props.runDetail.frames, props.runDetail.fps, props.runDetail.videoHeight],
   );
   // Each sibling subject gets its own anchored+filtered trajectory and its own
   // raw-root pivot: the runs' depth noise is independent (separate per-frame
@@ -1229,10 +1514,11 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
     >();
     for (const sibling of props.siblings ?? []) {
       const sFrames = sibling.runDetail.frames;
+      const sHeight = sibling.runDetail.videoHeight;
       const rawRoots = sFrames.map((item) => framePosition(item, "raw", anchor));
       map.set(sibling.runDetail.id, {
-        lifts: computeLiftSeries(sFrames, anchor, fps),
-        positions: filteredDisplayTrajectory(sFrames, rawRoots, anchor, fps),
+        lifts: computeLiftSeries(sFrames, anchor, fps, sHeight),
+        positions: filteredDisplayTrajectory(sFrames, rawRoots, anchor, fps, sHeight),
         rawRoots,
       });
     }
@@ -1264,14 +1550,40 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
     ? (rawRootPositions[meshBaseIndex] ?? pivot)
     : pivot;
   const uprightQuaternions = useMemo(
-    () => (props.uprightMode ? stableUprightQuaternions(props.runDetail.frames, anchor) : []),
-    [anchor, props.runDetail.frames, props.uprightMode],
+    () =>
+      props.uprightMode
+        ? stableUprightQuaternions(
+            props.runDetail.frames,
+            anchor,
+            Math.max(1, props.runDetail.fps || 30),
+          )
+        : [],
+    [anchor, props.runDetail.fps, props.runDetail.frames, props.uprightMode],
   );
-  const upright = props.uprightMode
+  // Per-run sole-pitch calibration: a constant counter-rotation about the hip
+  // axis so planted feet sit FLAT instead of "on their heels" (systematic
+  // monocular backward-lean bias that the trunk correction cannot fix).
+  const soleFixAngle = useMemo(
+    () =>
+      props.uprightMode
+        ? computeSolePitchFix(
+            props.runDetail.frames,
+            anchor,
+            uprightQuaternions,
+            props.runDetail.videoHeight,
+          )
+        : 0,
+    [anchor, props.runDetail.frames, props.runDetail.videoHeight, props.uprightMode, uprightQuaternions],
+  );
+  const uprightBase = props.uprightMode
     ? (uprightQuaternions[baseIndex] ?? new THREE.Quaternion())
         .clone()
         .slerp(uprightQuaternions[nextIndex] ?? uprightQuaternions[baseIndex] ?? new THREE.Quaternion(), interpolation)
     : new THREE.Quaternion();
+  const soleAxis = soleFixAngle !== 0 ? hipAxisAfter(frameBase, anchor, uprightBase) : null;
+  const upright = soleAxis
+    ? new THREE.Quaternion().setFromAxisAngle(soleAxis, soleFixAngle).multiply(uprightBase)
+    : uprightBase;
 
   return (
     <>
@@ -1299,6 +1611,9 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         onJointPick={props.onJointPick}
         color={props.subjectColor}
         lift={lerpNumber(liftSeries[baseIndex] ?? 0, liftSeries[nextIndex] ?? 0, interpolation)}
+        feetTrusted={feetVisible(frameBase, props.runDetail.videoHeight)}
+        frameCursor={displayCursor}
+        fps={Math.max(1, props.runDetail.fps || 30)}
       />
       {(props.siblings ?? []).map((sibling) => {
         // Sibling subjects of the same selection share the source video's
@@ -1365,6 +1680,9 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
                 motion.lifts[sNext] ?? 0,
                 interpolation,
               )}
+              feetTrusted={feetVisible(sFrameBase, sibling.runDetail.videoHeight)}
+              frameCursor={displayCursor}
+              fps={Math.max(1, props.runDetail.fps || 30)}
             />
           </group>
         );
