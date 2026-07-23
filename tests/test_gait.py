@@ -10,7 +10,9 @@ import numpy as np
 from sam_3d_pose_estimation.gait import (
     build_gait_analysis,
     compute_clinical_angles,
+    compute_neutral_reference,
     detect_gait_events,
+    find_static_frames,
     zero_phase_lowpass,
 )
 
@@ -142,6 +144,83 @@ class TestGaitAnalysis(unittest.TestCase):
         gait = build_gait_analysis(frames, FPS)
         self.assertFalse(gait["spatiotemporal"]["walking_detected"])
         self.assertEqual(gait["cycles"]["left"]["gait.knee.left.flexion_deg"]["n_cycles"], 0)
+
+
+def standing_frames(shank_tilt_deg: float, foot_pitch_deg: float, n: int = 240):
+    """A subject standing still whose reconstruction carries a known posture
+    bias: the shank tilted forward by `shank_tilt_deg` (ankle behind the knee)
+    and the foot `foot_pitch_deg` toes-up. Both are anatomically ~0 in reality,
+    so the neutral reference must measure exactly these values back.
+    """
+    tilt = math.radians(shank_tilt_deg)
+    pitch = math.radians(foot_pitch_deg)
+    frames = []
+    for i in range(n):
+        joints = [None] * 21
+        for x_off, (knee_i, ankle_i, toe_i, heel_i) in (
+            (-0.10, (11, 13, 15, 17)),
+            (0.10, (12, 14, 18, 20)),
+        ):
+            hip = (x_off, 0.0, 0.95)
+            knee = (x_off, 0.0, 0.50)
+            ankle = (x_off, -0.42 * math.sin(tilt), 0.50 - 0.42 * math.cos(tilt))
+            heel = (x_off, ankle[1] - 0.06, 0.02)
+            toe = (x_off, heel[1] + 0.22 * math.cos(pitch), heel[2] + 0.22 * math.sin(pitch))
+            joints[9 if x_off < 0 else 10] = world_to_cam(hip)
+            joints[knee_i] = world_to_cam(knee)
+            joints[ankle_i] = world_to_cam(ankle)
+            joints[toe_i] = world_to_cam(toe)
+            joints[heel_i] = world_to_cam(heel)
+        joints[5] = world_to_cam((-0.15, 0.0, 1.45))
+        joints[6] = world_to_cam((0.15, 0.0, 1.45))
+        frames.append({"index": i, "subject_present": True, "joints_cam": joints,
+                       "foot_contact": {"left": True, "right": True, "support": "both"}})
+    return frames
+
+
+class TestNeutralReference(unittest.TestCase):
+    """The monocular reconstruction has a systematic standing-posture bias; the
+    static calibration pose must measure it and cancel it."""
+
+    BIAS_SHANK = 19.4  # measured on a real standing run
+    BIAS_FOOT = 15.5
+
+    def test_measures_and_cancels_a_known_standing_bias(self):
+        frames = standing_frames(self.BIAS_SHANK, self.BIAS_FOOT)
+        raw = compute_clinical_angles(frames, FPS)
+        # Raw angles carry the bias: knee reads the shank tilt, ankle the sum.
+        self.assertLess(abs(float(np.median([v for v in raw["knee.left"] if v is not None])) - self.BIAS_SHANK), 1.0)
+        self.assertLess(
+            abs(float(np.median([v for v in raw["ankle.left"] if v is not None]))
+                - (self.BIAS_SHANK + self.BIAS_FOOT)),
+            1.5,
+        )
+        # After calibration every clinical angle reads ~0 at quiet stance.
+        gait = build_gait_analysis(frames, FPS)
+        neutral = gait["neutral_reference"]
+        self.assertTrue(neutral["applied"])
+        self.assertGreater(neutral["static_duration_s"], 1.0)
+        self.assertLess(abs(neutral["offsets_deg"]["ankle.left"] - (self.BIAS_SHANK + self.BIAS_FOOT)), 1.5)
+        for key, values in gait["angles"].items():
+            finite = [v for v in values if v is not None]
+            self.assertLess(abs(float(np.median(finite))), 0.5, key)
+
+    def test_walking_has_no_quiet_stance(self):
+        # Double support during walking is brief and the pelvis is moving:
+        # it must never be mistaken for a calibration pose.
+        frames = synthetic_frames(noise_std=0.004)
+        self.assertEqual(int(find_static_frames(frames, FPS).sum()), 0)
+        angles = compute_clinical_angles(frames, FPS)
+        neutral = compute_neutral_reference(frames, angles, FPS)
+        self.assertFalse(neutral["applied"])
+        self.assertEqual(neutral["offsets_deg"], {})
+
+    def test_implausible_stance_is_rejected(self):
+        # A crouch is not a neutral pose: refuse rather than zero it out.
+        frames = standing_frames(60.0, 40.0)
+        angles = compute_clinical_angles(frames, FPS)
+        neutral = compute_neutral_reference(frames, angles, FPS)
+        self.assertFalse(neutral["applied"])
 
 
 class TestClinicalAngles(unittest.TestCase):
