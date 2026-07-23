@@ -20,6 +20,7 @@ from .artifacts import (
     run_metadata_path,
     write_json,
 )
+from .gait import ANGLE_SIGNALS, build_gait_analysis
 from .workspace import DEFAULT_ANALYSIS_PRESET, analysis_dir, project_root_from, sanitize_run_id
 
 LEFT_ANKLE = 13
@@ -74,6 +75,10 @@ def analyze_run(
         },
     )
     write_json(analysis_directory / "qa.json", payload["qa"])
+    write_json(
+        analysis_directory / "gait.json",
+        {"analysis_id": analysis_id, "preset": params.preset, "gait": payload["gait"]},
+    )
     write_parquet(analysis_directory / "kinematics.parquet", payload["frames"], payload["signals"])
     analysis_manifest = build_analysis_manifest(
         run_id=safe_run_id,
@@ -148,6 +153,24 @@ def build_analysis_payload(
 
     metrics = build_kinematic_metrics(frames, fps)
     signals = build_signals(frames, stabilization, metrics)
+
+    # Clinical gait layer: zero-phase-filtered sagittal angles (exposed as
+    # signals), gait events, spatiotemporal parameters, cycle-normalized curves.
+    gait = build_gait_analysis(frames, fps)
+    for angle_key, signal_id, label in ANGLE_SIGNALS:
+        joint = angle_key.split(".")[0]
+        measure = "dorsiflexion" if joint == "ankle" else "flexion"
+        signals.append(
+            make_signal(
+                signal_id,
+                label,
+                "deg",
+                f"Sagittal {joint} {measure}, zero-phase Butterworth "
+                f"({gait['params']['cutoff_hz']:.0f} Hz) on joint trajectories.",
+                gait["angles"][angle_key],
+            )
+        )
+
     qa = build_qa_summary(metadata, frames)
     duration_ms = int(round((len(frames) / max(fps, 1e-6)) * 1000.0))
     return {
@@ -155,6 +178,7 @@ def build_analysis_payload(
         "frames": frames,
         "signals": signals,
         "qa": qa,
+        "gait": {key: value for key, value in gait.items() if key != "angles"},
         "duration_ms": duration_ms,
     }
 
