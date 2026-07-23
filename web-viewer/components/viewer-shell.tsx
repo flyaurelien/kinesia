@@ -1498,12 +1498,19 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     let lastVideoTime = videoRef.current?.currentTime ?? displayedVideoTime(runDetail, startCursor);
     let lastVideoProgressMs = startMs;
     let lastRenderedIndex = latestFrameIndexRef.current;
+    // Wall-clock fallback advances by DELTA TIME from the current cursor, so
+    // switching between video-driven and wall-clock pacing can never jump: an
+    // anchor captured at effect mount would snap the cursor by the accumulated
+    // video-vs-wall drift the moment the video stalls.
+    let lastTickMs = startMs;
 
     const tick = (nowMs: number): void => {
       if (!runDetail) {
         return;
       }
       const video = videoRef.current;
+      const wallStep = () =>
+        latestFrameCursorRef.current + ((nowMs - lastTickMs) / 1000) * fps * speed;
       let nextCursor: number;
       if (video && !video.paused && video.readyState >= 2) {
         if (Math.abs(video.currentTime - lastVideoTime) > 1e-4) {
@@ -1514,13 +1521,12 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
         if (videoIsProgressing) {
           nextCursor = frameCursorFromDisplayedVideoTime(runDetail, video.currentTime);
         } else {
-          const elapsedFrames = ((nowMs - startMs) / 1000) * fps * speed;
-          nextCursor = startCursor + elapsedFrames;
+          nextCursor = wallStep();
         }
       } else {
-        const elapsedFrames = ((nowMs - startMs) / 1000) * fps * speed;
-        nextCursor = startCursor + elapsedFrames;
+        nextCursor = wallStep();
       }
+      lastTickMs = nowMs;
       const reachedEnd = nextCursor >= frameCount - 1;
       nextCursor = clamp(nextCursor, 0, frameCount - 1);
       const nextIndex = clamp(Math.round(nextCursor), 0, frameCount - 1);
