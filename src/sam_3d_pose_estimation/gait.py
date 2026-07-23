@@ -15,6 +15,10 @@ gait lab:
 - SPATIOTEMPORAL PARAMETERS: cadence, step/stride time and length, walking
   speed, stance/swing and double-support percentages — with per-event values
   and mean +/- SD aggregates.
+- STATIC NEUTRAL REFERENCE: the monocular reconstruction carries a systematic
+  standing-posture bias (shank tilted forward, toes up), so quiet-stance spans
+  are detected and used as a calibration pose, exactly as a gait lab uses a
+  static trial. The measured offsets are reported and are reversible.
 - GAIT-CYCLE NORMALIZATION: every angle resampled to 0-100% of the gait cycle
   per stride, aggregated as mean +/- SD per side.
 
@@ -45,6 +49,13 @@ MAX_STRIDE_S = 3.0
 MIN_EVENT_GAP_S = 0.25
 CYCLE_POINTS = 101  # 0..100% inclusive
 IN_PLACE_SPEED_M_S = 0.10  # below: treat as stepping in place (no step length)
+
+# Static (quiet-stance) calibration pose detection.
+STATIC_MAX_SPEED_M_S = 0.08
+STATIC_MIN_RUN_S = 0.5
+STATIC_MIN_TOTAL_S = 1.0
+STATIC_MAX_TRUNK_LEAN_DEG = 25.0
+STATIC_MAX_OFFSET_DEG = 45.0  # beyond this the "static" pose is not a stance
 
 
 def cam_to_world(point: list[float] | tuple[float, float, float]) -> np.ndarray:
@@ -189,6 +200,127 @@ def compute_clinical_angles(
                 foot_angle = _sagittal_angle(toe - heel, forward, up)  # flat ~ 0
                 out[f"ankle.{side}"][i] = _wrap_deg(foot_angle - (shank_angle + 90.0))
     return out
+
+
+# ── Static neutral reference ─────────────────────────────────────────────────
+
+def find_static_frames(
+    frames: list[dict[str, Any]],
+    fps: float,
+    cutoff_hz: float = DEFAULT_CUTOFF_HZ,
+) -> np.ndarray:
+    """Boolean mask of quiet-stance frames usable as a calibration pose.
+
+    A frame qualifies when both feet are on the ground, the pelvis is barely
+    moving and the trunk is upright; qualifying frames must also belong to a
+    run of at least STATIC_MIN_RUN_S so that the brief double-support phases of
+    normal walking never pass for a stance.
+    """
+    n = len(frames)
+    mask = np.zeros(n, dtype=bool)
+    if n == 0:
+        return mask
+    hips = 0.5 * (
+        filter_positions(joint_world_series(frames, L_HIP), fps, cutoff_hz)
+        + filter_positions(joint_world_series(frames, R_HIP), fps, cutoff_hz)
+    )
+    shoulders = 0.5 * (
+        filter_positions(joint_world_series(frames, L_SHOULDER), fps, cutoff_hz)
+        + filter_positions(joint_world_series(frames, R_SHOULDER), fps, cutoff_hz)
+    )
+    speed = np.full(n, np.inf)
+    if n > 1:
+        step = np.linalg.norm(np.diff(hips[:, :2], axis=0), axis=1) * fps
+        speed[1:] = step
+        speed[0] = speed[1]
+    both = _contact_series(frames, "left") & _contact_series(frames, "right")
+    trunk = shoulders - hips
+    trunk_norm = np.linalg.norm(trunk, axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        lean = np.degrees(np.arccos(np.clip(trunk[:, 2] / trunk_norm, -1.0, 1.0)))
+    candidate = both & np.isfinite(speed) & (speed <= STATIC_MAX_SPEED_M_S)
+    candidate &= np.isfinite(lean) & (lean <= STATIC_MAX_TRUNK_LEAN_DEG)
+
+    min_run = max(1, int(round(STATIC_MIN_RUN_S * fps)))
+    start = None
+    for i in range(n + 1):
+        active = bool(candidate[i]) if i < n else False
+        if active and start is None:
+            start = i
+        elif not active and start is not None:
+            if i - start >= min_run:
+                mask[start:i] = True
+            start = None
+    if mask.sum() < int(round(STATIC_MIN_TOTAL_S * fps)):
+        mask[:] = False
+    return mask
+
+
+def compute_neutral_reference(
+    frames: list[dict[str, Any]],
+    angles: dict[str, list[float | None]],
+    fps: float,
+    cutoff_hz: float = DEFAULT_CUTOFF_HZ,
+) -> dict[str, Any]:
+    """Measure the calibration-pose offset of every clinical angle.
+
+    Quiet standing is anatomically ~0 deg of hip flexion, knee flexion and
+    ankle dorsiflexion, so whatever the angles read over a detected stance is
+    the systematic offset of the reconstruction (monocular depth places the
+    shank slightly forward-tilted and the toes slightly up). Subtracting it is
+    the same operation a gait lab performs with a static trial.
+    """
+    static = find_static_frames(frames, fps, cutoff_hz)
+    result: dict[str, Any] = {
+        "applied": False,
+        "method": "static quiet-stance median (subject's own calibration pose)",
+        "static_frames": int(static.sum()),
+        "static_duration_s": round(float(static.sum()) / max(fps, 1e-6), 3),
+        "offsets_deg": {},
+        "note": (
+            "Angles are reported relative to the subject's own quiet stance. "
+            "Add the offsets back to recover raw reconstruction angles. A "
+            "genuinely non-neutral standing posture is absorbed into the offset."
+        ),
+    }
+    if not static.any():
+        result["note"] = (
+            "No quiet stance found in this clip, so angles are raw "
+            "reconstruction values and may carry a systematic posture offset."
+        )
+        return result
+    offsets: dict[str, float] = {}
+    for key, values in angles.items():
+        selected = np.array(
+            [values[i] for i in range(len(values)) if static[i] and values[i] is not None],
+            dtype=np.float64,
+        )
+        if selected.size < max(4, int(round(0.2 * fps))):
+            return result
+        offsets[key] = float(np.median(selected))
+    if any(abs(value) > STATIC_MAX_OFFSET_DEG for value in offsets.values()):
+        result["note"] = (
+            "The detected stance produced implausible offsets, so no neutral "
+            "reference was applied and angles are raw reconstruction values."
+        )
+        return result
+    result["applied"] = True
+    result["offsets_deg"] = {key: round(value, 3) for key, value in offsets.items()}
+    return result
+
+
+def apply_neutral_reference(
+    angles: dict[str, list[float | None]],
+    neutral: dict[str, Any],
+) -> dict[str, list[float | None]]:
+    """Subtract the calibration-pose offsets so quiet stance reads ~0 deg."""
+    if not neutral.get("applied"):
+        return angles
+    offsets = neutral["offsets_deg"]
+    return {
+        key: [None if v is None else _wrap_deg(v - offsets.get(key, 0.0)) for v in values]
+        for key, values in angles.items()
+    }
 
 
 # ── Gait events ──────────────────────────────────────────────────────────────
@@ -391,6 +523,8 @@ def build_gait_analysis(
     parameters and cycle-normalized curves. Degrades gracefully (empty events,
     zero cycles) on non-gait content such as standing subjects."""
     angles = compute_clinical_angles(frames, fps, cutoff_hz)
+    neutral = compute_neutral_reference(frames, angles, fps, cutoff_hz)
+    angles = apply_neutral_reference(angles, neutral)
     events = detect_gait_events(frames, fps, cutoff_hz)
     spatiotemporal = compute_spatiotemporal(frames, events, fps, cutoff_hz)
     cycles: dict[str, dict[str, Any]] = {"left": {}, "right": {}}
@@ -400,6 +534,7 @@ def build_gait_analysis(
                 cycles[side][signal_id] = normalize_cycles(angles[angle_key], events, side, fps)
     return {
         "params": {"filter": "butterworth", "order": FILTER_ORDER, "cutoff_hz": cutoff_hz, "zero_phase": True},
+        "neutral_reference": neutral,
         "angles": angles,
         "events": events,
         "spatiotemporal": spatiotemporal,

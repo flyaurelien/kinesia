@@ -157,6 +157,11 @@ def build_analysis_payload(
     # Clinical gait layer: zero-phase-filtered sagittal angles (exposed as
     # signals), gait events, spatiotemporal parameters, cycle-normalized curves.
     gait = build_gait_analysis(frames, fps)
+    reference = (
+        "referenced to the subject's quiet stance"
+        if gait["neutral_reference"]["applied"]
+        else "raw reconstruction values (no quiet stance found to calibrate against)"
+    )
     for angle_key, signal_id, label in ANGLE_SIGNALS:
         joint = angle_key.split(".")[0]
         measure = "dorsiflexion" if joint == "ankle" else "flexion"
@@ -166,7 +171,8 @@ def build_analysis_payload(
                 label,
                 "deg",
                 f"Sagittal {joint} {measure}, zero-phase Butterworth "
-                f"({gait['params']['cutoff_hz']:.0f} Hz) on joint trajectories.",
+                f"({gait['params']['cutoff_hz']:.0f} Hz) on joint trajectories, "
+                f"{reference}.",
                 gait["angles"][angle_key],
             )
         )
