@@ -44,7 +44,7 @@ const CAM_TO_WORLD = new THREE.Matrix4().set(
   0, 0, 0, 1,
 );
 const DISPLAY_YAW_CLOCKWISE_90 = new THREE.Matrix4().makeRotationZ(-Math.PI / 2);
-const MAX_VERTEX_CACHE_ENTRIES = 1080;
+const MAX_VERTEX_CACHE_ENTRIES = 1080; // per run — every subject of a multi-subject scene keeps its own budget
 const INITIAL_RUN_PRELOAD_FRAMES = 360;
 const PLAYBACK_PRELOAD_RADIUS = 360;
 const RUN_PRELOAD_CONCURRENCY = 8;
@@ -132,22 +132,36 @@ type MeshVertexResource = {
   promise: Promise<Float32Array>;
   data: Float32Array | null;
 };
-const meshVerticesCache = new Map<string, MeshVertexResource>();
+// Vertex buffers are cached PER RUN with a per-run budget. A single shared
+// budget flickers with multi-subject scenes: several runs' preloaders evict
+// each other's entries, so the frame being displayed keeps losing its vertices
+// and the mesh blinks in and out. Per-run FIFO keeps every subject's playback
+// window resident no matter how many subjects share the scene.
+const meshVerticesCacheByRun = new Map<string, Map<string, MeshVertexResource>>();
 
-// Cache key for a single frame's mesh vertices, namespaced by run.
-function meshVertexKey(runId: string, meshFile: string): string {
-  return `${runId}/${meshFile}`;
+function runVertexCache(runId: string): Map<string, MeshVertexResource> {
+  let cache = meshVerticesCacheByRun.get(runId);
+  if (!cache) {
+    cache = new Map<string, MeshVertexResource>();
+    meshVerticesCacheByRun.set(runId, cache);
+  }
+  return cache;
 }
 
-// Insert a vertex resource into the LRU cache, evicting the oldest entry once the cap is hit.
-function rememberVertexResource(key: string, resource: MeshVertexResource): Promise<Float32Array> {
-  if (!meshVerticesCache.has(key) && meshVerticesCache.size >= MAX_VERTEX_CACHE_ENTRIES) {
-    const oldest = meshVerticesCache.keys().next().value as string | undefined;
+// Insert a vertex resource into the run's cache, evicting its oldest entry once the cap is hit.
+function rememberVertexResource(
+  runId: string,
+  meshFile: string,
+  resource: MeshVertexResource,
+): Promise<Float32Array> {
+  const cache = runVertexCache(runId);
+  if (!cache.has(meshFile) && cache.size >= MAX_VERTEX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value as string | undefined;
     if (oldest) {
-      meshVerticesCache.delete(oldest);
+      cache.delete(oldest);
     }
   }
-  meshVerticesCache.set(key, resource);
+  cache.set(meshFile, resource);
   return resource.promise;
 }
 
@@ -171,8 +185,8 @@ function loadMeshFaces(runId: string): Promise<Uint32Array> {
 
 // Fetch a frame's vertex buffer, caching the in-flight promise and its result; on failure the entry is dropped so it can be retried.
 function loadMeshVertices(runId: string, meshFile: string): Promise<Float32Array> {
-  const key = meshVertexKey(runId, meshFile);
-  const existing = meshVerticesCache.get(key);
+  const cache = runVertexCache(runId);
+  const existing = cache.get(meshFile);
   if (existing) {
     return existing.promise;
   }
@@ -190,23 +204,23 @@ function loadMeshVertices(runId: string, meshFile: string): Promise<Float32Array
       return vertices;
     })
     .catch((error) => {
-      if (meshVerticesCache.get(key) === resource) {
-        meshVerticesCache.delete(key);
+      if (cache.get(meshFile) === resource) {
+        cache.delete(meshFile);
       }
       throw error;
     });
   resource = { data: null, promise };
-  return rememberVertexResource(key, resource);
+  return rememberVertexResource(runId, meshFile, resource);
 }
 
 // Return already-resolved vertices for a frame, or null if not yet loaded (no fetch is triggered).
 function cachedMeshVertices(runId: string, meshFile: string): Float32Array | null {
-  return meshVerticesCache.get(meshVertexKey(runId, meshFile))?.data ?? null;
+  return meshVerticesCacheByRun.get(runId)?.get(meshFile)?.data ?? null;
 }
 
 // Whether a fetch for this frame's vertices has been started (resolved or in-flight).
 function hasMeshVertexResource(runId: string, meshFile: string): boolean {
-  return meshVerticesCache.has(meshVertexKey(runId, meshFile));
+  return meshVerticesCacheByRun.get(runId)?.has(meshFile) ?? false;
 }
 
 // Find the closest frame (within radius) whose mesh is already cached, so playback can show a
