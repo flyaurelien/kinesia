@@ -98,12 +98,12 @@ All model weights come from their original publishers — **none are redistribut
 in this repository**. Upstream inference code is vendored under `vendor/`, each
 copy under its own upstream license.
 
-| Model | Role | Source | License |
-|-------|------|--------|---------|
-| **SAM 3D Body** (`sam-3d-body-dinov3`) | per-frame 3D body mesh + joints (MHR parametric model) | [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) | SAM License (gated) |
-| **DINOv3** backbone | image encoder inside SAM 3D Body | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
-| **SAM 3** | open-vocabulary person detection + segmentation (PyTorch, all platforms) | [facebook/sam3](https://huggingface.co/facebook/sam3) | SAM License (gated) |
-| **SAM 3 (MLX)** | fast in-viewer detection preview on Apple Silicon | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image) | inherits SAM 3 |
+| Model | Role | Paper | Weights / code | License |
+|-------|------|-------|----------------|---------|
+| **SAM 3D Body** (`sam-3d-body-dinov3`) | per-frame 3D body mesh + joints ([MHR](https://github.com/facebookresearch/MHR) parametric model) | [arXiv:2602.15989](https://arxiv.org/abs/2602.15989) | [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) · [facebookresearch/sam-3d-body](https://github.com/facebookresearch/sam-3d-body) | SAM License (gated) |
+| **DINOv3** backbone | image encoder inside SAM 3D Body | [arXiv:2508.10104](https://arxiv.org/abs/2508.10104) | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
+| **SAM 3** | open-vocabulary person detection + segmentation (PyTorch, all platforms) | [arXiv:2511.16719](https://arxiv.org/abs/2511.16719) | [facebook/sam3](https://huggingface.co/facebook/sam3) · [facebookresearch/sam3](https://github.com/facebookresearch/sam3) | SAM License (gated) |
+| **SAM 3 (MLX)** | fast in-viewer detection preview on Apple Silicon | — | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image) · [Deekshith-Dade/mlx-sam3](https://github.com/Deekshith-Dade/mlx-sam3) | Apache 2.0 (code) / SAM License (weights) |
 
 > The in-viewer streaming detector uses the MLX build of SAM 3 (Apple Silicon
 > only). On Linux/Windows the reconstruction pipeline performs detection itself
@@ -226,11 +226,52 @@ kinesia/
   vendor/        SAM 3D Body, SAM 3, MLX SAM 3 upstream code (each under its own license)
 ```
 
+## Citations
+
+Kinesia builds on the following research. If you use Kinesia in academic work,
+please cite the underlying models:
+
+```bibtex
+@article{yang2026sam3dbody,
+  title={SAM 3D Body: Robust Full-Body Human Mesh Recovery},
+  author={Yang, Xitong and Kukreja, Devansh and Pinkus, Don and Sagar, Anushka and Fan, Taosha and Park, Jinhyung and Shin, Soyong and Cao, Jinkun and Liu, Jiawei and Ugrinovic, Nicolas and Feiszli, Matt and Malik, Jitendra and Dollar, Piotr and Kitani, Kris},
+  journal={arXiv preprint arXiv:2602.15989},
+  year={2026}
+}
+
+@misc{carion2025sam3segmentconcepts,
+  title={SAM 3: Segment Anything with Concepts},
+  author={Nicolas Carion and Laura Gustafson and Yuan-Ting Hu and Shoubhik Debnath and Ronghang Hu and Didac Suris and Chaitanya Ryali and Kalyan Vasudev Alwala and Haitham Khedr and Andrew Huang and Jie Lei and Tengyu Ma and Baishan Guo and Arpit Kalla and Markus Marks and Joseph Greer and Meng Wang and Peize Sun and Roman R{\"a}dle and Triantafyllos Afouras and Effrosyni Mavroudi and Katherine Xu and Tsung-Han Wu and Yu Zhou and Liliane Momeni and Rishi Hazra and Shuangrui Ding and Sagar Vaze and Francois Porcher and Feng Li and Siyuan Li and Aishwarya Kamath and Ho Kei Cheng and Piotr Doll{\'a}r and Nikhila Ravi and Kate Saenko and Pengchuan Zhang and Christoph Feichtenhofer},
+  year={2025},
+  eprint={2511.16719},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  url={https://arxiv.org/abs/2511.16719},
+}
+
+@misc{simeoni2025dinov3,
+  title={{DINOv3}},
+  author={Sim{\'e}oni, Oriane and Vo, Huy V. and Seitzer, Maximilian and Baldassarre, Federico and Oquab, Maxime and Jose, Cijo and Khalidov, Vasil and Szafraniec, Marc and Yi, Seungeun and Ramamonjisoa, Micha{\"e}l and Massa, Francisco and Haziza, Daniel and Wehrstedt, Luca and Wang, Jianyuan and Darcet, Timoth{\'e}e and Moutakanni, Th{\'e}o and Sentana, Leonel and Roberts, Claire and Vedaldi, Andrea and Tolan, Jamie and Brandt, John and Couprie, Camille and Mairal, Julien and J{\'e}gou, Herv{\'e} and Labatut, Patrick and Bojanowski, Piotr},
+  year={2025},
+  eprint={2508.10104},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  url={https://arxiv.org/abs/2508.10104},
+}
+```
+
+Thanks also to [Deekshith Dade's MLX port of SAM 3](https://github.com/Deekshith-Dade/mlx-sam3)
+(Apache 2.0), Apple's [MLX](https://github.com/ml-explore/mlx) framework, and
+Meta's [Momentum Human Rig](https://github.com/facebookresearch/MHR) parametric
+body model used by SAM 3D Body.
+
 ## License
 
-Kinesia's own code is released under the [MIT License](LICENSE).
+Kinesia's own code is dedicated to the **public domain** under
+[CC0 1.0 Universal](LICENSE) — use it for anything, no attribution required.
 
 The vendored third-party code keeps its upstream licenses: `vendor/sam3-main`
 and `vendor/sam-3d-body-main` are under Meta's SAM License (included in each
 directory), `vendor/mlx_sam3` is Apache 2.0. Model weights are downloaded from
-their original gated sources and are subject to their own license terms.
+their original gated sources and remain subject to their own license terms —
+CC0 applies only to Kinesia's own code.
