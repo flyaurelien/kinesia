@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 
 import { apiFetch } from "../lib/api-client";
+import { filterSeries } from "../lib/one_euro";
 import type { RunDetail, RunFrame } from "../lib/types";
 
 type DisplayAnchor = {
@@ -48,9 +49,25 @@ const MAX_VERTEX_CACHE_ENTRIES = 1080; // per run — every subject of a multi-s
 const INITIAL_RUN_PRELOAD_FRAMES = 360;
 const PLAYBACK_PRELOAD_RADIUS = 360;
 const RUN_PRELOAD_CONCURRENCY = 8;
-const MESH_FALLBACK_RADIUS = 360;
+// Pose fallback stays LOCAL: beyond this, showing a distant frame's pose is a
+// visible "pop", so the mesh holds its last shown geometry instead (sticky).
+const MESH_FALLBACK_RADIUS = 12;
 const PRELOAD_WINDOW_STEP = 30;
-const DISPLAY_ROOT_SMOOTHING_ALPHA = 0.8;
+// One-Euro parameters for the displayed root trajectory, per VIEWER axis.
+// Viewer Y is the camera-depth axis after the world remap + display yaw —
+// monocular depth is by far the noisiest signal (it derives from bbox scale),
+// so it gets the lowest cutoff. Viewer X (camera-right) is optically stable.
+const ROOT_FILTER_X = { minCutoff: 1.0, beta: 0.3, dCutoff: 1.0 };
+const ROOT_FILTER_Y = { minCutoff: 0.5, beta: 0.15, dCutoff: 1.0 };
+const ROOT_FILTER_Z = { minCutoff: 1.2, beta: 0.4, dCutoff: 1.0 };
+// Contact/flight model: the run's ground height is the 10th percentile of the
+// lowest foot joint's height (robust to jumps being a minority of frames).
+// Clearance below SNAP is treated as ground contact (depth/pose noise), so the
+// foot sits exactly on the grid; above it the body is airborne and rises by
+// (clearance - SNAP) — continuous at the threshold, so takeoff cannot pop.
+const GROUND_PERCENTILE = 0.1;
+const CONTACT_SNAP_M = 0.05;
+const LIFT_FILTER = { minCutoff: 1.5, beta: 0.6, dCutoff: 1.0 };
 const BODY_BONE_SEGMENTS: Array<[number, number]> = [
   [69, 0],
   [0, 1],
@@ -362,6 +379,12 @@ function lerpVector(a: THREE.Vector3, b: THREE.Vector3, t: number): THREE.Vector
   return a.clone().lerp(b, Math.max(0, Math.min(1, t)));
 }
 
+// Scalar linear interpolation with t clamped to [0, 1].
+function lerpNumber(a: number, b: number, t: number): number {
+  const k = Math.max(0, Math.min(1, t));
+  return a * (1 - k) + b * k;
+}
+
 // Component-wise linear interpolation between two [x, y, z] triplets with t clamped to [0, 1].
 function interpolateTriplet(
   a: [number, number, number],
@@ -533,6 +556,62 @@ function footJointGroundOffset(
   return zValues.length > 0 ? Math.min(...zValues) : null;
 }
 
+// Absolute (viewer-space, pre-pivot) height of the lowest foot joint of a frame.
+function lowestFootViewerZ(frame: RunFrame, anchor: DisplayAnchor | null): number | null {
+  const joints = frame.jointsCam ?? null;
+  if (!joints || joints.length < 15 || frame.subjectPresent === false) {
+    return null;
+  }
+  let min: number | null = null;
+  for (const index of [13, 14, 15, 16, 17, 18, 19, 20]) {
+    const joint = joints[index];
+    if (!joint) {
+      continue;
+    }
+    const z = camToWorld(joint, anchor).z;
+    if (Number.isFinite(z) && (min === null || z < min)) {
+      min = z;
+    }
+  }
+  return min;
+}
+
+// Per-frame vertical LIFT of a subject above the run's ground plane.
+//
+// The previous design pinned the lowest foot to z=0 on EVERY frame, which made
+// vertical motion physically impossible to display: a jump stayed glued to the
+// floor (and mid-air tucking pushed the pelvis DOWN). Instead, estimate the
+// ground once per run (robust low percentile of the lowest-foot height across
+// the whole clip), then per frame let the body rise by its foot clearance above
+// that plane. Within CONTACT_SNAP_M of the ground the clearance is treated as
+// noise and snapped to zero — walking and standing stay exactly on the grid —
+// and the mapping `lift = max(0, clearance - SNAP)` is continuous, so takeoff
+// and landing cannot pop. The clearance itself runs through a snappy One-Euro
+// filter (jitter gone at rest, jumps tracked with minimal lag).
+function computeLiftSeries(
+  frames: RunFrame[],
+  anchor: DisplayAnchor | null,
+  fps: number,
+): number[] {
+  const rawClearance: Array<number | null> = new Array(frames.length).fill(null);
+  const heights: number[] = [];
+  for (let index = 0; index < frames.length; index += 1) {
+    const z = lowestFootViewerZ(frames[index], anchor);
+    rawClearance[index] = z;
+    if (z !== null) {
+      heights.push(z);
+    }
+  }
+  if (heights.length === 0) {
+    return new Array(frames.length).fill(0);
+  }
+  heights.sort((a, b) => a - b);
+  const ground = heights[Math.min(heights.length - 1, Math.floor(heights.length * GROUND_PERCENTILE))];
+  const clearance = rawClearance.map((z) => (z === null ? null : z - ground));
+  const filtered = filterSeries(clearance, fps, LIFT_FILTER);
+  return filtered.map((c) => (c === null ? 0 : Math.max(0, c - CONTACT_SNAP_M)));
+}
+
 // Builds and renders the SMPL mesh for one frame: loads faces + vertices, optionally tweens toward the
 // next frame's vertices, and bakes the camera->viewer transform and pivot into the geometry.
 function MeshGeometry({
@@ -635,14 +714,29 @@ function MeshGeometry({
     next.computeBoundingSphere();
     return next;
   }, [anchor, faces, meshInterpolation, nextVertices, pivot, vertices]);
-  useEffect(() => () => geometry?.dispose(), [geometry]);
+  // STICKY geometry: while the exact frame's vertices are still loading (or
+  // were evicted), keep showing the last built pose instead of returning null —
+  // a blinking mesh is far more jarring than a briefly frozen one.
+  const lastGeometryRef = useRef<THREE.BufferGeometry | null>(null);
+  if (geometry && geometry !== lastGeometryRef.current) {
+    lastGeometryRef.current?.dispose();
+    lastGeometryRef.current = geometry;
+  }
+  useEffect(
+    () => () => {
+      lastGeometryRef.current?.dispose();
+      lastGeometryRef.current = null;
+    },
+    [],
+  );
 
-  if (!geometry) {
+  const shown = geometry ?? lastGeometryRef.current;
+  if (!shown) {
     return null;
   }
 
   return (
-    <mesh geometry={geometry} castShadow receiveShadow>
+    <mesh geometry={shown} castShadow receiveShadow>
       <meshBasicMaterial
         color={color || MESH_COLOR}
         transparent={meshOpacity < 0.995}
@@ -705,6 +799,7 @@ function MeshBody({
   selectedJointIndices,
   onJointPick,
   color,
+  lift = 0,
 }: {
   runId: string;
   frame: RunFrame;
@@ -723,17 +818,26 @@ function MeshBody({
   selectedJointIndices: number[];
   onJointPick?: (jointIndex: number) => void;
   color?: string | null;
+  lift?: number;
 }) {
   const subjectVisible = frame.subjectPresent !== false;
   const jointOffset = useMemo(() => footJointGroundOffset(frame, quaternion, anchor, pivot), [anchor, frame, pivot, quaternion]);
-  // Z is driven by the lowest foot joint so the lowest contact point always
-  // sits exactly on the grid (no foot traversal). XY comes from ViewerScene,
-  // which already locks the body to the grid origin to remove drift.
+  // When foot joints briefly drop out, HOLD the last known offset instead of
+  // coalescing to 0 — 0 put the PELVIS on the floor and the body visibly sank
+  // for the gap, then popped back.
+  const lastOffsetRef = useRef(0);
+  if (jointOffset !== null) {
+    lastOffsetRef.current = jointOffset;
+  }
+  // Z places the lowest foot on the grid, PLUS the subject's lift above the
+  // run's ground plane — zero in contact, positive during flight, so jumps
+  // actually leave the floor. XY comes from ViewerScene's filtered root.
   const groundedPosition = useMemo(() => {
     const p = position.clone();
-    p.z = -(jointOffset ?? 0);
+    p.z = -(jointOffset ?? lastOffsetRef.current) + lift;
     return p;
-  }, [jointOffset, position]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jointOffset, lift, position]);
 
   const joints = useMemo(
     () => subjectVisible ? (frame.jointsCam ?? []).map((joint) => camToWorld(joint, anchor).sub(pivot)) : [],
@@ -930,36 +1034,46 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
     [frameBase, frameNext, interpolation],
   );
   const anchor = useMemo(() => displayAnchor(props.runDetail), [props.runDetail]);
-  const displayRootPositions = useMemo(
-    () => props.runDetail.frames.map((item) => framePosition(item, "stabilized", anchor)),
-    [anchor, props.runDetail.frames],
-  );
   const rawRootPositions = useMemo(
     () => props.runDetail.frames.map((item) => framePosition(item, "raw", anchor)),
     [anchor, props.runDetail.frames],
   );
+  // Displayed root = One-Euro-filtered RAW root. Unlike the previous fixed-alpha
+  // EMA (4-frame group delay at any speed, causing foot slide during
+  // acceleration because the pivot is unsmoothed), the One-Euro filter adapts
+  // its cutoff to speed: heavy smoothing at rest (monocular depth jitter
+  // disappears), near-zero lag during fast motion (steps and jumps track
+  // truthfully).
   const smoothPositions = useMemo(() => {
-    const alpha = DISPLAY_ROOT_SMOOTHING_ALPHA;
-    if (displayRootPositions.length === 0 || alpha <= 0) {
-      return displayRootPositions;
+    const fps = Math.max(1, props.runDetail.fps || 30);
+    const xs = filterSeries(rawRootPositions.map((p) => p.x), fps, ROOT_FILTER_X);
+    const ys = filterSeries(rawRootPositions.map((p) => p.y), fps, ROOT_FILTER_Y);
+    const zs = filterSeries(rawRootPositions.map((p) => p.z), fps, ROOT_FILTER_Z);
+    return rawRootPositions.map(
+      (p, index) =>
+        new THREE.Vector3(
+          (xs[index] as number) ?? p.x,
+          (ys[index] as number) ?? p.y,
+          (zs[index] as number) ?? p.z,
+        ),
+    );
+  }, [props.runDetail.fps, rawRootPositions]);
+  // Vertical placement: per-subject lift above the run's fixed ground plane —
+  // zero in contact (feet snap to the grid), free during flight (jumps rise).
+  const liftSeries = useMemo(
+    () => computeLiftSeries(props.runDetail.frames, anchor, Math.max(1, props.runDetail.fps || 30)),
+    [anchor, props.runDetail.frames, props.runDetail.fps],
+  );
+  const siblingLifts = useMemo(() => {
+    const map = new Map<string, number[]>();
+    for (const sibling of props.siblings ?? []) {
+      map.set(
+        sibling.runDetail.id,
+        computeLiftSeries(sibling.runDetail.frames, anchor, Math.max(1, props.runDetail.fps || 30)),
+      );
     }
-    const out: THREE.Vector3[] = [];
-    for (let index = 0; index < displayRootPositions.length; index += 1) {
-      if (index === 0) {
-        out.push(displayRootPositions[index].clone());
-      } else {
-        out.push(out[index - 1].clone().lerp(displayRootPositions[index], 1 - alpha));
-      }
-    }
-    return out;
-  }, [displayRootPositions]);
-  // Drift suppression is now handled physically at load time by the
-  // foot-anchoring pass in stabilization_xy.ts (the support foot is locked
-  // in world space, the pelvis is derived from it, anchors switch at
-  // heel-strike). So we can trust smoothPositions here and use the EMA
-  // output directly: turning-in-place stays planted because the anchor
-  // doesn't drift, walking actually translates because every step shifts
-  // the anchor by the natural step length.
+    return map;
+  }, [anchor, props.runDetail.fps, props.siblings]);
   const displayPosition = smoothPositions[nextIndex]
     ? lerpVector(smoothPositions[baseIndex], smoothPositions[nextIndex], interpolation)
     : smoothPositions[baseIndex] ?? new THREE.Vector3();
@@ -1020,6 +1134,7 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         selectedJointIndices={props.selectedJointIndices}
         onJointPick={props.onJointPick}
         color={props.subjectColor}
+        lift={lerpNumber(liftSeries[baseIndex] ?? 0, liftSeries[nextIndex] ?? 0, interpolation)}
       />
       {(props.siblings ?? []).map((sibling) => {
         // Sibling subjects of the same selection share the source video's
@@ -1060,7 +1175,13 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
               meshInterpolation={sMeshInterpolation}
               position={position}
               pivot={pivot}
-              meshPivot={pivot}
+              // A fallback mesh frame bakes ITS OWN root translation; subtract
+              // that frame's raw root (in the shared camera space) so the
+              // sibling's mesh stays on its skeleton instead of drifting by
+              // rawRoot[fallback] - rawRoot[current].
+              meshPivot={
+                sMeshIndex === sBase ? pivot : framePosition(sMeshFrame, "raw", anchor)
+              }
               quaternion={upright}
               anchor={anchor}
               showMesh={props.showMesh}
@@ -1069,6 +1190,11 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
               meshOpacity={props.meshOpacity}
               selectedJointIndices={[]}
               color={sibling.color}
+              lift={lerpNumber(
+                siblingLifts.get(sibling.runDetail.id)?.[sBase] ?? 0,
+                siblingLifts.get(sibling.runDetail.id)?.[sNext] ?? 0,
+                interpolation,
+              )}
             />
           </group>
         );
