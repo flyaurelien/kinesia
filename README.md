@@ -25,6 +25,9 @@ the 3D reconstruction.*
   set, streamed into the viewer while the job runs.
 - **Gait kinematics** — hip/knee/ankle angles and more, per frame, plotted
   against the video with a synchronized playhead.
+- **Clinical gait analysis** — zero-phase filtering, sagittal joint angles,
+  heel-strike/toe-off events, spatiotemporal parameters and cycle-normalized
+  curves (see [clinical gait analysis](#clinical-gait-analysis)).
 - **Three synced views** — clean source video, tracking boxes (one colour per
   subject), and the segmentation render, next to the 3D scene.
 - **Export** — per-joint kinematics as CSV/JSON and a tracking-box MP4.
@@ -91,6 +94,36 @@ runs of the same selection and renders every subject's mesh in the primary
 run's reference frame — one scene, one colour per subject, true relative
 placement. Kinematics remain per subject: switch runs in the sidebar to see
 another subject's curves.
+
+### Clinical gait analysis
+
+`sam3d analyze` adds a gait-lab layer on top of the raw reconstruction, written
+to `gait.json` next to the signals:
+
+- **Zero-phase filtering** — joint trajectories are low-passed with a 4th-order
+  Butterworth applied forward and backward (`filtfilt`, 6 Hz) *before* any angle
+  is formed. Zero phase means no temporal lag, so event timings stay honest.
+- **Sagittal angles** — hip flexion, knee flexion and ankle dorsiflexion, both
+  sides, measured in the subject's own sagittal plane (pelvis axis + the feet's
+  pointing direction), so the convention holds whichever way the person walks
+  relative to the camera.
+- **Static calibration** — monocular reconstruction carries a systematic
+  standing-posture bias (shank tilted forward, toes up: consistently ~16° at the
+  knee and ~30° at the ankle across subjects). Kinesia detects the subject's own
+  quiet stance — both feet down, pelvis under 8 cm/s, trunk upright, sustained —
+  and subtracts it as a calibration pose, exactly as a lab uses a static trial.
+  The offsets are reported in full and are reversible; clips with no quiet
+  stance keep raw values and say so.
+- **Events and parameters** — heel-strikes (refined to the local minimum of the
+  filtered heel height) and toe-offs, then cadence, step/stride time and length,
+  walking speed, stance/swing and double-support percentages.
+- **Cycle normalization** — every angle resampled to 0–100 % of each stride and
+  aggregated as mean ± SD per side: the curves clinicians actually read. This is
+  where the tracker's occlusion robustness pays off, since cycles survive the
+  crossings that make other tools lose the subject.
+
+Everything degrades gracefully: a standing or non-gait clip reports no walking
+and zero cycles rather than inventing numbers.
 
 ## Models
 
