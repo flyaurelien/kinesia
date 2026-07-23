@@ -523,7 +523,12 @@ function stableUprightQuaternions(frames: RunFrame[], anchor: DisplayAnchor | nu
     }
     const previous = out[out.length - 1];
     const jump = quaternionAngle(previous, candidate);
-    const alpha = jump > maxJump ? 0.22 : 0.48;
+    // Slow slew: the tilt target is derived from the shoulder line, which
+    // wobbles whenever an arm is raised — the rotation is applied about the
+    // pelvis, so target noise swings the whole body. Real posture changes are
+    // slow; tracking them at a fraction of the old rate removes the wobble
+    // without visibly lagging genuine lean.
+    const alpha = jump > maxJump ? 0.08 : 0.2;
     out.push(previous.clone().slerp(candidate, alpha).normalize());
   }
   return out;
@@ -574,6 +579,157 @@ function lowestFootViewerZ(frame: RunFrame, anchor: DisplayAnchor | null): numbe
     }
   }
   return min;
+}
+
+// Support-foot horizontal anchoring (a zero-velocity update, as used in
+// inertial navigation and marker-based mocap cleanup).
+//
+// Monocular depth comes from bbox scale, so it wobbles with POSE: raising an
+// arm enlarges the crop and the whole body appears to lunge forward/backward.
+// A temporal filter cannot remove this — it has real-motion velocity. But
+// physics gives a hard invariant: a foot in ground contact is STATIONARY in
+// the world. Any apparent translation of the planted foot between frames is
+// reconstruction noise, so the negated foot drift is applied to the WHOLE
+// body. Standing bodies become rock solid regardless of gesturing; walking
+// keeps true step lengths (the anchor advances at every support switch);
+// flight phases (jump — no contact) integrate the raw trajectory untouched.
+
+const LEFT_FOOT_JOINTS = [13, 15, 16, 17]; // ankle, bigToe, smallToe, heel
+const RIGHT_FOOT_JOINTS = [14, 18, 19, 20];
+// Instant correction: with pull=1 the displayed root becomes
+// anchor + (root - supportFoot), where the common-mode translation noise
+// cancels EXACTLY (both contain it). The support foot's own joint noise is
+// injected instead, but it is smaller and the One-Euro stage downstream
+// absorbs it — measured on real footage: per-frame XY jitter p95 7.2mm -> 1.1mm
+// and a standing subject's spurious 19cm depth wander drops to real body sway.
+const ANCHOR_PULL = 1.0;
+const ANCHOR_MAX_CORRECTION_M = 2.0;
+
+function footXY(
+  frame: RunFrame,
+  indices: number[],
+  anchor: DisplayAnchor | null,
+): THREE.Vector2 | null {
+  const joints = frame.jointsCam ?? null;
+  if (!joints || joints.length < 21 || frame.subjectPresent === false) {
+    return null;
+  }
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  for (const index of indices) {
+    const joint = joints[index];
+    if (!joint) {
+      continue;
+    }
+    const p = camToWorld(joint, anchor);
+    if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
+      sx += p.x;
+      sy += p.y;
+      n += 1;
+    }
+  }
+  return n > 0 ? new THREE.Vector2(sx / n, sy / n) : null;
+}
+
+// Which foot (if any) is in ground contact on this frame. Prefers the
+// analysis-provided contact labels; falls back to the lowest-foot clearance.
+function frameSupport(
+  frame: RunFrame,
+  anchor: DisplayAnchor | null,
+  ground: number | null,
+): "left" | "right" | "both" | "none" {
+  const stored = frame.footContact?.support;
+  if (stored === "left" || stored === "right" || stored === "both") {
+    return stored;
+  }
+  if (stored === "none") {
+    return "none";
+  }
+  if (ground === null) {
+    return "none";
+  }
+  const z = lowestFootViewerZ(frame, anchor);
+  return z !== null && z - ground <= CONTACT_SNAP_M * 2 ? "both" : "none";
+}
+
+function anchoredTrajectory(
+  frames: RunFrame[],
+  rawRoots: THREE.Vector3[],
+  anchor: DisplayAnchor | null,
+): THREE.Vector3[] {
+  // Ground estimate for the contact fallback (same as computeLiftSeries).
+  const heights: number[] = [];
+  for (const frame of frames) {
+    const z = lowestFootViewerZ(frame, anchor);
+    if (z !== null) {
+      heights.push(z);
+    }
+  }
+  heights.sort((a, b) => a - b);
+  const ground =
+    heights.length > 0
+      ? heights[Math.min(heights.length - 1, Math.floor(heights.length * GROUND_PERCENTILE))]
+      : null;
+
+  const correction = new THREE.Vector2(0, 0);
+  let anchorXY: THREE.Vector2 | null = null;
+  let lastSupport: string = "none";
+  const out: THREE.Vector3[] = [];
+  for (let index = 0; index < frames.length; index += 1) {
+    const frame = frames[index];
+    const support = frameSupport(frame, anchor, ground);
+    const indices =
+      support === "left"
+        ? LEFT_FOOT_JOINTS
+        : support === "right"
+          ? RIGHT_FOOT_JOINTS
+          : support === "both"
+            ? [...LEFT_FOOT_JOINTS, ...RIGHT_FOOT_JOINTS]
+            : null;
+    const supportXY = indices ? footXY(frame, indices, anchor) : null;
+    if (supportXY) {
+      if (support !== lastSupport || anchorXY === null) {
+        // Re-capture at the foot's current CORRECTED position: the correction
+        // target equals the current correction at the switch instant, so the
+        // displayed trajectory is value-continuous across support changes.
+        anchorXY = supportXY.clone().add(correction);
+      }
+      const target = anchorXY.clone().sub(supportXY);
+      correction.lerp(target, ANCHOR_PULL);
+      correction.clampLength(0, ANCHOR_MAX_CORRECTION_M);
+    }
+    // No contact (flight, missing joints): the correction is frozen — the raw
+    // motion passes through untouched.
+    lastSupport = supportXY ? support : "none";
+    const raw = rawRoots[index] ?? new THREE.Vector3();
+    out.push(new THREE.Vector3(raw.x + correction.x, raw.y + correction.y, raw.z));
+  }
+  return out;
+}
+
+// The full displayed root trajectory of one subject: support-foot anchored
+// (kills pose-correlated depth wobble while any foot is planted), then
+// One-Euro filtered per axis (kills residual high-frequency jitter with
+// near-zero lag during real motion).
+function filteredDisplayTrajectory(
+  frames: RunFrame[],
+  rawRoots: THREE.Vector3[],
+  anchor: DisplayAnchor | null,
+  fps: number,
+): THREE.Vector3[] {
+  const anchored = anchoredTrajectory(frames, rawRoots, anchor);
+  const xs = filterSeries(anchored.map((p) => p.x), fps, ROOT_FILTER_X);
+  const ys = filterSeries(anchored.map((p) => p.y), fps, ROOT_FILTER_Y);
+  const zs = filterSeries(anchored.map((p) => p.z), fps, ROOT_FILTER_Z);
+  return anchored.map(
+    (p, index) =>
+      new THREE.Vector3(
+        (xs[index] as number) ?? p.x,
+        (ys[index] as number) ?? p.y,
+        (zs[index] as number) ?? p.z,
+      ),
+  );
 }
 
 // Per-frame vertical LIFT of a subject above the run's ground plane.
@@ -1044,33 +1200,41 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
   // its cutoff to speed: heavy smoothing at rest (monocular depth jitter
   // disappears), near-zero lag during fast motion (steps and jumps track
   // truthfully).
-  const smoothPositions = useMemo(() => {
-    const fps = Math.max(1, props.runDetail.fps || 30);
-    const xs = filterSeries(rawRootPositions.map((p) => p.x), fps, ROOT_FILTER_X);
-    const ys = filterSeries(rawRootPositions.map((p) => p.y), fps, ROOT_FILTER_Y);
-    const zs = filterSeries(rawRootPositions.map((p) => p.z), fps, ROOT_FILTER_Z);
-    return rawRootPositions.map(
-      (p, index) =>
-        new THREE.Vector3(
-          (xs[index] as number) ?? p.x,
-          (ys[index] as number) ?? p.y,
-          (zs[index] as number) ?? p.z,
-        ),
-    );
-  }, [props.runDetail.fps, rawRootPositions]);
+  const smoothPositions = useMemo(
+    () =>
+      filteredDisplayTrajectory(
+        props.runDetail.frames,
+        rawRootPositions,
+        anchor,
+        Math.max(1, props.runDetail.fps || 30),
+      ),
+    [anchor, props.runDetail.fps, props.runDetail.frames, rawRootPositions],
+  );
   // Vertical placement: per-subject lift above the run's fixed ground plane —
   // zero in contact (feet snap to the grid), free during flight (jumps rise).
   const liftSeries = useMemo(
     () => computeLiftSeries(props.runDetail.frames, anchor, Math.max(1, props.runDetail.fps || 30)),
     [anchor, props.runDetail.frames, props.runDetail.fps],
   );
-  const siblingLifts = useMemo(() => {
-    const map = new Map<string, number[]>();
+  // Each sibling subject gets its own anchored+filtered trajectory and its own
+  // raw-root pivot: the runs' depth noise is independent (separate per-frame
+  // reconstructions), so borrowing the primary's pivot would leave the
+  // sibling's own wobble uncorrected. All trajectories live in the shared
+  // viewer space, so relative placement stays true.
+  const siblingMotion = useMemo(() => {
+    const fps = Math.max(1, props.runDetail.fps || 30);
+    const map = new Map<
+      string,
+      { lifts: number[]; positions: THREE.Vector3[]; rawRoots: THREE.Vector3[] }
+    >();
     for (const sibling of props.siblings ?? []) {
-      map.set(
-        sibling.runDetail.id,
-        computeLiftSeries(sibling.runDetail.frames, anchor, Math.max(1, props.runDetail.fps || 30)),
-      );
+      const sFrames = sibling.runDetail.frames;
+      const rawRoots = sFrames.map((item) => framePosition(item, "raw", anchor));
+      map.set(sibling.runDetail.id, {
+        lifts: computeLiftSeries(sFrames, anchor, fps),
+        positions: filteredDisplayTrajectory(sFrames, rawRoots, anchor, fps),
+        rawRoots,
+      });
     }
     return map;
   }, [anchor, props.runDetail.fps, props.siblings]);
@@ -1138,13 +1302,14 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
       />
       {(props.siblings ?? []).map((sibling) => {
         // Sibling subjects of the same selection share the source video's
-        // camera space, so rendering them with the PRIMARY run's anchor,
-        // pivot, position and upright rotation preserves the true relative
-        // placement of the people: relative offset = upright * (siblingCam -
-        // primaryCam). Each sibling grounds its own feet (MeshBody re-derives
-        // Z from its own frame's foot joints).
+        // camera space, so every subject's anchored trajectory lives in the
+        // same viewer frame and relative placement stays true. Each sibling
+        // is placed by its OWN anchored+filtered trajectory and its OWN
+        // raw-root pivot (the runs' reconstruction noise is independent), and
+        // grounds its own feet.
         const siblingFrames = sibling.runDetail.frames;
-        if (siblingFrames.length === 0) {
+        const motion = siblingMotion.get(sibling.runDetail.id);
+        if (siblingFrames.length === 0 || !motion) {
           return null;
         }
         const sBase = Math.min(baseIndex, siblingFrames.length - 1);
@@ -1158,6 +1323,12 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         const sMeshFrame = siblingFrames[sMeshIndex] ?? sFrameBase;
         const sMeshNext = sMeshIndex === sBase ? sFrameNext : sMeshFrame;
         const sMeshInterpolation = sMeshIndex === sBase ? interpolation : 0;
+        const sPosition = motion.positions[sNext]
+          ? lerpVector(motion.positions[sBase], motion.positions[sNext], interpolation)
+          : motion.positions[sBase] ?? position;
+        const sPivot = motion.rawRoots[sNext]
+          ? lerpVector(motion.rawRoots[sBase], motion.rawRoots[sNext], interpolation)
+          : motion.rawRoots[sBase] ?? sPosition;
         return (
           <group key={sibling.runDetail.id}>
             {props.showMesh ? (
@@ -1173,14 +1344,13 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
               meshFrame={sMeshFrame}
               nextMeshFrame={sMeshNext}
               meshInterpolation={sMeshInterpolation}
-              position={position}
-              pivot={pivot}
+              position={sPosition}
+              pivot={sPivot}
               // A fallback mesh frame bakes ITS OWN root translation; subtract
-              // that frame's raw root (in the shared camera space) so the
-              // sibling's mesh stays on its skeleton instead of drifting by
-              // rawRoot[fallback] - rawRoot[current].
+              // that frame's raw root so the sibling's mesh stays on its
+              // skeleton instead of drifting by rawRoot[fallback] - rawRoot[current].
               meshPivot={
-                sMeshIndex === sBase ? pivot : framePosition(sMeshFrame, "raw", anchor)
+                sMeshIndex === sBase ? sPivot : motion.rawRoots[sMeshIndex] ?? sPivot
               }
               quaternion={upright}
               anchor={anchor}
@@ -1191,8 +1361,8 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
               selectedJointIndices={[]}
               color={sibling.color}
               lift={lerpNumber(
-                siblingLifts.get(sibling.runDetail.id)?.[sBase] ?? 0,
-                siblingLifts.get(sibling.runDetail.id)?.[sNext] ?? 0,
+                motion.lifts[sBase] ?? 0,
+                motion.lifts[sNext] ?? 0,
                 interpolation,
               )}
             />
