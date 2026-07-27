@@ -81,6 +81,21 @@ export function buildKinematicsJson(inputs: BundleInputs): string {
   return JSON.stringify(payload, null, 2);
 }
 
+// ── Clinical gait report ─────────────────────────────────────────────────────
+// The gait layer (spatiotemporal parameters, cycle-normalized angle curves and
+// the calibration provenance) as a standalone JSON, so the clinical deliverable
+// ships with the raw kinematics.
+export function buildGaitReportJson(inputs: BundleInputs): string {
+  const { runDetail, runId } = inputs;
+  const payload = {
+    schema: "kinesia.gait.v1",
+    runId,
+    fps: runDetail.fps,
+    gait: runDetail.gait ?? null,
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
 // ── Assemble the file list for the bundle ────────────────────────────────────-
 const FRAME_EXT: Record<FrameFormat, string> = { csv: "csv", json: "json" };
 
@@ -96,6 +111,11 @@ export function buildBundleFiles(inputs: BundleInputs, formats: ChannelFormats):
       ? buildKinematicsJson(inputs)
       : buildKinematicsCsv(inputs.runDetail),
   });
+
+  // Clinical gait report (only when the run has a gait layer).
+  if (inputs.runDetail.gait) {
+    files.push({ name: path("gait", "json"), text: buildGaitReportJson(inputs) });
+  }
 
   return files;
 }

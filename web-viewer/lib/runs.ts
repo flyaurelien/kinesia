@@ -15,7 +15,7 @@ import {
   runsRoot,
   usesConfiguredRunsRoot,
 } from "./store";
-import type { RunDetail, RunFrame, RunSignal, RunSubject, RunSummary } from "./types";
+import type { GaitCycle, GaitStat, RunDetail, RunFrame, RunGait, RunSignal, RunSubject, RunSummary } from "./types";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -353,7 +353,7 @@ async function readAnalysis(runId: string, analysisIdRaw: string | null | undefi
   const manifest = await readRunManifest(runId);
   const selected = analysisIdRaw ?? latestAnalysisId(manifest);
   if (!selected) {
-    return { id: null, frames: null, signals: null, qa: null };
+    return { id: null, frames: null, signals: null, qa: null, gait: null };
   }
   const analysisId = ensureSafeId(selected);
   const analysisDir = path.join(runDir(runId), "analysis", analysisId);
@@ -362,6 +362,103 @@ async function readAnalysis(runId: string, analysisIdRaw: string | null | undefi
     frames: await readJsonIfExists<JsonRecord>(path.join(analysisDir, "frames.json")),
     signals: await readJsonIfExists<JsonRecord>(path.join(analysisDir, "signals.json")),
     qa: await readJsonIfExists<JsonRecord>(path.join(analysisDir, "qa.json")),
+    gait: await readJsonIfExists<JsonRecord>(path.join(analysisDir, "gait.json")),
+  };
+}
+
+// ── Gait layer (gait.json) → the viewer's RunGait shape ──────────────────────
+// Tolerant of missing pieces: a run analyzed before the gait layer, or a clip
+// with no walking, still yields a usable (possibly empty) structure or null.
+function numArrayOrNull(value: unknown): number[] | null {
+  if (!Array.isArray(value)) return null;
+  const out = value.map((v) => (typeof v === "number" && Number.isFinite(v) ? v : NaN));
+  return out.every((v) => Number.isNaN(v)) ? null : out;
+}
+
+function gaitStat(raw: unknown): GaitStat {
+  const rec = (raw && typeof raw === "object" ? raw : {}) as JsonRecord;
+  return {
+    mean: numericOrNull(rec.mean),
+    sd: numericOrNull(rec.sd),
+    n: Math.trunc(numericOrNull(rec.n) ?? 0),
+  };
+}
+
+function gaitCycle(raw: unknown): GaitCycle {
+  const rec = (raw && typeof raw === "object" ? raw : {}) as JsonRecord;
+  return {
+    n_cycles: Math.trunc(numericOrNull(rec.n_cycles) ?? 0),
+    mean: numArrayOrNull(rec.mean),
+    sd: numArrayOrNull(rec.sd),
+  };
+}
+
+function gaitCyclesForSide(raw: unknown): Record<string, GaitCycle> {
+  const out: Record<string, GaitCycle> = {};
+  if (raw && typeof raw === "object") {
+    for (const [id, value] of Object.entries(raw as JsonRecord)) {
+      out[id] = gaitCycle(value);
+    }
+  }
+  return out;
+}
+
+function gaitFromAnalysis(gaitPayload: JsonRecord | null): RunGait | null {
+  const gait = (gaitPayload?.gait ?? gaitPayload) as JsonRecord | null;
+  if (!gait || typeof gait !== "object") return null;
+  const params = (gait.params ?? {}) as JsonRecord;
+  const nr = (gait.neutral_reference ?? {}) as JsonRecord;
+  const st = (gait.spatiotemporal ?? {}) as JsonRecord;
+  const cycles = (gait.cycles ?? {}) as JsonRecord;
+  const offsets: Record<string, number> = {};
+  if (nr.offsets_deg && typeof nr.offsets_deg === "object") {
+    for (const [k, v] of Object.entries(nr.offsets_deg as JsonRecord)) {
+      const n = numericOrNull(v);
+      if (n != null) offsets[k] = n;
+    }
+  }
+  const events = Array.isArray(gait.events)
+    ? gait.events
+        .filter((e): e is JsonRecord => Boolean(e) && typeof e === "object")
+        .map((e) => ({
+          frame: Math.trunc(numericOrNull(e.frame) ?? 0),
+          time_s: numericOrNull(e.time_s) ?? 0,
+          side: e.side === "right" ? ("right" as const) : ("left" as const),
+          type: e.type === "toe_off" ? ("toe_off" as const) : ("heel_strike" as const),
+        }))
+    : [];
+  return {
+    params: {
+      filter: typeof params.filter === "string" ? params.filter : "butterworth",
+      order: Math.trunc(numericOrNull(params.order) ?? 4),
+      cutoff_hz: numericOrNull(params.cutoff_hz) ?? 6,
+      zero_phase: params.zero_phase !== false,
+    },
+    neutralReference: {
+      applied: Boolean(nr.applied),
+      method: typeof nr.method === "string" ? nr.method : "",
+      staticFrames: Math.trunc(numericOrNull(nr.static_frames) ?? 0),
+      staticDurationS: numericOrNull(nr.static_duration_s) ?? 0,
+      offsetsDeg: offsets,
+      note: typeof nr.note === "string" ? nr.note : "",
+    },
+    events,
+    spatiotemporal: {
+      walkingDetected: Boolean(st.walking_detected),
+      cadenceStepsPerMin: numericOrNull(st.cadence_steps_per_min),
+      stepTimeS: gaitStat(st.step_time_s),
+      stepLengthM: gaitStat(st.step_length_m),
+      strideTimeS: gaitStat(st.stride_time_s),
+      strideLengthM: gaitStat(st.stride_length_m),
+      walkingSpeedMS: gaitStat(st.walking_speed_m_s),
+      stancePct: gaitStat(st.stance_pct),
+      swingPct: gaitStat(st.swing_pct),
+      doubleSupportPct: gaitStat(st.double_support_pct),
+    },
+    cycles: {
+      left: gaitCyclesForSide(cycles.left),
+      right: gaitCyclesForSide(cycles.right),
+    },
   };
 }
 
@@ -855,6 +952,7 @@ export async function getRunDetail(runIdRaw: string, analysisId?: string | null)
   const hasMeshes = await hasMeshFiles(path.join(baseDir, MESH_DIR));
   const analysisSignals = signalsFromAnalysis(analysis.signals, frames.length);
   const signals = withDisplayRootSignals(mergeSignals(analysisSignals, deriveSignals(displayFrames, fps)), displayFrames);
+  const gait = gaitFromAnalysis(analysis.gait);
   const qa = analysis.qa as RunDetail["qa"] | null;
   const inputVideo = await findVideoPath(baseDir, manifest, metadata, "input");
   const previewVideo = await findVideoPath(baseDir, manifest, metadata, "preview");
@@ -877,6 +975,7 @@ export async function getRunDetail(runIdRaw: string, analysisId?: string | null)
     previewVideoTimebase,
     subject: subjectFromRecord(metadata?.subject ?? manifest?.subject),
     signals,
+    gait,
     frames: displayFrames,
     analyses: analysesFromManifest(manifest),
     qa,

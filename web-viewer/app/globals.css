@@ -2735,3 +2735,190 @@ button:disabled {
     max-width: none;
   }
 }
+
+/* ── Analysis-view toggle (Timeline vs Gait cycle) ─────────────────────────── */
+.analysis-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.analysis-view-toggle button {
+  border: none;
+  background: #0d1424;
+  color: #aab6cc;
+  padding: 4px 11px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.analysis-view-toggle button + button {
+  border-left: 1px solid var(--line-strong);
+}
+.analysis-view-toggle button.active {
+  color: #021018;
+  background: var(--cyan);
+  border-color: var(--cyan);
+}
+
+/* ── Clinical gait-cycle report ────────────────────────────────────────────── */
+.gait-report {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 2px 4px;
+  scrollbar-gutter: stable;
+}
+
+.gait-report-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.gait-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 11.5px;
+  color: #cdd7e8;
+}
+.gait-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.gait-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.gait-legend-band {
+  color: var(--muted);
+}
+
+/* Spatiotemporal parameter cards */
+.gait-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 6px;
+}
+.gait-card {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(13, 18, 30, 0.7);
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gait-card-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.gait-card-value {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.gait-card-spread {
+  font-size: 11px;
+  color: #9fb0c9;
+  font-variant-numeric: tabular-nums;
+}
+.gait-card-spread.muted {
+  color: var(--muted-2);
+}
+
+/* Cycle-curve plots */
+.gait-plots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+.gait-plot {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(5, 9, 21, 0.55);
+  padding: 6px 8px 2px;
+  display: flex;
+  flex-direction: column;
+}
+.gait-plot-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.gait-plot-title {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text);
+}
+.gait-plot-unit {
+  font-size: 11px;
+  color: var(--muted);
+}
+.gait-plot-counts {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+  font-size: 10.5px;
+  font-weight: 800;
+  font-style: normal;
+}
+.gait-plot-counts em {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+.gait-plot-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Provenance / calibration footnote */
+.gait-provenance {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid var(--line);
+  padding-top: 7px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* Not-walking state */
+.gait-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: 6px;
+  padding: 18px;
+  text-align: center;
+  color: var(--muted);
+}
+.gait-empty strong {
+  display: block;
+  color: #cdd7e8;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.gait-empty p {
+  margin: 0 auto;
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 720px) {
+  .gait-plots {
+    grid-template-columns: 1fr;
+  }
+  .gait-cards {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
+}

@@ -83,6 +83,56 @@ export type RunSignal = {
   values: Array<number | null>;
 };
 
+// Aggregate of one scalar over gait cycles/steps: mean, SD, sample count.
+export type GaitStat = { mean: number | null; sd: number | null; n: number };
+
+// One clinical angle resampled to 0-100% of the gait cycle (101 points),
+// aggregated as mean +/- SD across all same-side strides.
+export type GaitCycle = {
+  n_cycles: number;
+  mean: number[] | null;
+  sd: number[] | null;
+};
+
+// A detected gait event (heel-strike / toe-off) on one side.
+export type GaitEvent = {
+  frame: number;
+  time_s: number;
+  side: "left" | "right";
+  type: "heel_strike" | "toe_off";
+};
+
+// The clinical gait-analysis layer for a run (see src/.../gait.py).
+export type RunGait = {
+  params: { filter: string; order: number; cutoff_hz: number; zero_phase: boolean };
+  neutralReference: {
+    applied: boolean;
+    method: string;
+    staticFrames: number;
+    staticDurationS: number;
+    offsetsDeg: Record<string, number>;
+    note: string;
+  };
+  events: GaitEvent[];
+  spatiotemporal: {
+    walkingDetected: boolean;
+    cadenceStepsPerMin: number | null;
+    stepTimeS: GaitStat;
+    stepLengthM: GaitStat;
+    strideTimeS: GaitStat;
+    strideLengthM: GaitStat;
+    walkingSpeedMS: GaitStat;
+    stancePct: GaitStat;
+    swingPct: GaitStat;
+    doubleSupportPct: GaitStat;
+  };
+  // cycles[side][signalId] -> normalized cycle. signalId matches a RunSignal id.
+  cycles: {
+    left: Record<string, GaitCycle>;
+    right: Record<string, GaitCycle>;
+  };
+};
+
 // Full payload for a single run, including every frame and signal (viewer page).
 export type RunDetail = {
   id: string;
@@ -99,6 +149,7 @@ export type RunDetail = {
   previewVideoTimebase: "processed" | "source";
   subject?: RunSubject | null;
   signals: RunSignal[];
+  gait?: RunGait | null;
   frames: RunFrame[];
   analyses?: Array<{
     analysisId: string;
