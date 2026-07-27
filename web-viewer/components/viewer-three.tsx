@@ -36,6 +36,11 @@ type ThreeSpaceViewerProps = {
   onJointPick?: (jointIndex: number) => void;
   subjectColor?: string | null;
   siblings?: SiblingSubject[];
+  // Hide the primary subject's body while keeping it as the scene's reference.
+  // The ground plane, anchor and camera framing all derive from the primary
+  // run, so isolating another subject must not stop computing them — only the
+  // primary's mesh/joints are withheld.
+  showPrimary?: boolean;
 };
 
 const CAM_TO_WORLD = new THREE.Matrix4().set(
@@ -1591,7 +1596,10 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
       <ambientLight intensity={0.72} />
       <directionalLight position={[3, -4, 5]} intensity={1.8} castShadow />
       <Ground />
-      {props.showMesh ? <MeshPreloader runId={props.runDetail.id} frames={props.runDetail.frames} frameIndex={safeIndex} /> : null}
+      {props.showMesh && props.showPrimary !== false ? (
+        <MeshPreloader runId={props.runDetail.id} frames={props.runDetail.frames} frameIndex={safeIndex} />
+      ) : null}
+      {props.showPrimary === false ? null : (
       <MeshBody
         runId={props.runDetail.id}
         frame={frame}
@@ -1615,6 +1623,7 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         frameCursor={displayCursor}
         fps={Math.max(1, props.runDetail.fps || 30)}
       />
+      )}
       {(props.siblings ?? []).map((sibling) => {
         // Sibling subjects of the same selection share the source video's
         // camera space, so every subject's anchored trajectory lives in the

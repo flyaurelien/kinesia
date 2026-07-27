@@ -1146,6 +1146,14 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     [subjectRuns, plotSubjectIds],
   );
 
+  // Is this run's subject currently shown? Drives the 3D scene and the
+  // tracking-box overlay so isolating a subject on the plots isolates them
+  // everywhere, rather than leaving the picture disagreeing with the curves.
+  const subjectIsShown = useCallback(
+    (runId: string) => plotSubjectIds.length === 0 || plotSubjectIds.includes(runId),
+    [plotSubjectIds],
+  );
+
   // Drop a subject filter that no longer refers to this video, otherwise
   // switching videos would leave every chip reading as unselected while the
   // plot silently falls back to showing all of them.
@@ -3116,18 +3124,13 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                   })()}
                   {leftView === "box" ? (
                     <VideoTrackingOverlay
-                      subjects={[
-                        {
-                          frame: runDetail.frames[safeFrameIndex] ?? null,
-                          color: runDetail.subject?.color ?? null,
-                          label: runDetail.subject?.label ? `Person ${runDetail.subject.label}` : null,
-                        },
-                        ...siblingDetails.map((sib) => ({
-                          frame: sib.frames[safeFrameIndex] ?? null,
-                          color: sib.subject?.color ?? null,
-                          label: sib.subject?.label ? `Person ${sib.subject.label}` : null,
-                        })),
-                      ]}
+                      subjects={[runDetail, ...siblingDetails]
+                        .filter((detail) => subjectIsShown(detail.id))
+                        .map((detail) => ({
+                          frame: detail.frames[safeFrameIndex] ?? null,
+                          color: detail.subject?.color ?? null,
+                          label: detail.subject?.label ? `Person ${detail.subject.label}` : null,
+                        }))}
                       videoWidth={runDetail.videoWidth}
                       videoHeight={runDetail.videoHeight}
                     />
@@ -3159,10 +3162,13 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                       selectedJointIndices={activePlotJointIndices}
                       onJointPick={toggleActiveJoint}
                       subjectColor={runDetail.subject?.color ?? null}
-                      siblings={siblingDetails.map((sib) => ({
-                        runDetail: sib,
-                        color: sib.subject?.color ?? null,
-                      }))}
+                      showPrimary={subjectIsShown(runDetail.id)}
+                      siblings={siblingDetails
+                        .filter((sib) => subjectIsShown(sib.id))
+                        .map((sib) => ({
+                          runDetail: sib,
+                          color: sib.subject?.color ?? null,
+                        }))}
                     />
                   </div>
                 </div>
