@@ -21,6 +21,10 @@ the 3D reconstruction.*
 - **Multi-subject reconstruction** — select any number of detected people; each
   is reconstructed in its own pass and they all appear **together in one 3D
   scene**, colour-coded, with true relative placement.
+- **Compare subjects on one graph** — one entry per video, and a subject picker
+  on the plots: show everyone or any subset, with their curves on the *same*
+  axes (colour = subject, line style = signal) in both the timeline and the
+  gait-cycle report.
 - **Per-frame 3D body mesh** (SAM 3D Body / MHR parametric model) + full joint
   set, streamed into the viewer while the job runs.
 - **Gait kinematics** — hip/knee/ankle angles and more, per frame, plotted
@@ -30,7 +34,8 @@ the 3D reconstruction.*
   curves (see [clinical gait analysis](#clinical-gait-analysis)).
 - **Three synced views** — clean source video, tracking boxes (one colour per
   subject), and the segmentation render, next to the 3D scene.
-- **Export** — per-joint kinematics as CSV/JSON and a tracking-box MP4.
+- **Export** — per-joint kinematics as CSV/JSON, the clinical gait report as
+  JSON, and a tracking-box MP4.
 - **Fully local** — after the one-time model download, nothing leaves your machine.
 
 ## How it works
@@ -89,11 +94,22 @@ merged occlusion boxes, adversarial post-cut embeddings) in `tests/`.
 ### Multi-subject scenes
 
 Each selected subject gets its own reconstruction run (`--subject-index k` over
-the shared selection file), queued sequentially. The viewer discovers sibling
-runs of the same selection and renders every subject's mesh in the primary
-run's reference frame — one scene, one colour per subject, true relative
-placement. Kinematics remain per subject: switch runs in the sidebar to see
-another subject's curves.
+the shared selection file), queued sequentially. Those runs share a selection
+file, which is what lets the viewer put them back together: the sidebar shows
+**one entry per video** (with a dot per subject), and every subject's mesh is
+rendered in the primary run's reference frame — one scene, one colour per
+subject, true relative placement.
+
+The subjects are then chosen at the *plot* level rather than by switching runs.
+A subject row above the analysis panel toggles who is included, and the picked
+subjects' curves are drawn on the same axes:
+
+- **Timeline** — the same signal once per subject, colour for the subject and
+  line style for the signal (one channel cannot encode both). With a single
+  subject selected, the ordinary per-signal palette is used.
+- **Gait cycle** — one parameter row per subject, and the cycle curves overlaid
+  with colour for the subject and solid/dashed for the side, so an asymmetry
+  between two people is visible at a glance.
 
 ### Clinical gait analysis
 
