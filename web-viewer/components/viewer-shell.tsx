@@ -1158,12 +1158,14 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     });
   }, [subjectRuns]);
 
-  // The series actually drawn: one per (subject, signal) pair. With a single
-  // subject this is just the selected signals; with several, each signal is
-  // repeated per subject, coloured by subject and dashed by signal.
+  // The series actually drawn: one per (subject, signal) pair, each read from
+  // ITS OWN run. `selectedSignals` always belongs to the open (primary) run, so
+  // it may only be used directly when the video has a single subject — using it
+  // as a shortcut whenever one subject is selected would draw the primary's
+  // curves under another subject's name.
   const plottedSeries = useMemo<RunSignal[]>(() => {
+    if (subjectRuns.length <= 1) return selectedSignals;
     const subjects = activeSubjectRuns.length > 0 ? activeSubjectRuns : subjectRuns;
-    if (subjects.length <= 1) return selectedSignals;
     const out: RunSignal[] = [];
     for (const signal of selectedSignals) {
       for (const subject of subjects) {
@@ -1209,6 +1211,17 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
         .map((s) => ({ runId: s.runId, label: s.label, color: s.color, gait: s.detail.gait as NonNullable<RunDetail["gait"]> })),
     [activeSubjectRuns, subjectRuns],
   );
+
+  // Leave the gait view as soon as it has nothing to show — a run analyzed
+  // before the gait layer hides the Timeline/Gait toggle, which would otherwise
+  // strand the panel showing the gait caption above a time-series plot with no
+  // control left to switch back.
+  useEffect(() => {
+    if (analysisView === "gait" && gaitSubjects.length === 0) {
+      setAnalysisView("timeline");
+    }
+  }, [analysisView, gaitSubjects.length]);
+
   // Contiguous frame ranges the user masked (kept in the video at original
   // timing, but skipped by inference → no kinematics). Shaded + labeled on the
   // plots so the data gap reads as intentional.

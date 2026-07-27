@@ -54,6 +54,16 @@ function fmtStat(stat: GaitStat, digits: number, unit: string): { value: string;
   return { value, spread };
 }
 
+// "hip left -1°, knee left +18°, …" from the calibration-pose offsets.
+function formatOffsets(offsets: Record<string, number>): string {
+  return Object.entries(offsets)
+    .map(([key, value]) => {
+      const name = key.replace("hip.", "hip ").replace("knee.", "knee ").replace("ankle.", "ankle ");
+      return `${name} ${value >= 0 ? "+" : ""}${value.toFixed(0)}°`;
+    })
+    .join(", ");
+}
+
 function niceStep(range: number): number {
   const raw = range / 4;
   const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
@@ -265,9 +275,11 @@ function ParamTable({ subjects }: { subjects: GaitSubject[] }) {
         <thead>
           <tr>
             <th>Subject</th>
-            <th>Cadence</th>
+            <th>Cadence <small>steps/min</small></th>
             {columns.map((c) => (
-              <th key={c.label}>{c.label}</th>
+              <th key={c.label}>
+                {c.label} <small>{c.unit}</small>
+              </th>
             ))}
           </tr>
         </thead>
@@ -303,7 +315,10 @@ function ParamTable({ subjects }: { subjects: GaitSubject[] }) {
 
 export function GaitReport({ subjects }: { subjects: GaitSubject[] }) {
   const walking = subjects.filter((s) => s.gait.spatiotemporal.walkingDetected);
-  const multi = subjects.length > 1;
+  // `multi` must be derived from the subjects actually PLOTTED, not from every
+  // selected one: the plots only receive the walking subset, and if the legend
+  // disagreed with them it would explain a colour scheme that is not on screen.
+  const multi = walking.length > 1;
   const primary = subjects[0];
   // Toe-off marker: the mean stance fraction across whichever subjects walk.
   const stancePct = useMemo(() => {
@@ -321,7 +336,7 @@ export function GaitReport({ subjects }: { subjects: GaitSubject[] }) {
         <div className="gait-legend">
           {multi ? (
             <>
-              {subjects.map((s) => (
+              {walking.map((s) => (
                 <span key={s.runId}>
                   <i style={{ background: s.color }} /> {s.label}
                 </span>
@@ -389,14 +404,23 @@ export function GaitReport({ subjects }: { subjects: GaitSubject[] }) {
           Zero-phase {primary.gait.params.filter.charAt(0).toUpperCase() + primary.gait.params.filter.slice(1)} filter
           (order {primary.gait.params.order}, {primary.gait.params.cutoff_hz.toFixed(0)} Hz).
         </span>
-        {nr.applied ? (
+        {/* Calibration is per subject, so with several on the same axes each one
+            needs its own line — otherwise a calibrated and an uncalibrated curve
+            could be overlaid under a single claim that both are referenced. */}
+        {subjects.length > 1 ? (
+          subjects.map((s) => (
+            <span key={s.runId}>
+              <i className="gait-prov-dot" style={{ background: s.color }} />
+              <strong>{s.label}:</strong>{" "}
+              {s.gait.neutralReference.applied
+                ? `referenced to a ${s.gait.neutralReference.staticDurationS.toFixed(1)} s quiet stance (${formatOffsets(s.gait.neutralReference.offsetsDeg)} subtracted).`
+                : "raw reconstruction angles — no quiet stance to calibrate against."}
+            </span>
+          ))
+        ) : nr.applied ? (
           <span>
-            {multi ? `${primary.label}: angles` : "Angles"} referenced to the subject&apos;s quiet
-            stance ({nr.staticDurationS.toFixed(1)} s):{" "}
-            {Object.entries(nr.offsetsDeg)
-              .map(([k, v]) => `${k.replace("hip.", "hip ").replace("knee.", "knee ").replace("ankle.", "ankle ")} ${v >= 0 ? "+" : ""}${v.toFixed(0)}°`)
-              .join(", ")}
-            {" "}subtracted.
+            Angles referenced to the subject&apos;s quiet stance ({nr.staticDurationS.toFixed(1)} s):{" "}
+            {formatOffsets(nr.offsetsDeg)} subtracted.
           </span>
         ) : (
           <span>{nr.note || "Raw reconstruction angles (no quiet stance found to calibrate against)."}</span>
