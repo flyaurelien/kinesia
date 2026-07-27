@@ -16,6 +16,7 @@ import { apiFetch, apiUrl } from "../lib/api-client";
 import type { RunDetail, RunSignal, RunSummary } from "../lib/types";
 import { ThreeSpaceViewer, preloadRunAssets, type RunAssetPreloadProgress } from "./viewer-three";
 import { KinematicsPlot } from "./kinematics-plot";
+import { GaitReport } from "./gait-report";
 import { VideoTrackingOverlay } from "./video-overlay";
 import {
   bundleBaseName,
@@ -934,6 +935,8 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
   const [selectedSignalIds, setSelectedSignalIds] = useState<string[]>([]);
   const [signalPickerOpen, setSignalPickerOpen] = useState(false);
   const [plotLayoutMode, setPlotLayoutMode] = useState<"stacked" | "overlay">("overlay");
+  // Analysis panel view: the time-series signal plot vs the clinical gait-cycle report.
+  const [analysisView, setAnalysisView] = useState<"timeline" | "gait">("timeline");
   // Which view fills the left media pane (3D stays on the right).
   const [leftView, setLeftView] = useState<"video" | "box" | "seg">("box");
   // Sibling runs of the same multi-subject selection (same chosen-subject track
@@ -3392,20 +3395,48 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
           {showViewerControls ? (
           <div className="kinematics-panel">
             <div className="plot-settings-bar">
-              <button
-                type="button"
-                className={`plot-settings-toggle ${plotSettingsOpen ? "active" : ""}`}
-                onClick={() => setPlotSettingsOpen((value) => !value)}
-                title="Choose joints and signals to plot"
-              >
-                ⚙ Signals & joints
-              </button>
-              <span className="plot-settings-summary">
-                {selectedSignals.length} signal{selectedSignals.length > 1 ? "s" : ""} · {signalGroup(plotGroup).label}
-                {" · "}
-                {activePlotJointIndices.length}/{PLOT_JOINT_OPTIONS.length} joints
-              </span>
-              {ambiguousSpans.length > 0 ? (
+              {runDetail?.gait ? (
+                <div className="analysis-view-toggle" role="group" aria-label="Analysis view">
+                  <button
+                    type="button"
+                    className={analysisView === "timeline" ? "active" : ""}
+                    onClick={() => setAnalysisView("timeline")}
+                    title="Signals plotted against video time"
+                  >
+                    Timeline
+                  </button>
+                  <button
+                    type="button"
+                    className={analysisView === "gait" ? "active" : ""}
+                    onClick={() => setAnalysisView("gait")}
+                    title="Clinical gait-cycle report (0–100% of the stride)"
+                  >
+                    Gait cycle
+                  </button>
+                </div>
+              ) : null}
+              {analysisView === "timeline" ? (
+                <>
+                  <button
+                    type="button"
+                    className={`plot-settings-toggle ${plotSettingsOpen ? "active" : ""}`}
+                    onClick={() => setPlotSettingsOpen((value) => !value)}
+                    title="Choose joints and signals to plot"
+                  >
+                    ⚙ Signals & joints
+                  </button>
+                  <span className="plot-settings-summary">
+                    {selectedSignals.length} signal{selectedSignals.length > 1 ? "s" : ""} · {signalGroup(plotGroup).label}
+                    {" · "}
+                    {activePlotJointIndices.length}/{PLOT_JOINT_OPTIONS.length} joints
+                  </span>
+                </>
+              ) : (
+                <span className="plot-settings-summary">
+                  Clinical gait cycle · mean ± SD per side
+                </span>
+              )}
+              {analysisView === "timeline" && ambiguousSpans.length > 0 ? (
                 <button
                   type="button"
                   className="plot-review-chip"
@@ -3478,6 +3509,10 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                 </div>
               ) : null}
             </div>
+            {analysisView === "gait" && runDetail?.gait ? (
+              <GaitReport gait={runDetail.gait} />
+            ) : (
+            <>
             {plotSettingsOpen ? (
             <>
             <div className="active-joints-panel">
@@ -3626,6 +3661,8 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                 setFrameCursor(index);
               }}
             />
+            </>
+            )}
           </div>
           ) : null}
           </div>
