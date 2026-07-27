@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from .artifacts import build_run_manifest, write_json
+from .video_io import open_video
 from .sam3d_runtime import (
     add_sam3d_repo_to_path,
     infer_single_person_from_bbox,
@@ -1053,7 +1054,7 @@ def build_manual_subject_bbox_track(
     anchor = int(np.clip(anchor_frame, 0, max(0, total_frames - 1)))
     scale = min(1.0, float(max_long_side) / float(max(width, height, 1)))
     gray_frames: list[np.ndarray] = []
-    cap = cv2.VideoCapture(str(video_input))
+    cap = open_video(str(video_input))
     try:
         while True:
             ok, frame = cap.read()
@@ -3763,7 +3764,7 @@ def run_pipeline(cfg: PipelineConfig, runtime: PipelineRuntime | None = None) ->
                 f"{', '.join(sam3_text_prompts)}"
             )
 
-    cap = cv2.VideoCapture(str(cfg.video_input))
+    cap = open_video(str(cfg.video_input))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {cfg.video_input}")
 

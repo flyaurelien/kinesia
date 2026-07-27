@@ -37,6 +37,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+from .video_io import open_video
 from scipy.optimize import linear_sum_assignment
 
 # The vendored MLX SAM3 package (mirror of github.com/Deekshith-Dade/mlx_sam3).
@@ -837,7 +839,7 @@ def run(args: argparse.Namespace) -> int:
     tracks_path = out_dir / "tracks.json"
     frames_path = out_dir / "frames.jsonl"
 
-    cap = cv2.VideoCapture(str(args.video_input))
+    cap = open_video(str(args.video_input))
     if not cap.isOpened():
         _write_json(progress_path, {"status": "error", "error": "Could not open video.", "processed": 0})
         return 1

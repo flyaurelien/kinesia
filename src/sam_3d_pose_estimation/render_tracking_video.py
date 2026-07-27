@@ -19,6 +19,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .video_io import open_video
+
 # Viewer's box style (app/globals.css .vo-box): dashed yellow #facc15, width 2.
 _BOX_BGR = (21, 204, 250)  # #facc15 in BGR
 _BOX_THICKNESS = 2
@@ -96,7 +98,7 @@ def render(run_dir: Path, out_path: Path, video_override: str | None = None) -> 
     fps = float(meta.get("fps_output") or meta.get("fps_input") or 30.0)
     timeline = _frame_box_timeline(meta.get("records") or [])
 
-    cap = cv2.VideoCapture(str(video_path))
+    cap = open_video(str(video_path))
     if not cap.isOpened():
         print(f"error: cannot open video: {video_path}", file=sys.stderr)
         return 2
