@@ -34,6 +34,10 @@ type Props = {
   viewWindow?: { start: number; end: number } | null;
   maskedRanges?: Array<[number, number]>;
   colorForId?: (id: string, index: number) => string;
+  // Optional dash pattern per series. Used when several subjects are plotted
+  // together: colour then encodes the subject and the dash encodes the signal,
+  // so both stay readable on one axis.
+  dashForId?: (id: string, index: number) => number[] | undefined;
   onFrameSelect?: (frameIndex: number) => void;
   onPlotBox?: (box: PlotBox | null) => void;
 };
@@ -109,6 +113,7 @@ export function KinematicsPlot({
   viewWindow,
   maskedRanges,
   colorForId,
+  dashForId,
   onFrameSelect,
   onPlotBox,
 }: Props) {
@@ -140,6 +145,10 @@ export function KinematicsPlot({
   const color = useCallback(
     (id: string, index: number) => colorForId?.(id, index) ?? PALETTE[index % PALETTE.length],
     [colorForId],
+  );
+  const dash = useCallback(
+    (id: string, index: number) => dashForId?.(id, index),
+    [dashForId],
   );
 
   // Identity key: rebuild charts when the signal set, mode, frame count, OR fps
@@ -276,6 +285,7 @@ export function KinematicsPlot({
           label: s.label,
           scale: s.unit || `u${units.indexOf(s.unit || "")}`,
           stroke: color(s.id, i),
+          dash: dash(s.id, i),
           width: 1.6,
           points: { show: false },
           spanGaps: false,
@@ -342,6 +352,7 @@ export function KinematicsPlot({
                 label: s.label,
                 scale: yKey,
                 stroke: color(s.id, i),
+                dash: dash(s.id, i),
                 fill: hexToRgba(color(s.id, i), 0.08),
                 width: 1.7,
                 points: { show: false },

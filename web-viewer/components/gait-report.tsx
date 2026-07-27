@@ -10,6 +10,10 @@
 //     phase shaded and toe-off marked;
 //   - the calibration provenance (quiet-stance neutral reference + filter).
 //
+// With several subjects selected the same plots compare them directly: colour
+// then encodes the subject and the line style the side (solid left, dashed
+// right), and the parameters become one row per subject.
+//
 // Pure SVG so it is crisp at any size and carries no charting dependency. The
 // curves are static (aggregated over every stride), so this view does not track
 // the playhead.
@@ -80,12 +84,47 @@ function yRange(cycles: Array<GaitCycle | undefined>): [number, number] {
   return [lo - pad, hi + pad];
 }
 
-type CyclePlotProps = { spec: JointSpec; gait: RunGait; stancePct: number | null };
+// One subject's gait layer, with the identity it carries across the whole UI.
+export type GaitSubject = { runId: string; label: string; color: string; gait: RunGait };
 
-function CyclePlot({ spec, gait, stancePct }: CyclePlotProps) {
-  const left = gait.cycles.left[spec.left];
-  const right = gait.cycles.right[spec.right];
-  const [ymin, ymax] = useMemo(() => yRange([left, right]), [left, right]);
+type CyclePlotProps = { spec: JointSpec; subjects: GaitSubject[]; stancePct: number | null };
+
+// Curves drawn on one joint's plot: one per (subject, side) that has cycles.
+type Trace = { key: string; color: string; dashed: boolean; cycle: GaitCycle; label: string };
+
+function tracesFor(spec: JointSpec, subjects: GaitSubject[]): Trace[] {
+  const multi = subjects.length > 1;
+  const out: Trace[] = [];
+  for (const subject of subjects) {
+    const left = subject.gait.cycles.left[spec.left];
+    const right = subject.gait.cycles.right[spec.right];
+    if (left?.mean) {
+      out.push({
+        key: `${subject.runId}:left`,
+        // One subject: the familiar left/right colours. Several: colour is the
+        // subject, so the side has to be carried by the line style instead.
+        color: multi ? subject.color : LEFT_COLOR,
+        dashed: false,
+        cycle: left,
+        label: multi ? `${subject.label} L` : "Left",
+      });
+    }
+    if (right?.mean) {
+      out.push({
+        key: `${subject.runId}:right`,
+        color: multi ? subject.color : RIGHT_COLOR,
+        dashed: multi,
+        cycle: right,
+        label: multi ? `${subject.label} R` : "Right",
+      });
+    }
+  }
+  return out;
+}
+
+function CyclePlot({ spec, subjects, stancePct }: CyclePlotProps) {
+  const traces = useMemo(() => tracesFor(spec, subjects), [spec, subjects]);
+  const [ymin, ymax] = useMemo(() => yRange(traces.map((t) => t.cycle)), [traces]);
 
   const x = (pct: number) => ML + (pct / 100) * PLOT_W;
   const y = (v: number) => MT + PLOT_H - ((v - ymin) / (ymax - ymin || 1)) * PLOT_H;
@@ -114,7 +153,7 @@ function CyclePlot({ spec, gait, stancePct }: CyclePlotProps) {
     return `${up.join(" ")} ${down.join(" ")} Z`;
   };
 
-  const hasData = Boolean((left && left.mean) || (right && right.mean));
+  const hasData = traces.length > 0;
   const toeOffX = stancePct != null && stancePct > 0 && stancePct < 100 ? x(stancePct) : null;
 
   return (
@@ -122,9 +161,26 @@ function CyclePlot({ spec, gait, stancePct }: CyclePlotProps) {
       <div className="gait-plot-head">
         <span className="gait-plot-title">{spec.title}</span>
         <span className="gait-plot-unit">({spec.unit})</span>
+        {/* Cycle counts: per side for a single subject, but collapsed to one
+            total per subject when comparing, or the header would not fit. */}
         <span className="gait-plot-counts">
-          {left ? <em style={{ color: LEFT_COLOR }}>L {left.n_cycles}</em> : null}
-          {right ? <em style={{ color: RIGHT_COLOR }}>R {right.n_cycles}</em> : null}
+          {subjects.length > 1
+            ? subjects.map((s) => {
+                const n =
+                  (s.gait.cycles.left[spec.left]?.n_cycles ?? 0) +
+                  (s.gait.cycles.right[spec.right]?.n_cycles ?? 0);
+                if (n === 0) return null;
+                return (
+                  <em key={s.runId} style={{ color: s.color }} title={`${s.label}: ${n} cycles`}>
+                    {n}
+                  </em>
+                );
+              })
+            : traces.map((t) => (
+                <em key={t.key} style={{ color: t.color }}>
+                  {t.label} {t.cycle.n_cycles}
+                </em>
+              ))}
         </span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="gait-plot-svg" role="img" aria-label={`${spec.title} over the gait cycle`}>
@@ -156,11 +212,21 @@ function CyclePlot({ spec, gait, stancePct }: CyclePlotProps) {
         <text x={ML + PLOT_W / 2} y={H} textAnchor="middle" fontSize={9} fill={AXIS_TEXT}>
           % gait cycle
         </text>
-        {/* SD bands then mean lines: right under left so both read clearly */}
-        {right && right.mean ? <path d={bandPath(right)} fill={RIGHT_COLOR} opacity={0.14} /> : null}
-        {left && left.mean ? <path d={bandPath(left)} fill={LEFT_COLOR} opacity={0.16} /> : null}
-        {right && right.mean ? <path d={meanPath(right)} fill="none" stroke={RIGHT_COLOR} strokeWidth={1.8} strokeLinejoin="round" /> : null}
-        {left && left.mean ? <path d={meanPath(left)} fill="none" stroke={LEFT_COLOR} strokeWidth={1.8} strokeLinejoin="round" /> : null}
+        {/* SD bands first, then every mean line on top, so no curve is buried */}
+        {traces.map((t) => (
+          <path key={`band-${t.key}`} d={bandPath(t.cycle)} fill={t.color} opacity={traces.length > 2 ? 0.1 : 0.15} />
+        ))}
+        {traces.map((t) => (
+          <path
+            key={`mean-${t.key}`}
+            d={meanPath(t.cycle)}
+            fill="none"
+            stroke={t.color}
+            strokeWidth={1.8}
+            strokeDasharray={t.dashed ? "6 3" : undefined}
+            strokeLinejoin="round"
+          />
+        ))}
         {!hasData ? (
           <text x={ML + PLOT_W / 2} y={MT + PLOT_H / 2} textAnchor="middle" fontSize={11} fill={AXIS_TEXT}>
             No cycles
@@ -182,66 +248,151 @@ function ParamCard({ label, stat, digits, unit }: { label: string; stat: GaitSta
   );
 }
 
-export function GaitReport({ gait }: { gait: RunGait }) {
-  const st = gait.spatiotemporal;
-  const nr = gait.neutralReference;
-  const stancePct = st.stancePct.mean;
+// The spatiotemporal parameters of several subjects, one row each, so they can
+// be read against one another at a glance.
+function ParamTable({ subjects }: { subjects: GaitSubject[] }) {
+  const columns: Array<{ label: string; get: (g: RunGait) => GaitStat; digits: number; unit: string }> = [
+    { label: "Speed", get: (g) => g.spatiotemporal.walkingSpeedMS, digits: 2, unit: "m/s" },
+    { label: "Stride len.", get: (g) => g.spatiotemporal.strideLengthM, digits: 2, unit: "m" },
+    { label: "Stride time", get: (g) => g.spatiotemporal.strideTimeS, digits: 2, unit: "s" },
+    { label: "Step len.", get: (g) => g.spatiotemporal.stepLengthM, digits: 2, unit: "m" },
+    { label: "Stance", get: (g) => g.spatiotemporal.stancePct, digits: 1, unit: "%" },
+    { label: "Double sup.", get: (g) => g.spatiotemporal.doubleSupportPct, digits: 1, unit: "%" },
+  ];
+  return (
+    <div className="gait-table-wrap">
+      <table className="gait-table">
+        <thead>
+          <tr>
+            <th>Subject</th>
+            <th>Cadence</th>
+            {columns.map((c) => (
+              <th key={c.label}>{c.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {subjects.map((subject) => {
+            const st = subject.gait.spatiotemporal;
+            return (
+              <tr key={subject.runId}>
+                <th scope="row">
+                  <span className="gait-table-subject">
+                    <i className="chip-swatch" style={{ background: subject.color }} />
+                    {subject.label}
+                  </span>
+                </th>
+                <td>{st.cadenceStepsPerMin != null ? st.cadenceStepsPerMin.toFixed(0) : "—"}</td>
+                {columns.map((c) => {
+                  const { value, spread } = fmtStat(c.get(subject.gait), c.digits, "");
+                  return (
+                    <td key={c.label}>
+                      {value}
+                      {spread ? <small>{spread}</small> : null}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function GaitReport({ subjects }: { subjects: GaitSubject[] }) {
+  const walking = subjects.filter((s) => s.gait.spatiotemporal.walkingDetected);
+  const multi = subjects.length > 1;
+  const primary = subjects[0];
+  // Toe-off marker: the mean stance fraction across whichever subjects walk.
+  const stancePct = useMemo(() => {
+    const values = walking.map((s) => s.gait.spatiotemporal.stancePct.mean).filter((v): v is number => v != null);
+    return values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : null;
+  }, [walking]);
+
+  if (!primary) return null;
+  const st = primary.gait.spatiotemporal;
+  const nr = primary.gait.neutralReference;
 
   return (
     <div className="gait-report">
       <div className="gait-report-head">
         <div className="gait-legend">
-          <span><i style={{ background: LEFT_COLOR }} /> Left</span>
-          <span><i style={{ background: RIGHT_COLOR }} /> Right</span>
-          <span className="gait-legend-band">shaded band = ± 1 SD across cycles</span>
+          {multi ? (
+            <>
+              {subjects.map((s) => (
+                <span key={s.runId}>
+                  <i style={{ background: s.color }} /> {s.label}
+                </span>
+              ))}
+              <span className="gait-legend-band">solid = left · dashed = right · band = ± 1 SD</span>
+            </>
+          ) : (
+            <>
+              <span><i style={{ background: LEFT_COLOR }} /> Left</span>
+              <span><i style={{ background: RIGHT_COLOR }} /> Right</span>
+              <span className="gait-legend-band">shaded band = ± 1 SD across cycles</span>
+            </>
+          )}
         </div>
       </div>
 
-      {st.walkingDetected ? (
+      {walking.length > 0 ? (
         <>
-          <div className="gait-cards">
-            <div className="gait-card">
-              <span className="gait-card-label">Cadence</span>
-              <strong className="gait-card-value">
-                {st.cadenceStepsPerMin != null ? `${st.cadenceStepsPerMin.toFixed(0)} steps/min` : "—"}
-              </strong>
-              <span className="gait-card-spread muted">whole trial</span>
+          {multi ? (
+            <ParamTable subjects={walking} />
+          ) : (
+            <div className="gait-cards">
+              <div className="gait-card">
+                <span className="gait-card-label">Cadence</span>
+                <strong className="gait-card-value">
+                  {st.cadenceStepsPerMin != null ? `${st.cadenceStepsPerMin.toFixed(0)} steps/min` : "—"}
+                </strong>
+                <span className="gait-card-spread muted">whole trial</span>
+              </div>
+              <ParamCard label="Walking speed" stat={st.walkingSpeedMS} digits={2} unit="m/s" />
+              <ParamCard label="Stride length" stat={st.strideLengthM} digits={2} unit="m" />
+              <ParamCard label="Stride time" stat={st.strideTimeS} digits={2} unit="s" />
+              <ParamCard label="Step length" stat={st.stepLengthM} digits={2} unit="m" />
+              <ParamCard label="Stance" stat={st.stancePct} digits={1} unit="%" />
+              <ParamCard label="Swing" stat={st.swingPct} digits={1} unit="%" />
+              <ParamCard label="Double support" stat={st.doubleSupportPct} digits={1} unit="%" />
             </div>
-            <ParamCard label="Walking speed" stat={st.walkingSpeedMS} digits={2} unit="m/s" />
-            <ParamCard label="Stride length" stat={st.strideLengthM} digits={2} unit="m" />
-            <ParamCard label="Stride time" stat={st.strideTimeS} digits={2} unit="s" />
-            <ParamCard label="Step length" stat={st.stepLengthM} digits={2} unit="m" />
-            <ParamCard label="Stance" stat={st.stancePct} digits={1} unit="%" />
-            <ParamCard label="Swing" stat={st.swingPct} digits={1} unit="%" />
-            <ParamCard label="Double support" stat={st.doubleSupportPct} digits={1} unit="%" />
-          </div>
+          )}
 
           <div className="gait-plots">
             {JOINTS.map((spec) => (
-              <CyclePlot key={spec.title} spec={spec} gait={gait} stancePct={stancePct} />
+              <CyclePlot key={spec.title} spec={spec} subjects={walking} stancePct={stancePct} />
             ))}
           </div>
+          {multi && walking.length < subjects.length ? (
+            <p className="gait-note">
+              Not walking in this clip:{" "}
+              {subjects.filter((s) => !s.gait.spatiotemporal.walkingDetected).map((s) => s.label).join(", ")}.
+            </p>
+          ) : null}
         </>
       ) : (
         <div className="gait-empty">
           <strong>No gait cycles detected</strong>
           <p>
-            The subject is standing rather than walking, so there are no strides to
-            normalize. The cycle curves and spatiotemporal parameters appear for
-            walking clips.
+            {multi ? "These subjects are standing" : "The subject is standing"} rather than
+            walking, so there are no strides to normalize. The cycle curves and
+            spatiotemporal parameters appear for walking clips.
           </p>
         </div>
       )}
 
       <div className="gait-provenance">
         <span>
-          Zero-phase {gait.params.filter.charAt(0).toUpperCase() + gait.params.filter.slice(1)} filter
-          (order {gait.params.order}, {gait.params.cutoff_hz.toFixed(0)} Hz).
+          Zero-phase {primary.gait.params.filter.charAt(0).toUpperCase() + primary.gait.params.filter.slice(1)} filter
+          (order {primary.gait.params.order}, {primary.gait.params.cutoff_hz.toFixed(0)} Hz).
         </span>
         {nr.applied ? (
           <span>
-            Angles referenced to the subject&apos;s quiet stance ({nr.staticDurationS.toFixed(1)} s):
-            {" "}
+            {multi ? `${primary.label}: angles` : "Angles"} referenced to the subject&apos;s quiet
+            stance ({nr.staticDurationS.toFixed(1)} s):{" "}
             {Object.entries(nr.offsetsDeg)
               .map(([k, v]) => `${k.replace("hip.", "hip ").replace("knee.", "knee ").replace("ankle.", "ankle ")} ${v >= 0 ? "+" : ""}${v.toFixed(0)}°`)
               .join(", ")}

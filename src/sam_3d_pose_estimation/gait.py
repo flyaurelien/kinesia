@@ -339,7 +339,13 @@ def detect_gait_events(
     cutoff_hz: float = DEFAULT_CUTOFF_HZ,
 ) -> list[dict[str, Any]]:
     """Heel-strikes / toe-offs per side from the contact labels, with each
-    heel-strike refined to the local minimum of the filtered heel height."""
+    heel-strike refined to the local minimum of the filtered heel height.
+
+    The refinement only moves an event to a genuine interior minimum. A minimum
+    sitting on the edge of the search window means the real one lies outside it,
+    and accepting it would displace the event by the whole window width — a
+    fixed bias on every temporal parameter — so the contact transition is kept.
+    """
     events: list[dict[str, Any]] = []
     min_gap = max(1, int(round(MIN_EVENT_GAP_S * fps)))
     refine = max(1, int(round(0.12 * fps)))
@@ -360,7 +366,11 @@ def detect_gait_events(
                 lo, hi = max(0, i - refine), min(len(frames), i + refine + 1)
                 window = heel_z[lo:hi]
                 if np.any(np.isfinite(window)):
-                    frame_index = lo + int(np.nanargmin(window))
+                    offset = int(np.nanargmin(window))
+                    # Interior minimum only (see the docstring): a hit on either
+                    # boundary means the minimum is outside the window.
+                    if 0 < offset < window.size - 1:
+                        frame_index = lo + offset
             last_at[kind] = i
             events.append(
                 {
