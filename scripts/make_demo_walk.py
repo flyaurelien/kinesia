@@ -1,11 +1,13 @@
-"""Generate a synthetic walking demo run so the viewer's gait-cycle report has
+"""Generate synthetic walking demo runs so the viewer's gait-cycle report has
 real cycles to render (all processed real runs so far are people standing).
 
-The walker is the same ground-truth model the gait unit tests use: a subject
-striding along world +Y at a known speed and cadence, with joints following
-gait-typical sinusoids. Signals, QA and the gait layer are produced by the
-real production code (build_analysis_payload / build_gait_analysis) — only the
-joint positions and ground-truth foot contacts are synthetic.
+Each walker's legs are placed by forward kinematics from KNOWN hip/knee/ankle
+angle curves, so whatever the report shows can be checked against the input.
+Two subjects are written, sharing a track file so the viewer groups them as one
+video: a reference walker, and a slower one with reduced knee flexion and a
+longer stance — the asymmetry a clinician would look for. Signals, QA and the
+gait layer all come from the production code (build_analysis_payload /
+build_gait_analysis); only the joint positions and contacts are synthetic.
 """
 
 from __future__ import annotations
@@ -28,15 +30,35 @@ from sam_3d_pose_estimation.artifacts import (  # noqa: E402
 from sam_3d_pose_estimation.gait import build_gait_analysis  # noqa: E402
 
 FPS = 30.0
-STRIDE_S = 1.2
-SPEED = 1.1
 N_SECONDS = 14.0
 RUN_ID = "demo-walk_synthetic"
-
+TRACK_FILE = "demo-walk_subjects.json"
 
 L_THIGH = 0.45
 L_SHANK = 0.42
-STANCE_FRAC = 0.62  # heel-strike to toe-off, clinically ~60-62% of the cycle
+HIP_HEIGHT = 0.95  # nominal, before the stance leg plants the body (see below)
+
+
+class Walker:
+    """One subject's gait, defined by the parameters a clinician would report."""
+
+    def __init__(self, *, key, label, color, stride_s, speed, stance_frac, knee_gain, lane_x):
+        self.key = key
+        self.label = label
+        self.color = color
+        self.stride_s = stride_s
+        self.speed = speed
+        self.stance_frac = stance_frac  # share of the cycle spent in contact
+        self.knee_gain = knee_gain      # 1.0 = typical swing-phase knee flexion
+        self.lane_x = lane_x            # side-by-side placement in the shared scene
+
+
+WALKERS = [
+    Walker(key="", label="Reference", color="#22d3ee", stride_s=1.2, speed=1.10,
+           stance_frac=0.62, knee_gain=1.0, lane_x=0.0),
+    Walker(key="_person2", label="Slower gait", color="#fb923c", stride_s=1.45, speed=0.72,
+           stance_frac=0.70, knee_gain=0.55, lane_x=1.0),
+]
 
 
 def world_to_cam(p):
@@ -53,11 +75,11 @@ def _hip_flex_deg(frac):
     return 20.0 * math.cos(2 * math.pi * frac) + 6.0
 
 
-def _knee_flex_deg(frac):
+def _knee_flex_deg(frac, gain=1.0):
     # Small loading-response peak in early stance, large flexion peak in swing.
     loading = 15.0 * math.exp(-((_circ_dist(frac, 0.15) / 0.10) ** 2))
     swing = 58.0 * math.exp(-((_circ_dist(frac, 0.73) / 0.11) ** 2))
-    return 4.0 + loading + swing
+    return 4.0 + gain * (loading + swing)
 
 
 def _ankle_dorsi_deg(frac):
@@ -67,7 +89,7 @@ def _ankle_dorsi_deg(frac):
     return base + pushoff
 
 
-def _leg_joints(x_off, y, frac):
+def _leg_joints(x_off, y, frac, knee_gain=1.0):
     """Sagittal-plane forward kinematics for one leg from target joint angles.
 
     Placing knee/ankle/foot from hip via these angles makes the reconstructed
@@ -75,10 +97,10 @@ def _leg_joints(x_off, y, frac):
     so the demo shows clinically shaped hip/knee/ankle curves.
     """
     th = math.radians(_hip_flex_deg(frac))       # thigh forward tilt
-    tk = math.radians(_knee_flex_deg(frac))       # knee flexion (bends shank back)
+    tk = math.radians(_knee_flex_deg(frac, knee_gain))  # knee flexion (bends shank back)
     beta = math.radians(_ankle_dorsi_deg(frac)) + (th - tk)  # foot sagittal angle
-    hip = (x_off, y, 0.95)
-    knee = (x_off, y + L_THIGH * math.sin(th), 0.95 - L_THIGH * math.cos(th))
+    hip = (x_off, y, HIP_HEIGHT)
+    knee = (x_off, y + L_THIGH * math.sin(th), HIP_HEIGHT - L_THIGH * math.cos(th))
     ankle = (
         x_off,
         knee[1] + L_SHANK * math.sin(th - tk),
@@ -90,35 +112,55 @@ def _leg_joints(x_off, y, frac):
     return hip, knee, ankle, toe, heel
 
 
-def build_records():
-    rng = np.random.default_rng(11)
+def build_records(walker):
+    rng = np.random.default_rng(11 + len(walker.key))
     n = int(N_SECONDS * FPS)
     records = []
     contacts = []
     for i in range(n):
         t = i / FPS
-        y = SPEED * t
-        frac_l = (t / STRIDE_S) % 1.0
+        y = walker.speed * t
+        lane = walker.lane_x
+        frac_l = (t / walker.stride_s) % 1.0
         frac_r = (frac_l + 0.5) % 1.0
         joints = [None] * 21
 
-        def sj(idx, p):
-            joints[idx] = world_to_cam(p)
+        # Real walking plants the stance foot and lets the pelvis rise and fall
+        # over it. Holding the hip at a fixed height instead would lift the foot
+        # off the floor at both ends of stance and produce two contacts per
+        # cycle, so solve for the body height that keeps the stance foot down.
+        legs = {}
+        for side, x_off, frac in (("left", -0.10, frac_l), ("right", 0.10, frac_r)):
+            legs[side] = (_leg_joints(x_off, y, frac, walker.knee_gain), frac)
+        stance_sides = [s for s in ("left", "right") if legs[s][1] < walker.stance_frac]
+        if stance_sides:
+            body_z = -min(
+                min(legs[s][0][3][2], legs[s][0][4][2])  # lowest of toe / heel
+                for s in stance_sides
+            )
+        else:
+            body_z = 0.0
 
-        sj(9, (-0.10, y, 0.95))
-        sj(10, (0.10, y, 0.95))
+        def sj(idx, p):
+            joints[idx] = world_to_cam((p[0] + lane, p[1], p[2] + body_z))
+
+        sj(9, (-0.10, y, HIP_HEIGHT))
+        sj(10, (0.10, y, HIP_HEIGHT))
         sj(5, (-0.16, y, 1.45))
         sj(6, (0.16, y, 1.45))
         sj(0, (0.0, y, 1.62))
-        for x_off, frac, (knee_i, ankle_i, toe_i, heel_i) in (
-            (-0.10, frac_l, (11, 13, 15, 17)),
-            (0.10, frac_r, (12, 14, 18, 20)),
+
+        loaded = {}
+        for side, (knee_i, ankle_i, toe_i, heel_i) in (
+            ("left", (11, 13, 15, 17)),
+            ("right", (12, 14, 18, 20)),
         ):
-            _hip, knee, ankle, toe, heel = _leg_joints(x_off, y, frac)
+            (_hip, knee, ankle, toe, heel), frac = legs[side]
             sj(knee_i, knee)
             sj(ankle_i, ankle)
             sj(toe_i, toe)
             sj(heel_i, heel)
+            loaded[side] = frac < walker.stance_frac
         # The reconstruction always emits all 21 joints; fill the ones the gait
         # layer does not use (face/arms/small toes) with finite placeholders.
         sj(1, (-0.03, y, 1.66))
@@ -131,10 +173,10 @@ def build_records():
         sj(19, (0.10, y + 0.10, 0.03))
         for j, joint in enumerate(joints):
             if joint is None:
-                joint = world_to_cam((0.0, y, 0.95))
+                joint = world_to_cam((lane, y, 0.95))
             joints[j] = [v + rng.normal(0, 0.003) for v in joint]
-        contact_l = frac_l < STANCE_FRAC
-        contact_r = frac_r < STANCE_FRAC
+        contact_l = loaded["left"]
+        contact_r = loaded["right"]
         contacts.append(
             {
                 "left": bool(contact_l),
@@ -156,9 +198,9 @@ def build_records():
     return records, contacts
 
 
-def main():
-    project_root = Path(__file__).resolve().parents[1]
-    records, contacts = build_records()
+def write_walker(project_root, walker, index):
+    run_id = f"{RUN_ID}{walker.key}"
+    records, contacts = build_records(walker)
     metadata = {
         "records": records,
         "fps_output": FPS,
@@ -168,11 +210,19 @@ def main():
         "video_width": 1920,
         "video_height": 1080,
         "space_view": None,
-        "subject": {"index": 0, "id": "demo", "label": "Walker", "color": "#22d3ee", "track_file": None},
+        # A shared track file is what makes the viewer treat these runs as the
+        # subjects of one video rather than separate videos.
+        "subject": {
+            "index": index,
+            "id": f"demo{index}",
+            "label": walker.label,
+            "color": walker.color,
+            "track_file": TRACK_FILE,
+        },
     }
 
     params = AnalysisParams()
-    payload = build_analysis_payload(run_id=RUN_ID, metadata=metadata, params=params)
+    payload = build_analysis_payload(run_id=run_id, metadata=metadata, params=params)
 
     # Recompute the gait layer against ground-truth contacts so the demo has
     # guaranteed clean cycles regardless of the contact heuristic. This is the
@@ -185,8 +235,8 @@ def main():
     gait = build_gait_analysis(gait_frames, payload["fps"])
     payload["gait"] = {k: v for k, v in gait.items() if k != "angles"}
 
-    analysis_id = f"{RUN_ID}_default_demo00000"
-    run_dir = project_root / "output" / RUN_ID
+    analysis_id = f"{run_id}_default_demo00000"
+    run_dir = project_root / "output" / run_id
     analysis_directory = run_dir / "analysis" / analysis_id
     analysis_directory.mkdir(parents=True, exist_ok=True)
 
@@ -194,10 +244,10 @@ def main():
     write_json(analysis_directory / "frames.json", {"analysis_id": analysis_id, "preset": params.preset, "fps": payload["fps"], "frames": payload["frames"]})
     write_json(analysis_directory / "qa.json", payload["qa"])
     write_json(analysis_directory / "gait.json", {"analysis_id": analysis_id, "preset": params.preset, "gait": payload["gait"]})
-    analysis_manifest = build_analysis_manifest(run_id=RUN_ID, analysis_id=analysis_id, preset=params.preset, parameters=params.as_dict(), qa_summary=payload["qa"])
+    analysis_manifest = build_analysis_manifest(run_id=run_id, analysis_id=analysis_id, preset=params.preset, parameters=params.as_dict(), qa_summary=payload["qa"])
     write_json(analysis_directory / "analysis_manifest.json", analysis_manifest)
 
-    manifest = build_run_manifest(run_id=RUN_ID, run_directory=run_dir, metadata=metadata)
+    manifest = build_run_manifest(run_id=run_id, run_directory=run_dir, metadata=metadata)
     manifest = append_analysis_to_run_manifest(manifest, analysis_id=analysis_id, preset=params.preset, parameters=params.as_dict(), qa_summary=payload["qa"])
     write_json(run_dir / "run_manifest.json", manifest)
     write_json(run_dir / "run_metadata.json", metadata)
@@ -208,10 +258,15 @@ def main():
         for side in ("left", "right")
         for sig in payload["gait"]["cycles"][side]
     )
-    print(f"run: {RUN_ID}")
-    print(f"walking_detected: {st['walking_detected']} | cadence: {st['cadence_steps_per_min']} | total cycles: {total_cycles}")
-    print(f"signals: {len(payload['signals'])} | events: {len(payload['gait']['events'])}")
-    print(f"stride_time mean: {st['stride_time_s']['mean']} | stride_length mean: {st['stride_length_m']['mean']} | speed mean: {st['walking_speed_m_s']['mean']}")
+    print(f"{run_id}  [{walker.label}]")
+    print(f"  walking={st['walking_detected']} cadence={st['cadence_steps_per_min']} cycles={total_cycles} events={len(payload['gait']['events'])}")
+    print(f"  stride_time={st['stride_time_s']['mean']} stride_length={st['stride_length_m']['mean']} speed={st['walking_speed_m_s']['mean']} stance%={st['stance_pct']['mean']}")
+
+
+def main():
+    project_root = Path(__file__).resolve().parents[1]
+    for index, walker in enumerate(WALKERS):
+        write_walker(project_root, walker, index)
 
 
 if __name__ == "__main__":

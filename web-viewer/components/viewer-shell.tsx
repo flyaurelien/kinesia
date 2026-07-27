@@ -39,6 +39,29 @@ type GenerationJobStatus = "queued" | "running" | "completed" | "failed" | "canc
 type InferenceTarget = "body" | "hand";
 type PatientDetectionMode = "manual" | "auto";
 type PlotGroup = "angles" | "verticalSpeed" | "acceleration" | "position" | "distance" | "speed" | "rotation";
+
+// One reconstructed subject of a multi-subject selection, with the run that
+// holds its kinematics and the colour it carries everywhere in the UI.
+type SubjectRun = {
+  runId: string;
+  label: string;
+  color: string;
+  index: number;
+  detail: RunDetail;
+};
+
+// Line styles used to tell signals apart when colour already encodes the
+// subject (solid, dashed, dotted, dash-dot).
+const SIGNAL_DASHES: number[][] = [[], [7, 4], [2, 3], [9, 3, 2, 3]];
+
+// The runs of one source video, collapsed into a single sidebar entry.
+type RunGroup = {
+  key: string;
+  primary: RunSummary;
+  members: RunSummary[];
+  label: string;
+  colors: string[];
+};
 type SubjectBox = { x: number; y: number; width: number; height: number };
 type TimelineRemovedSegment = { id: string; startSec: number; endSec: number };
 type TimelineVisibleSegment = {
@@ -937,6 +960,8 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
   const [plotLayoutMode, setPlotLayoutMode] = useState<"stacked" | "overlay">("overlay");
   // Analysis panel view: the time-series signal plot vs the clinical gait-cycle report.
   const [analysisView, setAnalysisView] = useState<"timeline" | "gait">("timeline");
+  // Subjects whose curves are plotted; empty means every subject of the selection.
+  const [plotSubjectIds, setPlotSubjectIds] = useState<string[]>([]);
   // Which view fills the left media pane (3D stays on the right).
   const [leftView, setLeftView] = useState<"video" | "box" | "seg">("box");
   // Sibling runs of the same multi-subject selection (same chosen-subject track
@@ -1097,6 +1122,93 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     const map = new Map(availableSignals.map((signal) => [signal.id, signal]));
     return selectedSignalIds.map((id) => map.get(id)).filter((signal): signal is RunSignal => Boolean(signal));
   }, [availableSignals, selectedSignalIds]);
+
+  // Every subject of this selection (the open run plus its siblings), ordered by
+  // the subject index the detect step assigned, each with its wizard colour.
+  const subjectRuns = useMemo<SubjectRun[]>(() => {
+    if (!runDetail) return [];
+    const all = [runDetail, ...siblingDetails];
+    return all
+      .map((detail, order) => ({
+        runId: detail.id,
+        label: detail.subject?.label ?? (all.length > 1 ? `Subject ${order + 1}` : "Subject"),
+        color: detail.subject?.color ?? PLOT_COLORS[order % PLOT_COLORS.length],
+        index: detail.subject?.index ?? order,
+        detail,
+      }))
+      .sort((a, b) => a.index - b.index);
+  }, [runDetail, siblingDetails]);
+
+  // Which subjects are plotted. Empty set = "all", so newly loaded siblings are
+  // included without the user having to re-tick them.
+  const activeSubjectRuns = useMemo(
+    () => (plotSubjectIds.length === 0 ? subjectRuns : subjectRuns.filter((s) => plotSubjectIds.includes(s.runId))),
+    [subjectRuns, plotSubjectIds],
+  );
+
+  // Drop a subject filter that no longer refers to this video, otherwise
+  // switching videos would leave every chip reading as unselected while the
+  // plot silently falls back to showing all of them.
+  useEffect(() => {
+    setPlotSubjectIds((current) => {
+      if (current.length === 0) return current;
+      const known = new Set(subjectRuns.map((s) => s.runId));
+      const kept = current.filter((id) => known.has(id));
+      return kept.length === current.length ? current : kept;
+    });
+  }, [subjectRuns]);
+
+  // The series actually drawn: one per (subject, signal) pair. With a single
+  // subject this is just the selected signals; with several, each signal is
+  // repeated per subject, coloured by subject and dashed by signal.
+  const plottedSeries = useMemo<RunSignal[]>(() => {
+    const subjects = activeSubjectRuns.length > 0 ? activeSubjectRuns : subjectRuns;
+    if (subjects.length <= 1) return selectedSignals;
+    const out: RunSignal[] = [];
+    for (const signal of selectedSignals) {
+      for (const subject of subjects) {
+        const own = subject.detail.signals.find((s) => s.id === signal.id);
+        if (!own) continue;
+        out.push({
+          ...own,
+          id: `${subject.runId}::${own.id}`,
+          label: `${own.label} · ${subject.label}`,
+        });
+      }
+    }
+    return out;
+  }, [activeSubjectRuns, subjectRuns, selectedSignals]);
+
+  // Colour by subject and dash by signal when several subjects share the axes,
+  // so both dimensions stay readable; fall back to the per-signal palette when
+  // only one subject is plotted.
+  const multiSubjectPlot = activeSubjectRuns.length > 1 && selectedSignals.length > 0;
+  const seriesColor = useCallback(
+    (id: string, index: number) => {
+      if (!multiSubjectPlot) return PLOT_COLORS[index % PLOT_COLORS.length];
+      const runId = id.split("::")[0];
+      return subjectRuns.find((s) => s.runId === runId)?.color ?? PLOT_COLORS[index % PLOT_COLORS.length];
+    },
+    [multiSubjectPlot, subjectRuns],
+  );
+  const seriesDash = useCallback(
+    (id: string) => {
+      if (!multiSubjectPlot) return undefined;
+      const signalId = id.slice(id.indexOf("::") + 2);
+      const order = selectedSignals.findIndex((s) => s.id === signalId);
+      return SIGNAL_DASHES[Math.max(0, order) % SIGNAL_DASHES.length];
+    },
+    [multiSubjectPlot, selectedSignals],
+  );
+
+  // The gait layers of the subjects currently selected for plotting.
+  const gaitSubjects = useMemo(
+    () =>
+      (activeSubjectRuns.length > 0 ? activeSubjectRuns : subjectRuns)
+        .filter((s) => s.detail.gait)
+        .map((s) => ({ runId: s.runId, label: s.label, color: s.color, gait: s.detail.gait as NonNullable<RunDetail["gait"]> })),
+    [activeSubjectRuns, subjectRuns],
+  );
   // Contiguous frame ranges the user masked (kept in the video at original
   // timing, but skipped by inference → no kinematics). Shaded + labeled on the
   // plots so the data gap reads as intentional.
@@ -1198,6 +1310,32 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     () => runs.filter((run) => !activeJobRunIds.has(run.id)),
     [runs, activeJobRunIds],
   );
+
+  // One entry per source video: the runs of a multi-subject selection share a
+  // chosen-subject track file, so they collapse into a single row whose subjects
+  // are then picked at the plot level rather than by switching runs.
+  const runGroups = useMemo<RunGroup[]>(() => {
+    const groups = new Map<string, RunSummary[]>();
+    for (const run of processedRuns) {
+      const key = run.subject?.trackFile ?? `run:${run.id}`;
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(run);
+      else groups.set(key, [run]);
+    }
+    return Array.from(groups.values()).map((members) => {
+      const ordered = [...members].sort((a, b) => (a.subject?.index ?? 0) - (b.subject?.index ?? 0));
+      const primary = ordered[0];
+      return {
+        key: primary.id,
+        primary,
+        members: ordered,
+        // "video_processed_person2" and friends all belong to one video: show the
+        // shared stem rather than whichever subject happens to be first.
+        label: primary.id.replace(/_person\d+$/i, ""),
+        colors: ordered.map((run, i) => run.subject?.color ?? PLOT_COLORS[i % PLOT_COLORS.length]),
+      };
+    });
+  }, [processedRuns]);
 
   // Toggle 3D/video playback, rewinding to the start first if already at the end.
   function toggleRunPlayback(): void {
@@ -2584,16 +2722,23 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
     if (fresh?.runId) setSelectedRunId(fresh.runId);
   }
 
-  // Delete a processed run after confirmation, clearing it if it was selected.
-  async function deleteRun(runId: string): Promise<void> {
-    if (!window.confirm(`Delete run "${runId}"?`)) {
+  // Delete a whole video after confirmation: a multi-subject selection is one
+  // entry in the list but several runs on disk, so all of them go together.
+  async function deleteRunGroup(group: RunGroup): Promise<void> {
+    const multi = group.members.length > 1;
+    const question = multi
+      ? `Delete "${group.label}" and all ${group.members.length} reconstructed subjects?`
+      : `Delete run "${group.primary.id}"?`;
+    if (!window.confirm(question)) {
       return;
     }
-    const res = await apiFetch(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
-    if (!res.ok) {
-      throw new Error(await res.text());
+    for (const run of group.members) {
+      const res = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        throw new Error(await res.text());
+      }
     }
-    if (selectedRunId === runId) {
+    if (group.members.some((run) => run.id === selectedRunId)) {
       setSelectedRunId(null);
       setRunDetail(null);
       setRunLoadState(null);
@@ -2803,43 +2948,55 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
         <div className="panel-section run-list-section">
           <div className="section-title">Processed videos</div>
           <div className="run-list">
-            {processedRuns.length === 0 ? <div className="muted-card">No recovered runs found.</div> : null}
-            {processedRuns.map((run) => (
-              <div key={run.id} className={`run-item ${run.id === selectedRunId ? "active" : ""} ${run.id === selectedRunId && activeRunLoadState ? "loading" : ""}`}>
+            {runGroups.length === 0 ? <div className="muted-card">No recovered runs found.</div> : null}
+            {runGroups.map((group) => {
+              const isActive = group.members.some((run) => run.id === selectedRunId);
+              const { primary } = group;
+              return (
+              <div key={group.key} className={`run-item ${isActive ? "active" : ""} ${isActive && activeRunLoadState ? "loading" : ""}`}>
                 <button
                   className="run-select"
                   type="button"
                   onClick={() => {
-                    if (run.id !== selectedRunId) {
-                      setRunLoadState({ runId: run.id, loaded: 0, total: 1, label: "Run manifest" });
+                    if (primary.id !== selectedRunId) {
+                      setRunLoadState({ runId: primary.id, loaded: 0, total: 1, label: "Run manifest" });
                     }
-                    setSelectedRunId(run.id);
+                    setSelectedRunId(primary.id);
                     pendingFileRef.current = null;
                     setPendingFile(null);
                   }}
                 >
-                  <span>{run.id}</span>
+                  <span>{group.label}</span>
                   <small>
-                    {run.id === selectedRunId && activeRunLoadState
+                    {isActive && activeRunLoadState
                       ? loadProgressLabel(activeRunLoadState)
-                      : `${run.processedFrames} frames${
-                          runDurationLabel(run.processedFrames, run.fps) ? ` · ${runDurationLabel(run.processedFrames, run.fps)}` : ""
+                      : `${primary.processedFrames} frames${
+                          runDurationLabel(primary.processedFrames, primary.fps) ? ` · ${runDurationLabel(primary.processedFrames, primary.fps)}` : ""
                         }`}
                   </small>
+                  {group.members.length > 1 ? (
+                    <span className="run-subject-dots" title={`${group.members.length} subjects`}>
+                      {group.colors.map((color, i) => (
+                        <i key={`${group.key}-${i}`} style={{ background: color }} />
+                      ))}
+                      <em>{group.members.length} subjects</em>
+                    </span>
+                  ) : null}
                 </button>
                 {!PUBLIC_BASIC_UI ? (
                   <button
                     className="run-delete"
                     type="button"
-                    title="Delete run"
-                    aria-label="Delete run"
-                    onClick={() => void deleteRun(run.id).catch((err) => setError(String(err)))}
+                    title={group.members.length > 1 ? "Delete this video and all its subjects" : "Delete run"}
+                    aria-label={group.members.length > 1 ? "Delete video" : "Delete run"}
+                    onClick={() => void deleteRunGroup(group).catch((err) => setError(String(err)))}
                   >
                     <ActionIcon name="minus" />
                   </button>
                 ) : null}
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </aside>
@@ -3394,6 +3551,43 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
 
           {showViewerControls ? (
           <div className="kinematics-panel">
+            {subjectRuns.length > 1 ? (
+              <div className="plot-subject-bar" role="group" aria-label="Subjects to plot">
+                <span className="plot-subject-label">Subjects</span>
+                {subjectRuns.map((subject) => {
+                  const isActive = activeSubjectRuns.some((s) => s.runId === subject.runId);
+                  return (
+                    <button
+                      key={subject.runId}
+                      type="button"
+                      className={`plot-subject-chip ${isActive ? "active" : ""}`}
+                      style={isActive ? { borderColor: subject.color, color: subject.color } : undefined}
+                      title={`Show ${subject.label}'s curves`}
+                      onClick={() => {
+                        // Plain toggle, with "every subject" stored as the empty
+                        // list so later-loading siblings are included; turning the
+                        // last one off falls back to showing them all.
+                        setPlotSubjectIds((current) => {
+                          const explicit = current.length === 0 ? subjectRuns.map((s) => s.runId) : current;
+                          const next = explicit.includes(subject.runId)
+                            ? explicit.filter((id) => id !== subject.runId)
+                            : [...explicit, subject.runId];
+                          return next.length === 0 || next.length === subjectRuns.length ? [] : next;
+                        });
+                      }}
+                    >
+                      <span className="chip-swatch" style={{ background: subject.color }} />
+                      {subject.label}
+                    </button>
+                  );
+                })}
+                {plotSubjectIds.length > 0 ? (
+                  <button type="button" className="plot-subject-all" onClick={() => setPlotSubjectIds([])}>
+                    All
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             <div className="plot-settings-bar">
               {runDetail?.gait ? (
                 <div className="analysis-view-toggle" role="group" aria-label="Analysis view">
@@ -3509,8 +3703,8 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                 </div>
               ) : null}
             </div>
-            {analysisView === "gait" && runDetail?.gait ? (
-              <GaitReport gait={runDetail.gait} />
+            {analysisView === "gait" && gaitSubjects.length > 0 ? (
+              <GaitReport subjects={gaitSubjects} />
             ) : (
             <>
             {plotSettingsOpen ? (
@@ -3647,14 +3841,15 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
               />
             ) : null}
             <KinematicsPlot
-              signals={selectedSignals}
+              signals={plottedSeries}
               frameIndex={safeFrameIndex}
               fps={runDetail?.fps ?? 30}
               frameCount={frameCount}
               mode={plotLayoutMode}
               viewWindow={viewWindow}
               maskedRanges={maskedFrameRanges}
-              colorForId={(_id, index) => PLOT_COLORS[index % PLOT_COLORS.length]}
+              colorForId={seriesColor}
+              dashForId={seriesDash}
               onFrameSelect={(index) => {
                 setIsPlaying(false);
                 setFrameIndex(index);

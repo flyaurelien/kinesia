@@ -223,6 +223,50 @@ class TestNeutralReference(unittest.TestCase):
         self.assertFalse(neutral["applied"])
 
 
+class TestEventRefinement(unittest.TestCase):
+    """Heel strikes are nudged onto the heel-height minimum, but only when that
+    minimum is real — otherwise every temporal parameter inherits a fixed bias."""
+
+    def _frames(self, heel_z_of_frame, n=240, contact_period=36, stance=0.6):
+        frames = []
+        for i in range(n):
+            phase = (i % contact_period) / contact_period
+            joints = [None] * 21
+            joints[9] = world_to_cam((-0.1, 0.0, 0.95))
+            joints[10] = world_to_cam((0.1, 0.0, 0.95))
+            joints[17] = world_to_cam((-0.1, 0.0, heel_z_of_frame(i)))
+            joints[20] = world_to_cam((0.1, 0.0, 0.05))
+            contact = phase < stance
+            frames.append({"index": i, "subject_present": True, "joints_cam": joints,
+                           "foot_contact": {"left": bool(contact), "right": True,
+                                            "support": "both" if contact else "right"}})
+        return frames
+
+    def test_ignores_a_minimum_stuck_on_the_window_edge(self):
+        # Heel height falls monotonically across every window, so the smallest
+        # value always sits on the far edge: there is no interior minimum to
+        # snap to, and the contact transition must be kept as-is.
+        frames = self._frames(lambda i: 1.0 - 0.002 * i)
+        events = detect_gait_events(frames, FPS)
+        strikes = [e["frame"] for e in events if e["side"] == "left" and e["type"] == "heel_strike"]
+        self.assertTrue(strikes)
+        for frame in strikes:
+            self.assertEqual(frame % 36, 0, "event drifted off the contact transition")
+
+    def test_snaps_to_a_genuine_interior_minimum(self):
+        # A heel that dips to a clear trough 2 frames after the contact flag:
+        # the refinement should move the event onto that trough. The dip is a
+        # smooth cosine so the low-pass leaves its position untouched.
+        def heel_z(i):
+            return 0.05 - 0.03 * math.cos(2 * math.pi * ((i % 36) - 2) / 36)
+        frames = self._frames(heel_z)
+        events = detect_gait_events(frames, FPS)
+        strikes = [e["frame"] for e in events if e["side"] == "left" and e["type"] == "heel_strike"]
+        self.assertTrue(strikes)
+        for frame in strikes[1:]:  # the first cycle has no full window before it
+            self.assertEqual(frame % 36, 2, "event did not snap to the heel-height trough")
+
+
 class TestClinicalAngles(unittest.TestCase):
     def test_straight_leg_reads_near_zero(self):
         # A perfectly vertical, stationary leg: hip/knee ~0 deg, foot flat ~0.
