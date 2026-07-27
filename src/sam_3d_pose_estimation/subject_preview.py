@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from .pipeline import auto_initialize_patient_bbox, detect_sam3_prompt_candidates
+from .video_io import open_video
 from .sam3d_runtime import select_device, try_build_human_detector
 from .workspace import project_root_from
 
@@ -77,7 +78,7 @@ def _video_meta(cap: cv2.VideoCapture, frame: np.ndarray | None = None) -> dict[
 def read_frame_at_time(video_input: Path, frame_sec: float) -> tuple[np.ndarray, dict[str, Any]]:
     """Decode the frame nearest to frame_sec, falling back to frame 0 if the seek
     fails. Returns the BGR frame plus its resolved index/timing metadata."""
-    cap = cv2.VideoCapture(str(video_input))
+    cap = open_video(str(video_input))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_input}")
     try:
@@ -207,7 +208,7 @@ def locate_subjects(
 ) -> dict[str, Any]:
     """Scan the video at the planned probe times and return up to max_results
     evenly-spread detections (or probed misses, so the UI always has frames)."""
-    cap = cv2.VideoCapture(str(video_input))
+    cap = open_video(str(video_input))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_input}")
     try:
