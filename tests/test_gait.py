@@ -253,6 +253,24 @@ class TestEventRefinement(unittest.TestCase):
         for frame in strikes:
             self.assertEqual(frame % 36, 0, "event drifted off the contact transition")
 
+    def test_absent_subject_does_not_fake_an_interior_minimum(self):
+        # The subject is missing for the first half of every search window, so
+        # the lowest OBSERVED sample sits on the edge of what was seen. That is
+        # not evidence of a trough, and the event must stay on the transition.
+        def heel_z(i):
+            return 1.0 - 0.002 * i
+        frames = self._frames(heel_z)
+        for frame in frames:
+            # Blank the frames just before each contact transition.
+            if 30 <= (frame["index"] % 36) <= 35:
+                frame["subject_present"] = False
+                frame["joints_cam"] = None
+        events = detect_gait_events(frames, FPS)
+        strikes = [e["frame"] for e in events if e["side"] == "left" and e["type"] == "heel_strike"]
+        self.assertTrue(strikes)
+        for frame in strikes:
+            self.assertEqual(frame % 36, 0, "event snapped to an unobserved minimum")
+
     def test_snaps_to_a_genuine_interior_minimum(self):
         # A heel that dips to a clear trough 2 frames after the contact flag:
         # the refinement should move the event onto that trough. The dip is a

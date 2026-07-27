@@ -365,11 +365,14 @@ def detect_gait_events(
             if kind == "heel_strike":
                 lo, hi = max(0, i - refine), min(len(frames), i + refine + 1)
                 window = heel_z[lo:hi]
-                if np.any(np.isfinite(window)):
+                observed = np.flatnonzero(np.isfinite(window))
+                # Interior minimum only (see the docstring). "Interior" is judged
+                # against the OBSERVED samples, not the raw window: with the
+                # subject absent for part of it, the first/last observed sample
+                # is an edge just the same, and the minimum beyond it is unseen.
+                if observed.size >= 3:
                     offset = int(np.nanargmin(window))
-                    # Interior minimum only (see the docstring): a hit on either
-                    # boundary means the minimum is outside the window.
-                    if 0 < offset < window.size - 1:
+                    if observed[0] < offset < observed[-1]:
                         frame_index = lo + offset
             last_at[kind] = i
             events.append(

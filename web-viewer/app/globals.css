@@ -3057,3 +3057,23 @@ button:disabled {
   font-size: 11.5px;
   color: var(--muted);
 }
+
+/* Units in the comparison-table header, and the per-subject provenance dot. */
+.gait-table thead th small {
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted-2);
+}
+.gait-prov-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+.gait-provenance strong {
+  color: #cdd7e8;
+  font-weight: 700;
+}
