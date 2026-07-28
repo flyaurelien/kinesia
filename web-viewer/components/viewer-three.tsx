@@ -583,91 +583,6 @@ function quaternionAngle(a: THREE.Quaternion, b: THREE.Quaternion): number {
 
 // Per-frame upright rotations, temporally smoothed: reject implausibly large raw tilts and slerp toward
 // each candidate (more slowly across big jumps) so the standing-up correction doesn't jitter during playback.
-// Per-frame heading correction: how far the body's yaw must be turned back to
-// sit on a de-spiked version of itself.
-//
-// The hip axis is short, so joint noise turns into large angular noise: on real
-// footage the heading jumps 4 deg between frames typically and up to 97 deg at
-// worst, which reads as the body twitching left and right while walking
-// straight. One-Euro is the wrong tool — its cutoff opens with speed, and here
-// the NOISE is what is fast, so it passes straight through (measured: 4.05 ->
-// 3.85 deg, no help). A median rejects the alternation instead while leaving a
-// sustained turn almost untouched: the worst jump drops to 10 deg, and to 4.6
-// deg with a light smoothing pass, while a real 197 deg about-face survives as
-// 193 deg.
-const YAW_MEDIAN_FRAMES = 9;
-const YAW_SMOOTH_TAU_S = 0.15;
-const L_HIP_INDEX = 9;
-const R_HIP_INDEX = 10;
-
-function stableYawCorrections(
-  frames: RunFrame[],
-  anchor: DisplayAnchor | null,
-  fps: number,
-): number[] {
-  const raw: (number | null)[] = frames.map((frame) => {
-    const joints = frame.jointsCam ?? null;
-    if (!joints || joints.length <= R_HIP_INDEX || frame.subjectPresent === false) {
-      return null;
-    }
-    const left = joints[L_HIP_INDEX];
-    const right = joints[R_HIP_INDEX];
-    if (!left || !right) {
-      return null;
-    }
-    const axis = camToWorld(right, anchor).sub(camToWorld(left, anchor));
-    if (Math.hypot(axis.x, axis.y) < 1e-6) {
-      return null;
-    }
-    return Math.atan2(axis.y, axis.x);
-  });
-
-  // Unwrap so a turn through +/-180 deg is a continuous ramp rather than a jump
-  // the median would then treat as an outlier.
-  const unwrapped: (number | null) [] = [];
-  let previous: number | null = null;
-  for (const value of raw) {
-    if (value === null) {
-      unwrapped.push(null);
-      continue;
-    }
-    let next = value;
-    if (previous !== null) {
-      while (next - previous > Math.PI) next -= 2 * Math.PI;
-      while (next - previous < -Math.PI) next += 2 * Math.PI;
-    }
-    unwrapped.push(next);
-    previous = next;
-  }
-
-  const half = Math.floor(YAW_MEDIAN_FRAMES / 2);
-  const smoothed: number[] = [];
-  const alpha = 1 - Math.exp(-1 / (Math.max(1, fps) * YAW_SMOOTH_TAU_S));
-  let running: number | null = null;
-  const out: number[] = [];
-  for (let index = 0; index < unwrapped.length; index += 1) {
-    const window: number[] = [];
-    for (let k = index - half; k <= index + half; k += 1) {
-      const value = unwrapped[k];
-      if (k >= 0 && k < unwrapped.length && value !== null) {
-        window.push(value);
-      }
-    }
-    const current = unwrapped[index];
-    if (window.length === 0 || current === null) {
-      smoothed.push(running ?? 0);
-      out.push(0);
-      continue;
-    }
-    window.sort((a, b) => a - b);
-    const median = window[Math.floor(window.length / 2)];
-    running = running === null ? median : running + alpha * (median - running);
-    smoothed.push(running);
-    out.push(running - current);
-  }
-  return out;
-}
-
 function stableUprightQuaternions(
   frames: RunFrame[],
   anchor: DisplayAnchor | null,
@@ -1736,37 +1651,15 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         : 0,
     [anchor, props.runDetail.frames, props.runDetail.videoHeight, props.uprightMode, uprightQuaternions],
   );
-  // Heading de-spike: turn the body back onto a median-filtered version of its
-  // own yaw, so it stops twitching left and right while walking straight.
-  const yawCorrections = useMemo(
-    () =>
-      props.uprightMode
-        ? stableYawCorrections(props.runDetail.frames, anchor, Math.max(1, props.runDetail.fps || 30))
-        : [],
-    [anchor, props.runDetail.fps, props.runDetail.frames, props.uprightMode],
-  );
-  const yawFix = lerpNumber(
-    yawCorrections[baseIndex] ?? 0,
-    yawCorrections[nextIndex] ?? yawCorrections[baseIndex] ?? 0,
-    interpolation,
-  );
   const uprightBase = props.uprightMode
     ? (uprightQuaternions[baseIndex] ?? new THREE.Quaternion())
         .clone()
         .slerp(uprightQuaternions[nextIndex] ?? uprightQuaternions[baseIndex] ?? new THREE.Quaternion(), interpolation)
     : new THREE.Quaternion();
   const soleAxis = soleFixAngle !== 0 ? hipAxisAfter(frameBase, anchor, uprightBase) : null;
-  const uprightWithSole = soleAxis
+  const upright = soleAxis
     ? new THREE.Quaternion().setFromAxisAngle(soleAxis, soleFixAngle).multiply(uprightBase)
     : uprightBase;
-  // Applied in WORLD space (outermost), so it turns the whole body about the
-  // vertical without disturbing the tilt and sole corrections underneath.
-  const upright =
-    Math.abs(yawFix) > 1e-6
-      ? new THREE.Quaternion()
-          .setFromAxisAngle(new THREE.Vector3(0, 0, 1), yawFix)
-          .multiply(uprightWithSole)
-      : uprightWithSole;
 
   return (
     <>
