@@ -1054,24 +1054,14 @@ function anchoredTrajectory(
   return out;
 }
 
-// Pin a trajectory to one spot on the floor, keeping its vertical motion.
+// Pin a trajectory to the origin, keeping its vertical motion.
 //
-// Each subject holds its OWN mean position rather than the origin, so a
-// multi-subject scene keeps the arrangement that lets you tell people apart
-// instead of collapsing them onto each other.
+// Sitting on (0, 0) puts the subject on the axis cross at the middle of the
+// grid, which is where you want it when the point is to read pose rather than
+// travel. Several subjects pinned at once therefore overlap — use the subject
+// picker to show one at a time.
 function pinnedInPlace(positions: THREE.Vector3[]): THREE.Vector3[] {
-  if (positions.length === 0) {
-    return positions;
-  }
-  let sx = 0;
-  let sy = 0;
-  for (const point of positions) {
-    sx += point.x;
-    sy += point.y;
-  }
-  const cx = sx / positions.length;
-  const cy = sy / positions.length;
-  return positions.map((point) => new THREE.Vector3(cx, cy, point.z));
+  return positions.map((point) => new THREE.Vector3(0, 0, point.z));
 }
 
 // The full displayed root trajectory of one subject: support-foot anchored
