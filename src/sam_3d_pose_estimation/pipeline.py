@@ -18,6 +18,7 @@ from .sam3d_runtime import (
     infer_single_person_from_bbox,
     load_estimator,
     patch_sam3d_cuda_assumptions,
+    release_unused_branch,
     select_device,
     try_build_human_detector,
 )
@@ -297,6 +298,13 @@ def build_pipeline_runtime(cfg: PipelineConfig) -> PipelineRuntime:
         device=device,
         mps_mhr_mode=mps_mhr_mode,
     )
+    # The checkpoint ships a full duplicate hand branch that a body run never
+    # calls — `run_inference` returns straight after the body decoder. Dropping
+    # it hands back ~440 MB of device memory before a single frame is read.
+    freed_mb = release_unused_branch(estimator, cfg.inference_target)
+    if freed_mb:
+        print(f"Released the unused hand branch: {freed_mb:.0f} MB of weights.")
+
     mhr_backend = getattr(estimator, "mhr_backend", "unknown")
     if device.type == "mps":
         print(

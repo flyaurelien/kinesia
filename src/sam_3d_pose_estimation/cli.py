@@ -118,7 +118,17 @@ def add_run_arguments(parser: argparse.ArgumentParser, *, require_output_dir: bo
         default=0,
         help=(
             "Which subject of the --subject-track-file to reconstruct (0-based). "
-            "Multi-subject selections run once per subject with this index."
+            "Prefer --subject-indices when there are several: it reuses one "
+            "loaded model instead of paying for the checkpoint per subject."
+        ),
+    )
+    parser.add_argument(
+        "--subject-indices",
+        type=str,
+        default="",
+        help=(
+            'Reconstruct several subjects in ONE process off one loaded model: '
+            '"all", or a list like "0,1,2". Overrides --subject-index.'
         ),
     )
     parser.add_argument("--start-frame", type=int, default=0)
@@ -455,9 +465,91 @@ def infer_run_id(video_input: Path, requested_run_id: str) -> str:
     return sanitize_token(f"{video_input.stem}_processed")
 
 
+def parse_subject_indices(raw: str, args: argparse.Namespace) -> list[int]:
+    """Subjects to reconstruct: "all", a comma list, or the single --subject-index."""
+    text = (raw or "").strip().lower()
+    if not text:
+        return [max(0, int(getattr(args, "subject_index", 0) or 0))]
+    track_file = (getattr(args, "subject_track_file", "") or "").strip()
+    if text == "all":
+        count = len(load_subject_tracks(track_file))
+        return list(range(count)) if count else [0]
+    out: list[int] = []
+    for piece in text.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            value = int(piece)
+        except ValueError:
+            continue
+        if value >= 0 and value not in out:
+            out.append(value)
+    return out or [0]
+
+
+def cmd_run_subjects(args: argparse.Namespace, project_root: Path, indices: list[int]) -> int:
+    """Reconstruct several subjects off ONE loaded model."""
+    from .pipeline import build_pipeline_runtime
+
+    base_run_id = infer_run_id(args.video_input, args.run_id)
+    runtime = None
+    written: list[str] = []
+    for position, index in enumerate(indices):
+        args.subject_index = index
+        run_id = f"{base_run_id}{subject_suffix(index)}"
+        output_dir = (
+            (args.output_dir.expanduser().resolve().parent / run_id)
+            if args.output_dir is not None
+            else ensure_run_layout(run_id, project_root)
+        )
+        cfg = build_pipeline_config(args, output_dir)
+        if runtime is None:
+            runtime = build_pipeline_runtime(cfg)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if cfg.tracking_anchors:
+            write_json(
+                output_dir / "tracking_anchors.json",
+                {
+                    "schema": "kinesia.tracking_anchors.v1",
+                    "anchors": cfg.tracking_anchors,
+                    "primary_anchor_frame": cfg.prompt_bbox_frame,
+                },
+            )
+        print(f"\n=== Subject {index + 1}/{len(indices)} -> {run_id} ===")
+        metadata = run_pipeline(cfg, runtime=runtime)
+        write_json(
+            output_dir / "run_manifest.json",
+            build_run_manifest(
+                run_id=run_id,
+                run_directory=output_dir,
+                metadata=metadata,
+                config_profile=DEFAULT_CONFIG_PROFILE,
+            ),
+        )
+        written.append(run_id)
+    print(f"\nReconstructed {len(written)} subjects on one loaded model: {', '.join(written)}")
+    return 0
+
+
+def subject_suffix(index: int) -> str:
+    """Run-id suffix for subject `index` — subject 0 keeps the bare id."""
+    return "" if index <= 0 else f"_person{index + 1}"
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    """Run the inference pipeline, persist the run manifest, and print a summary."""
+    """Run the inference pipeline, persist the run manifest, and print a summary.
+
+    With --subject-indices, every listed subject is reconstructed IN THIS
+    PROCESS off one loaded model. Reconstructing them as separate processes
+    re-reads the 2 GB checkpoint and re-patches the graph each time, which costs
+    roughly half a minute per extra subject for no benefit.
+    """
     project_root = project_root_from(Path.cwd())
+    indices = parse_subject_indices(getattr(args, "subject_indices", ""), args)
+    if len(indices) > 1:
+        return cmd_run_subjects(args, project_root, indices)
+
     run_id = infer_run_id(args.video_input, args.run_id)
     output_dir = (
         args.output_dir.expanduser().resolve()

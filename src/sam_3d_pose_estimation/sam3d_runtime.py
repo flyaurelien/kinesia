@@ -466,6 +466,43 @@ def load_estimator(
     return estimator
 
 
+def release_unused_branch(estimator: Any, inference_target: str) -> float:
+    """Free the decoder branch this run will never call. Returns the MB freed.
+
+    The checkpoint carries a full duplicate hand branch (its own decoder, pose
+    head and embeddings — about 219 M of the model's 1285 M parameters). A body
+    run never touches it: `run_inference` returns straight after the body
+    decoder for inference_type="body". Keeping it resident costs roughly 440 MB
+    of device memory for nothing, so drop it — and vice-versa for a hand run.
+
+    Deleting a branch the run DOES use would break inference, so this only ever
+    removes the opposite one, and only for the two targets whose behaviour is
+    known.
+    """
+    target = str(inference_target or "").strip().lower()
+    if target != "body":
+        # Only the body case is safe to prune today: "full" needs both branches,
+        # and a hand run's exact dependencies on the body twins are not
+        # established here. Leave anything else untouched.
+        return 0.0
+
+    model = estimator.model
+    # Remove the entry outright rather than setting it to None: the model guards
+    # optional parts with hasattr(), which would still be True for a None value
+    # and would then be called.
+    doomed = [name for name in model._modules if name.endswith("_hand")]
+    freed = 0
+    for name in doomed:
+        child = model._modules[name]
+        if child is not None:
+            freed += sum(p.numel() for p in child.parameters())
+        del model._modules[name]
+
+    if freed and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    return freed * 2 / 1e6  # bf16/fp16 weights: 2 bytes per parameter
+
+
 def infer_single_person_from_bbox(
     estimator: Any,
     frame_bgr: np.ndarray,
