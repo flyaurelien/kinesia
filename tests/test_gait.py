@@ -314,3 +314,48 @@ class TestClinicalAngles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFootContactFloor(unittest.TestCase):
+    """Contact must be judged against the CLIP's floor, not the current frame's
+    lower foot — otherwise a swing phase can never appear and no gait event is
+    ever detected."""
+
+    def _frame(self, left_height, right_height):
+        joints = [None] * 21
+        joints[9] = world_to_cam((-0.1, 0.0, 0.95))
+        joints[10] = world_to_cam((0.1, 0.0, 0.95))
+        for x, height, (ankle, big, small, heel) in (
+            (-0.1, left_height, (13, 15, 16, 17)),
+            (0.1, right_height, (14, 18, 19, 20)),
+        ):
+            joints[ankle] = world_to_cam((x, 0.0, height + 0.06))
+            joints[big] = world_to_cam((x, 0.15, height))
+            joints[small] = world_to_cam((x, 0.13, height))
+            joints[heel] = world_to_cam((x, -0.05, height))
+        return {"index": 0, "subject_present": True, "joints_cam": joints}
+
+    def test_swing_foot_is_not_reported_as_loaded(self):
+        from sam_3d_pose_estimation.analytics import detect_foot_contact, estimate_floor_z
+
+        # A clip where the right foot swings 20 cm up while the left stays down.
+        clip = [self._frame(0.0, 0.0)] + [self._frame(0.0, 0.20) for _ in range(20)]
+        floor = estimate_floor_z(clip)
+        self.assertIsNotNone(floor)
+
+        swing = detect_foot_contact(clip[-1], floor)
+        self.assertTrue(swing["left"], "the planted foot should be loaded")
+        self.assertFalse(swing["right"], "the lifted foot must not be loaded")
+        self.assertEqual(swing["support"], "left")
+
+        both = detect_foot_contact(clip[0], floor)
+        self.assertEqual(both["support"], "both")
+
+    def test_flight_is_reachable(self):
+        from sam_3d_pose_estimation.analytics import detect_foot_contact, estimate_floor_z
+
+        clip = [self._frame(0.0, 0.0) for _ in range(10)] + [self._frame(0.3, 0.3)]
+        floor = estimate_floor_z(clip)
+        # Both feet well clear of the clip floor: the old per-frame rule could
+        # never produce this, which is why jumps were invisible.
+        self.assertEqual(detect_foot_contact(clip[-1], floor)["support"], "none")

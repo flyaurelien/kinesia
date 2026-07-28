@@ -200,7 +200,8 @@ def stabilize_xy(
     and also returns per-frame foot contact states and left/right foot slip speeds.
     """
     n = len(root_world_raw)
-    contacts = [detect_foot_contact(frame) for frame in frames]
+    floor_z = estimate_floor_z(frames)
+    contacts = [detect_foot_contact(frame, floor_z) for frame in frames]
     if n == 0:
         return {"root_world_stabilized": [], "foot_contact": [], "slip_speed_left": [], "slip_speed_right": []}
 
@@ -419,19 +420,65 @@ def write_parquet(file_path: Path, frames: list[dict[str, Any]], signals: list[d
     pq.write_table(table, file_path)
 
 
-def detect_foot_contact(frame: dict[str, Any]) -> dict[str, Any]:
-    """Infer left/right foot ground contact by comparing each foot's lowest joint to the floor."""
+LEFT_FOOT_JOINTS = [LEFT_ANKLE, LEFT_BIG_TOE, LEFT_SMALL_TOE, LEFT_HEEL]
+RIGHT_FOOT_JOINTS = [RIGHT_ANKLE, RIGHT_BIG_TOE, RIGHT_SMALL_TOE, RIGHT_HEEL]
+# How far above the clip's floor a foot may sit and still count as loaded.
+# Monocular height noise is a couple of centimetres; a swing foot clears far
+# more than this, which is what makes the two separable at all.
+CONTACT_MARGIN_M = 0.05
+# The floor is this low quantile of the per-frame lowest foot. A minimum would
+# be set by the single worst reconstruction of the clip; a quantile ignores
+# those while still sitting at the bottom of the motion.
+FLOOR_QUANTILE = 0.10
+
+
+def estimate_floor_z(frames: list[dict[str, Any]]) -> float | None:
+    """Ground height for the whole clip, from the lowest foot seen in each frame."""
+    lows: list[float] = []
+    for frame in frames:
+        joints = frame.get("joints_cam")
+        if not isinstance(joints, list) or len(joints) <= RIGHT_HEEL:
+            continue
+        candidates = [
+            value
+            for value in (
+                min_world_z(joints, LEFT_FOOT_JOINTS),
+                min_world_z(joints, RIGHT_FOOT_JOINTS),
+            )
+            if value is not None
+        ]
+        if candidates:
+            lows.append(min(candidates))
+    if not lows:
+        return None
+    lows.sort()
+    return lows[min(len(lows) - 1, int(len(lows) * FLOOR_QUANTILE))]
+
+
+def detect_foot_contact(frame: dict[str, Any], floor_z: float | None = None) -> dict[str, Any]:
+    """Infer left/right foot contact against the CLIP's floor.
+
+    `floor_z` must come from the whole clip (see `estimate_floor_z`). Taking the
+    floor from the current frame instead — the lower of that frame's two feet —
+    makes the lower foot loaded by construction and the other one loaded
+    whenever it is within a margin, so the pair reads "both" almost always and a
+    swing phase can never appear. Gait events then cannot be detected at all.
+    """
     joints = frame.get("joints_cam")
     if not isinstance(joints, list) or len(joints) <= RIGHT_HEEL:
         return {"left": False, "right": False, "support": "none"}
-    left_z = min_world_z(joints, [LEFT_ANKLE, LEFT_BIG_TOE, LEFT_SMALL_TOE, LEFT_HEEL])
-    right_z = min_world_z(joints, [RIGHT_ANKLE, RIGHT_BIG_TOE, RIGHT_SMALL_TOE, RIGHT_HEEL])
-    floor = min(value for value in [left_z, right_z] if value is not None) if left_z is not None or right_z is not None else None
-    if floor is None:
-        return {"left": False, "right": False, "support": "none"}
-    margin = 0.055
-    left = left_z is not None and left_z <= floor + margin
-    right = right_z is not None and right_z <= floor + margin
+    left_z = min_world_z(joints, LEFT_FOOT_JOINTS)
+    right_z = min_world_z(joints, RIGHT_FOOT_JOINTS)
+    if floor_z is None:
+        # No clip context (single-frame use): fall back to the lower foot, which
+        # cannot see flight but keeps a lone frame from reporting nothing.
+        present = [value for value in (left_z, right_z) if value is not None]
+        if not present:
+            return {"left": False, "right": False, "support": "none"}
+        floor_z = min(present)
+    threshold = floor_z + CONTACT_MARGIN_M
+    left = left_z is not None and left_z <= threshold
+    right = right_z is not None and right_z <= threshold
     support = "both" if left and right else "left" if left else "right" if right else "none"
     return {"left": left, "right": right, "support": support}
 
