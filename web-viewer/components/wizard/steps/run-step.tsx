@@ -217,27 +217,30 @@ export function RunStep() {
 
       {!hasSubmitted ? (
         <div className="of-run-launch">
-          {fileUrl ? (
-            <video
-              className="of-run-launch-video"
-              src={fileUrl}
-              muted
-              playsInline
-              preload="auto"
-              controls={false}
-              // Seek a hair past 0 so a real frame paints instead of a black box.
-              onLoadedMetadata={(e) => {
-                try {
-                  e.currentTarget.currentTime = 0.1;
-                } catch {
-                  /* metadata not ready */
-                }
-              }}
-            />
-          ) : null}
-          <div className="of-run-launch-info">
-            <strong className="of-run-launch-name">{file.name}</strong>
-            <span className="of-run-launch-sub">Subject: {subjectPrompt.trim() || "person"}</span>
+          <div className="of-run-launch-card">
+            {fileUrl ? (
+              // Plays on a loop: seeing the clip actually move is what tells you
+              // the right video is queued, and a still first frame often shows
+              // an empty room before the subject enters.
+              <video
+                className="of-run-launch-video"
+                src={fileUrl}
+                autoPlay
+                loop
+                muted
+                playsInline
+                preload="auto"
+                controls={false}
+              />
+            ) : (
+              <div className="of-run-launch-video is-empty">No preview</div>
+            )}
+            <div className="of-run-launch-meta">
+              <strong className="of-run-launch-name" title={file.name}>{file.name}</strong>
+              <span className="of-run-launch-sub">
+                Subject: {subjectPrompt.trim() || "person"}
+              </span>
+            </div>
           </div>
           <button
             className="of-btn is-primary of-run-launch-btn"

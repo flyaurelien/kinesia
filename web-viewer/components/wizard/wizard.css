@@ -1192,42 +1192,70 @@
 
 /* Pre-launch screen: a centered card with the video preview + the Start button.
    (Starting a run jumps straight to the full viewer, so this step is just launch.) */
+/* Launch view: one centred column — clip, then its name, then the action.
+   Centred in the space left below the header rather than pushed down by a
+   fixed margin, so it stays put whatever the window height. */
 .kinesia-process .of-run-launch {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
+  gap: 20px;
   width: 100%;
-  max-width: 460px;
-  margin: 7vh auto 0;
+  min-height: min(60vh, 560px);
+  padding: 24px 16px;
   text-align: center;
 }
-.kinesia-process .of-run-launch-video {
+.kinesia-process .of-run-launch-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-  background: #000;
+  max-width: 420px;
+  overflow: hidden;
+  background: var(--of-surface-1);
   border: 1px solid var(--of-line);
   border-radius: var(--of-radius-lg);
   box-shadow: var(--of-of-shadow);
 }
-.kinesia-process .of-run-launch-info {
+.kinesia-process .of-run-launch-video {
+  display: block;
+  width: 100%;
+  /* Bounded by height, not a forced ratio: `cover` on a fixed 16/9 box cropped
+     4:3 and portrait clips, which is most phone footage. */
+  max-height: 46vh;
+  object-fit: contain;
+  background: #05070d;
+}
+.kinesia-process .of-run-launch-video.is-empty {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  color: var(--of-text-mute);
+  font-size: 13px;
+}
+.kinesia-process .of-run-launch-meta {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--of-line);
+  text-align: left;
 }
 .kinesia-process .of-run-launch-name {
-  font-size: 16px;
+  font-size: 14px;
   color: var(--of-text);
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .kinesia-process .of-run-launch-sub {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--of-text-dim);
 }
 .kinesia-process .of-run-launch-btn {
-  min-width: 240px;
+  width: 100%;
+  max-width: 420px;
   height: 46px;
   font-size: 14px;
 }
