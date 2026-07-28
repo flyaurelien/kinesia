@@ -75,3 +75,6 @@ vendor/mlx_sam3/pyproject.toml
 * 2
 * 2.*
 .claude/
+
+# Benchmark datasets (multi-GB, never versioned)
+benchmarks/
