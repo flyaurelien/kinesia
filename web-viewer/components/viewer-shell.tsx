@@ -952,6 +952,10 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
   const [showMesh, setShowMesh] = useState(true);
   const [showJoints, setShowJoints] = useState(true);
   const [showBones, setShowBones] = useState(true);
+  // Pose-only view: hold every subject on one spot so the joint rotations can
+  // be read without in-plane travel, which is the noisiest thing a single
+  // camera infers. Vertical motion stays, so jumps and crouches still read.
+  const [lockInPlace, setLockInPlace] = useState(false);
   const [meshOpacityPercent, setMeshOpacityPercent] = useState(100);
   const [plotGroup, setPlotGroup] = useState<PlotGroup>("angles");
   const [activePlotJointIndices, setActivePlotJointIndices] = useState<number[]>(DEFAULT_ACTIVE_PLOT_JOINTS);
@@ -3163,6 +3167,7 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                       onJointPick={toggleActiveJoint}
                       subjectColor={runDetail.subject?.color ?? null}
                       showPrimary={subjectIsShown(runDetail.id)}
+                      lockInPlace={lockInPlace}
                       siblings={siblingDetails
                         .filter((sib) => subjectIsShown(sib.id))
                         .map((sib) => ({
@@ -3523,6 +3528,25 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                 aria-label="Bones"
               >
                 <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><g stroke="currentColor" strokeWidth="1.7" fill="none" strokeLinecap="round"><circle cx="6.5" cy="7" r="1.7" /><circle cx="17.5" cy="17" r="1.7" /><line x1="7.7" y1="8.3" x2="16.3" y2="15.7" /></g></svg>
+              </button>
+              <button
+                className={`icon-btn ${lockInPlace ? "active" : ""}`}
+                type="button"
+                onClick={() => setLockInPlace((value) => !value)}
+                title={
+                  lockInPlace
+                    ? "In place: subjects held still, pose only — click to restore travel"
+                    : "Hold subjects in place and show pose only (rotations and angles)"
+                }
+                aria-label="Hold in place"
+                aria-pressed={lockInPlace}
+              >
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                  <g fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="3.2" />
+                    <path d="M12 3.2v2.4M12 18.4v2.4M3.2 12h2.4M18.4 12h2.4" />
+                  </g>
+                </svg>
               </button>
               <label className="inline-control icon-control" title="Mesh opacity">
                 <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.7" /><path fill="currentColor" d="M12 4a8 8 0 0 1 0 16z" /></svg>
