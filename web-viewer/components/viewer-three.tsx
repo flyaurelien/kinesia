@@ -2,7 +2,7 @@
 
 import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 
 import { apiFetch } from "../lib/api-client";
@@ -80,6 +80,46 @@ const LIFT_FILTER = { minCutoff: 1.5, beta: 0.6, dCutoff: 1.0 };
 // far above the floor and passes through essentially unfiltered.
 const VERTEX_FILTER = { minCutoff: 1.5, beta: 3.0, dCutoff: 1.0 };
 const VERTEX_FILTER_MAX_STEP_FRAMES = 6; // seek/jump => reset instead of blending
+
+// One-Euro over a body-relative buffer that advances with the playhead.
+//
+// The mesh vertices and the skeleton joints describe the SAME body, so they
+// have to be smoothed by the SAME filter: smoothing the mesh alone leaves the
+// bones running ahead of the flesh on every movement. Both call this, which is
+// what makes drifting apart impossible rather than merely unlikely.
+//
+// A seek, a rewind or a long gap resets instead of blending across it.
+function useBodyRelativeFilter() {
+  const stateRef = useRef<{ values: Float32Array; derivs: Float32Array; cursor: number } | null>(null);
+  return useCallback((array: Float32Array, frameCursor: number, fps: number) => {
+    const state = stateRef.current;
+    const stepFrames = state ? frameCursor - state.cursor : 0;
+    if (
+      !state ||
+      state.values.length !== array.length ||
+      stepFrames <= 0 ||
+      stepFrames > VERTEX_FILTER_MAX_STEP_FRAMES
+    ) {
+      stateRef.current = { values: array.slice(), derivs: new Float32Array(array.length), cursor: frameCursor };
+      return;
+    }
+    const dt = stepFrames / Math.max(1, fps);
+    const aD = smoothingAlpha(VERTEX_FILTER.dCutoff, dt);
+    const { values: prev, derivs } = state;
+    for (let index = 0; index < array.length; index += 1) {
+      const raw = array[index];
+      const dRaw = (raw - prev[index]) / dt;
+      const deriv = derivs[index] + aD * (dRaw - derivs[index]);
+      derivs[index] = deriv;
+      const cutoff = VERTEX_FILTER.minCutoff + VERTEX_FILTER.beta * Math.abs(deriv);
+      const a = smoothingAlpha(cutoff, dt);
+      const filtered = prev[index] + a * (raw - prev[index]);
+      prev[index] = filtered;
+      array[index] = filtered;
+    }
+    state.cursor = frameCursor;
+  }, []);
+}
 // Filter for the upright-correction TARGET (the body-up vector): posture
 // changes are slow, shoulder-line wobble is not.
 const UPRIGHT_FILTER = { minCutoff: 0.4, beta: 1.0, dCutoff: 1.0 };
@@ -1066,11 +1106,7 @@ function MeshGeometry({
   const nextVertices = nextMeshFile ? cachedMeshVertices(runId, nextMeshFile) : null;
   // Temporal vertex filter state: previous body-relative positions +
   // derivative estimates, advanced as the playhead moves forward.
-  const vertexFilterRef = useRef<{
-    positions: Float32Array;
-    derivs: Float32Array;
-    cursor: number;
-  } | null>(null);
+  const filterBuffer = useBodyRelativeFilter();
   const geometry = useMemo(() => {
     if (!faces || !vertices) {
       return null;
@@ -1092,45 +1128,14 @@ function MeshGeometry({
     next.applyMatrix4(DISPLAY_YAW_CLOCKWISE_90);
     next.translate(-pivot.x, -pivot.y, -pivot.z);
 
-    // One-Euro the BODY-RELATIVE vertex buffer (root already subtracted, so
-    // this touches pose only, never the trajectory). Advances with the
-    // playhead; a seek, a rewind, or a long gap resets instead of blending
-    // across it.
-    const array = next.getAttribute("position").array as Float32Array;
-    const state = vertexFilterRef.current;
-    const stepFrames = state ? frameCursor - state.cursor : 0;
-    if (
-      !state ||
-      state.positions.length !== array.length ||
-      stepFrames <= 0 ||
-      stepFrames > VERTEX_FILTER_MAX_STEP_FRAMES
-    ) {
-      vertexFilterRef.current = {
-        positions: array.slice(),
-        derivs: new Float32Array(array.length),
-        cursor: frameCursor,
-      };
-    } else {
-      const dt = stepFrames / Math.max(1, fps);
-      const aD = smoothingAlpha(VERTEX_FILTER.dCutoff, dt);
-      const { positions: prev, derivs } = state;
-      for (let index = 0; index < array.length; index += 1) {
-        const raw = array[index];
-        const dRaw = (raw - prev[index]) / dt;
-        const deriv = derivs[index] + aD * (dRaw - derivs[index]);
-        derivs[index] = deriv;
-        const cutoff = VERTEX_FILTER.minCutoff + VERTEX_FILTER.beta * Math.abs(deriv);
-        const a = smoothingAlpha(cutoff, dt);
-        const filtered = prev[index] + a * (raw - prev[index]);
-        prev[index] = filtered;
-        array[index] = filtered;
-      }
-      state.cursor = frameCursor;
-    }
+    // Smooth the BODY-RELATIVE vertex buffer (root already subtracted, so this
+    // touches pose only, never the trajectory) — with the same filter the
+    // skeleton uses, so the bones stay inside the body.
+    filterBuffer(next.getAttribute("position").array as Float32Array, frameCursor, fps);
 
     next.computeBoundingSphere();
     return next;
-  }, [anchor, faces, fps, frameCursor, meshInterpolation, nextVertices, pivot, vertices]);
+  }, [anchor, faces, filterBuffer, fps, frameCursor, meshInterpolation, nextVertices, pivot, vertices]);
   // STICKY geometry: while the exact frame's vertices are still loading (or
   // were evicted), keep showing the last built pose instead of returning null —
   // a blinking mesh is far more jarring than a briefly frozen one.
@@ -1276,10 +1281,31 @@ function MeshBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jointOffset, lift, position, feetTrusted]);
 
-  const joints = useMemo(
-    () => subjectVisible ? (frame.jointsCam ?? []).map((joint) => camToWorld(joint, anchor).sub(pivot)) : [],
-    [anchor, frame.jointsCam, pivot, subjectVisible],
-  );
+  // The skeleton must describe the SAME instant and the SAME smoothing as the
+  // mesh it is drawn inside. When the current frame's vertices are missing the
+  // mesh shows a nearby cached pose, so the joints follow it there (with that
+  // frame's pivot) instead of staying on the live frame and tearing away from
+  // the body; and they go through the mesh's filter for the same reason.
+  const filterJoints = useBodyRelativeFilter();
+  const jointSource = showMesh && meshFrame.meshFile ? meshFrame : frame;
+  const jointPivot = jointSource === meshFrame ? meshPivot : pivot;
+  const joints = useMemo(() => {
+    if (!subjectVisible) return [];
+    const source = jointSource.jointsCam ?? [];
+    if (source.length === 0) return [];
+    const flat = new Float32Array(source.length * 3);
+    source.forEach((joint, index) => {
+      const point = camToWorld(joint, anchor).sub(jointPivot);
+      flat[index * 3] = point.x;
+      flat[index * 3 + 1] = point.y;
+      flat[index * 3 + 2] = point.z;
+    });
+    filterJoints(flat, frameCursor, fps);
+    return Array.from({ length: source.length }, (_, index) =>
+      new THREE.Vector3(flat[index * 3], flat[index * 3 + 1], flat[index * 3 + 2]),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchor, filterJoints, fps, frameCursor, jointPivot, jointSource, subjectVisible]);
   const selected = useMemo(() => new Set(selectedJointIndices), [selectedJointIndices]);
 
   return (
