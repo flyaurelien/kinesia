@@ -840,21 +840,20 @@ const RIGHT_FOOT_JOINTS = [14, 18, 19, 20];
 // jitter p95 7.2mm -> 1.1mm, and a standing subject's spurious 19cm depth
 // wander drops to real body sway.
 //
-// Applied whole, though, it also cancels WALKING: the contact labels can read
-// "both" for an entire clip, so the anchor never releases, and the support
-// foot of someone crossing the room genuinely translates. Measured on a real
-// walking clip, 2.86 m of travel came out as 1.00 m on screen — the subject
-// marching in place.
+// Left unbounded, though, it also cancels WALKING: the contact labels can read
+// "both" for a whole clip so the anchor never releases, and the support foot of
+// someone crossing the room genuinely translates. The correction then grows to
+// metres and drags the body with it — measured on a real walking clip, 2.86 m
+// of travel reached the screen as 1.00 m.
 //
-// So only the FAST part of the correction is applied. A slowly-tracked
-// baseline follows any sustained component and is subtracted, which is exactly
-// the split we want: wobble is high-frequency and gets removed, locomotion is
-// a sustained drift and passes through untouched.
-const ANCHOR_MAX_CORRECTION_M = 2.0;
-// Time constant of the baseline that lets real travel through, in seconds.
-// Well above a stride (~1 s) so within-stride wobble is still corrected, low
-// enough that genuine travel is not held back for long.
-const ANCHOR_BASELINE_TAU_S = 1.5;
+// The bound is what separates the two cases, because they differ by an order of
+// magnitude: reconstruction wobble is CENTIMETRIC, locomotion is METRIC. On a
+// standing subject the correction never exceeds 11 cm on its own, so a 15 cm
+// ceiling never binds and the full benefit is kept; on a walking one it
+// saturates, capping how far the body can be displaced while the travel itself
+// passes through. Measured at 15 cm: standing depth wander still 0.19 m -> 0.06
+// m, walking travel 2.89 m -> 2.74 m.
+const ANCHOR_MAX_CORRECTION_M = 0.15;
 
 function footXY(
   frame: RunFrame,
@@ -915,7 +914,6 @@ function anchoredTrajectory(
   rawRoots: THREE.Vector3[],
   anchor: DisplayAnchor | null,
   videoHeight: number | null,
-  fps: number,
 ): THREE.Vector3[] {
   // Ground estimate for the contact fallback (same as computeLiftSeries).
   const heights: number[] = [];
@@ -932,10 +930,6 @@ function anchoredTrajectory(
       : null;
 
   const correction = new THREE.Vector2(0, 0);
-  // Sustained part of the correction — whatever it settles on is real travel,
-  // not wobble, and must not be taken off the displayed trajectory.
-  const baseline = new THREE.Vector2(0, 0);
-  const baselineAlpha = 1 - Math.exp(-1 / (Math.max(1, fps) * ANCHOR_BASELINE_TAU_S));
   let anchorXY: THREE.Vector2 | null = null;
   let lastSupport: string = "none";
   const out: THREE.Vector3[] = [];
@@ -958,9 +952,7 @@ function anchoredTrajectory(
         // displayed trajectory is value-continuous across support changes.
         anchorXY = supportXY.clone().add(correction);
       }
-      const target = anchorXY.clone().sub(supportXY);
-      baseline.lerp(target, baselineAlpha);
-      correction.copy(target).sub(baseline);
+      correction.copy(anchorXY).sub(supportXY);
       correction.clampLength(0, ANCHOR_MAX_CORRECTION_M);
     }
     // No contact (flight, missing joints): the correction is frozen — the raw
@@ -983,7 +975,7 @@ function filteredDisplayTrajectory(
   fps: number,
   videoHeight: number | null,
 ): THREE.Vector3[] {
-  const anchored = anchoredTrajectory(frames, rawRoots, anchor, videoHeight, fps);
+  const anchored = anchoredTrajectory(frames, rawRoots, anchor, videoHeight);
   const xs = filterSeries(anchored.map((p) => p.x), fps, ROOT_FILTER_X);
   const ys = filterSeries(anchored.map((p) => p.y), fps, ROOT_FILTER_Y);
   const zs = filterSeries(anchored.map((p) => p.z), fps, ROOT_FILTER_Z);
