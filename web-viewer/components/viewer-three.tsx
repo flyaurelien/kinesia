@@ -1297,15 +1297,28 @@ function MeshBody({
   // frame's pivot) instead of staying on the live frame and tearing away from
   // the body; and they go through the mesh's filter for the same reason.
   const filterJoints = useBodyRelativeFilter();
-  const jointSource = showMesh && meshFrame.meshFile ? meshFrame : frame;
-  const jointPivot = jointSource === meshFrame ? meshPivot : pivot;
+  const followsMesh = showMesh && Boolean(meshFrame.meshFile);
+  const jointSource = followsMesh ? meshFrame : frame;
+  const jointNext = followsMesh ? nextMeshFrame : frame;
+  const jointPivot = followsMesh ? meshPivot : pivot;
+  // Blend the SAME pair of frames by the SAME amount the mesh does. The mesh
+  // interpolates towards the next frame between playhead steps; joints that
+  // only ever showed the current frame therefore trailed it by up to a frame,
+  // which reads as the skeleton lagging inside the body.
+  const jointBlend = followsMesh ? Math.max(0, Math.min(1, meshInterpolation)) : 0;
   const joints = useMemo(() => {
     if (!subjectVisible) return [];
     const source = jointSource.jointsCam ?? [];
     if (source.length === 0) return [];
+    const next = jointNext.jointsCam ?? null;
+    const blendable = jointBlend > 1e-4 && next != null && next.length === source.length;
     const flat = new Float32Array(source.length * 3);
     source.forEach((joint, index) => {
       const point = camToWorld(joint, anchor).sub(jointPivot);
+      const other = blendable ? next![index] : null;
+      if (other) {
+        point.lerp(camToWorld(other, anchor).sub(jointPivot), jointBlend);
+      }
       flat[index * 3] = point.x;
       flat[index * 3 + 1] = point.y;
       flat[index * 3 + 2] = point.z;
@@ -1315,7 +1328,7 @@ function MeshBody({
       new THREE.Vector3(flat[index * 3], flat[index * 3 + 1], flat[index * 3 + 2]),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anchor, filterJoints, fps, frameCursor, jointPivot, jointSource, subjectVisible]);
+  }, [anchor, filterJoints, fps, frameCursor, jointBlend, jointNext, jointPivot, jointSource, subjectVisible]);
   const selected = useMemo(() => new Set(selectedJointIndices), [selectedJointIndices]);
 
   return (
