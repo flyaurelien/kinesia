@@ -1275,12 +1275,19 @@ function SceneObjectMesh({
           });
           if (parts.length === 0) return;
           const merged = parts[0];
-          // Centre it so the placement below positions its middle, matching how
-          // centreWorld was measured (the mask's bounding box centre).
+          // Origin at the middle of its FOOTPRINT, on its underside — the
+          // fitted position is a point on the floor, so an origin at the mesh's
+          // centre would bury half the object under it.
           merged.computeBoundingBox();
           const box = merged.boundingBox!;
           const mid = box.getCenter(new THREE.Vector3());
-          merged.translate(-mid.x, -mid.y, -mid.z);
+          const axis = object.upAxis === "X" ? "x" : object.upAxis === "Z" ? "z" : "y";
+          const base = box.min[axis];
+          merged.translate(
+            axis === "x" ? -base : -mid.x,
+            axis === "y" ? -base : -mid.y,
+            axis === "z" ? -base : -mid.z,
+          );
           loaded = merged;
           setGeometry(merged);
         });
@@ -1292,7 +1299,7 @@ function SceneObjectMesh({
       // drawing the previous tree when this runs.
       if (loaded) setTimeout(() => loaded?.dispose(), 0);
     };
-  }, [object.meshUrl]);
+  }, [object.meshUrl, object.upAxis]);
 
   // Ground it the way bodies are grounded: the viewer draws its grid at z = 0
   // and places each body so its lowest point rests there, so an object placed
@@ -1305,9 +1312,9 @@ function SceneObjectMesh({
   const position = useMemo(() => {
     const source = object.positionWorld ?? object.centreWorld;
     const point = worldToViewer(new THREE.Vector3(...source), anchor);
-    // The fit gives a point ON the floor, the fallback the object's middle.
-    const z = object.positionWorld ? 0 : object.solved.heightM / 2;
-    return new THREE.Vector3(point.x, point.y, z);
+    // Both the fitted point and the mesh origin now sit on the floor, so the
+    // object rests on the grid the bodies stand on.
+    return new THREE.Vector3(point.x, point.y, 0);
   }, [anchor, object.centreWorld, object.positionWorld, object.solved.heightM]);
 
   if (!geometry) return null;
