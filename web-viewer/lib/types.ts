@@ -143,6 +143,12 @@ export type SceneObject = {
   scale: number;
   upAxis: "X" | "Y" | "Z";
   centreWorld: [number, number, number];
+  // Floor position and heading fitted so the mesh's projected silhouette
+  // matches the observed mask — the mask's bbox centre is not the projection
+  // of the 3D centre, and says nothing about which way the object faces.
+  positionWorld: [number, number, number] | null;
+  yawRad: number | null;
+  fitIou: number | null;
   solved: { depthM: number; heightM: number; widthM: number; floorZ: number };
 };
 

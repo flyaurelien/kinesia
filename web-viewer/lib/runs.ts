@@ -1054,6 +1054,11 @@ async function loadSceneObjects(runId: string): Promise<SceneObject[]> {
       scale,
       upAxis: (["X", "Y", "Z"].includes(String(raw?.up_axis)) ? String(raw?.up_axis) : "Y") as "X" | "Y" | "Z",
       centreWorld: [Number(centre[0]), Number(centre[1]), Number(centre[2])],
+      positionWorld: Array.isArray(raw?.position_world) && raw!.position_world.length >= 3
+        ? [Number(raw!.position_world[0]), Number(raw!.position_world[1]), Number(raw!.position_world[2])]
+        : null,
+      yawRad: numericOrNull(raw?.yaw_rad),
+      fitIou: numericOrNull(raw?.fit_iou),
       solved: {
         depthM: numericOrNull(solved.depth_m) ?? 0,
         heightM: numericOrNull(solved.height_m) ?? 0,

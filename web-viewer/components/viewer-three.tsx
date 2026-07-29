@@ -1299,10 +1299,16 @@ function SceneObjectMesh({
   // by raw world height instead lands wherever that height happens to fall —
   // below the floor, as it turned out. Only X and Y come from the solved world
   // position; Z puts the object's underside on the same grid.
+  // Prefer the silhouette-fitted floor position: it is where the object must
+  // stand for its outline to be the one observed, which the mask's bbox centre
+  // only approximates. Fall back to that centre when no fit was written.
   const position = useMemo(() => {
-    const centre = worldToViewer(new THREE.Vector3(...object.centreWorld), anchor);
-    return new THREE.Vector3(centre.x, centre.y, object.solved.heightM / 2);
-  }, [anchor, object.centreWorld, object.solved.heightM]);
+    const source = object.positionWorld ?? object.centreWorld;
+    const point = worldToViewer(new THREE.Vector3(...source), anchor);
+    // The fit gives a point ON the floor, the fallback the object's middle.
+    const z = object.positionWorld ? 0 : object.solved.heightM / 2;
+    return new THREE.Vector3(point.x, point.y, z);
+  }, [anchor, object.centreWorld, object.positionWorld, object.solved.heightM]);
 
   if (!geometry) return null;
   // The mesh's own up axis is not the viewer's: its solved height runs along
@@ -1313,9 +1319,13 @@ function SceneObjectMesh({
       : object.upAxis === "X"
         ? new THREE.Euler(0, 0, Math.PI / 2)
         : new THREE.Euler(0, 0, 0);
+  // The fitted heading turns the object about the viewer's vertical, outside
+  // the axis fix so it is a heading rather than a spin about the mesh's own up.
+  const heading = (object.yawRad ?? 0) - Math.PI / 2;
 
   return (
-    <group position={position} rotation={toViewerUp} scale={object.scale}>
+    <group position={position} rotation={[0, 0, heading]}>
+    <group rotation={toViewerUp} scale={object.scale}>
       <mesh geometry={geometry}>
         <meshStandardMaterial
           color="#9aa6bd"
@@ -1326,6 +1336,7 @@ function SceneObjectMesh({
           side={THREE.DoubleSide}
         />
       </mesh>
+    </group>
     </group>
   );
 }
