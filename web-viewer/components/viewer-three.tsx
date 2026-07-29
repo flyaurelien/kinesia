@@ -1328,7 +1328,14 @@ function SceneObjectMesh({
         : new THREE.Euler(0, 0, 0);
   // The fitted heading turns the object about the viewer's vertical, outside
   // the axis fix so it is a heading rather than a spin about the mesh's own up.
-  const heading = (object.yawRad ?? 0) - Math.PI / 2;
+  //
+  // The extra half turn is derived, not tuned. The fit expresses the mesh in a
+  // frame that sends its axes to (-x, z, y); `toViewerUp` here sends them to
+  // (x, -z, y). Both are proper rotations, but they differ by exactly a half
+  // turn about the shared up axis — so a heading solved in one frame arrives
+  // backwards in the other. That is the 180 degrees, and it is why the object
+  // could be in precisely the right place, at the right size, facing away.
+  const heading = (object.yawRad ?? 0) - Math.PI / 2 + Math.PI;
 
   return (
     <group position={position} rotation={[0, 0, heading]}>
