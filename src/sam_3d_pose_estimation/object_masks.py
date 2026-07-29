@@ -85,6 +85,28 @@ def subject_silhouette(
     return closed.astype(bool)
 
 
+def box_silhouette(
+    box: tuple[float, float, float, float], width: int, height: int
+) -> np.ndarray:
+    """Stand-in for the subject's outline, from the tracking box alone.
+
+    A box covers about three times the area the body really occupies, so it
+    reports the subject as being in the way more often than it is. That is the
+    right way to be wrong when the reconstruction has not run yet and the real
+    outlines do not exist: it passes over a usable frame now and then, never
+    accepts one where the subject is actually blocking the object.
+    """
+    canvas = np.zeros((height, width), bool)
+    x1, y1, x2, y2 = box
+    left, right = sorted((int(round(x1)), int(round(x2))))
+    top, bottom = sorted((int(round(y1)), int(round(y2))))
+    canvas[
+        max(top, 0) : min(bottom + 1, height),
+        max(left, 0) : min(right + 1, width),
+    ] = True
+    return canvas
+
+
 def score_frame(subject: np.ndarray, obj: np.ndarray) -> dict | None:
     """How badly the subject spoils this frame for reconstructing the object.
 
@@ -104,9 +126,29 @@ def score_frame(subject: np.ndarray, obj: np.ndarray) -> dict | None:
         return None
     return {
         "occlusion": float((subject & obj).sum() / total),
+        "clearance": _gap_between(subject, obj),
         "object_px": total,
         "bottom_row": bottom,
     }
+
+
+def _gap_between(subject: np.ndarray, obj: np.ndarray) -> float:
+    """Pixels of clear space between the subject and the object, 0 if touching.
+
+    Overlap alone cannot separate frames where the subject merely grazes the
+    object from frames where they stand well away — and with boxes, which are
+    much coarser than a body, whole runs of frames tie on it. How far away the
+    subject is breaks those ties in the direction that is obviously better.
+    """
+    rows = np.nonzero(subject.any(axis=1))[0]
+    cols = np.nonzero(subject.any(axis=0))[0]
+    obj_rows = np.nonzero(obj.any(axis=1))[0]
+    obj_cols = np.nonzero(obj.any(axis=0))[0]
+    if rows.size == 0 or obj_rows.size == 0:
+        return float("inf")
+    horizontal = max(cols[0] - obj_cols[-1], obj_cols[0] - cols[-1], 0)
+    vertical = max(rows[0] - obj_rows[-1], obj_rows[0] - rows[-1], 0)
+    return float(np.hypot(horizontal, vertical))
 
 
 def usable_for_depth(mask: np.ndarray, height: int) -> bool:
@@ -142,7 +184,7 @@ def rank_frames(
         score = score_frame(silhouette, object_mask)
         if score is not None:
             scored.append({"frame": index, **score})
-    scored.sort(key=lambda s: (s["occlusion"], -s["object_px"]))
+    scored.sort(key=lambda s: (s["occlusion"], -s["clearance"], -s["object_px"]))
 
     spread: list[dict] = []
     for candidate in scored:
@@ -193,8 +235,39 @@ def load_subject_silhouettes(
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
         if vertices.size == 0:
             continue
+        frame = int(record.get("video_frame", index))
         silhouettes.append(
-            (index, subject_silhouette(vertices, float(focal), width, height))
+            (frame, subject_silhouette(vertices, float(focal), width, height))
         )
     log(f"subject silhouettes on {len(silhouettes)} of {len(records)} frames")
     return silhouettes
+
+
+def load_subject_boxes(
+    track_path: Path,
+    log: Callable[[str], None] = print,
+) -> tuple[list[tuple[int, np.ndarray]], int, int]:
+    """Where the subject is on each frame, from the detection step's track.
+
+    Available before any reconstruction has run, which is what lets an object's
+    shape be built while the subject is still being reconstructed.
+    """
+    import json
+
+    data = json.loads(track_path.read_text())
+    width = int(data.get("videoWidth") or 0)
+    height = int(data.get("videoHeight") or 0)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"track file has no video size: {track_path}")
+
+    covered: dict[int, np.ndarray] = {}
+    for subject in data.get("subjects") or []:
+        for key, box in (subject.get("frames") or {}).items():
+            if not box or len(box) < 4:
+                continue
+            frame = int(key)
+            mask = box_silhouette(tuple(box[:4]), width, height)
+            # Several subjects on one frame all block the object.
+            covered[frame] = covered[frame] | mask if frame in covered else mask
+    log(f"subject boxes on {len(covered)} frames")
+    return sorted(covered.items()), width, height

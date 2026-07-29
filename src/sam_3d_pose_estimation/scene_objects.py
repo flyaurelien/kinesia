@@ -52,6 +52,14 @@ FINALIST_FRAMES = 3
 # costs minutes and gigabytes, and a comma-separated list is easy to overfill.
 MAX_OBJECTS = 4
 
+# Shapes that are built but not yet standing anywhere.
+PENDING_DIR = ".pending"
+
+# Prefix the job runner recognises on a log line to show what is happening.
+# The object steps have no frame count to drive a progress bar, so without
+# this the interface shows an idle bar for the several minutes they take.
+STAGE_MARKER = "[scene]"
+
 
 def cam_to_world(point: np.ndarray) -> np.ndarray:
     """Camera space -> world space, the pipeline's convention."""
@@ -414,51 +422,53 @@ def _read_frames(video_path: Path, indices: list[int]) -> dict[int, Any]:
     return frames
 
 
-def build_scene_objects(
+def build_object_shapes(
     run_dir: Path,
     prompts: tuple[str, ...],
+    video_path: Path,
+    subject_track: Path | None = None,
     project_root: Path | None = None,
     log: Callable[[str], None] = print,
 ) -> dict:
-    """Reconstruct each named object and place it in the subject's world.
+    """Find each named object and reconstruct its shape. No placement yet.
 
-    Never raises for a missing model or a prompt that matches nothing: this runs
-    after a finished reconstruction, and losing the person because a chair could
-    not be found would be a poor trade.
+    This is the slow half — minutes per object — and it needs nothing from the
+    subject's reconstruction, so it runs before it rather than after. Where the
+    object then STANDS does depend on the subject: the floor is measured from
+    their feet, and that shared floor is the whole reason the two end up in one
+    space. So the shapes wait here and are placed the moment the run has feet
+    to offer.
     """
     from . import object_masks, object_shapes
     from .sam3d_runtime import select_device, try_build_human_detector
     from .subject_preview import DEFAULT_SAM3_CODE_ROOT
 
     if not prompts:
-        return {"objects": [], "skipped": None}
+        return {"shapes": [], "failures": [], "skipped": None}
 
     reason = object_shapes.unavailable_reason(object_shapes.objects_root(project_root))
     if reason:
         log(f"skipping scene objects: {reason}")
-        return {"objects": [], "skipped": reason}
-
-    metadata = json.loads((run_dir / "run_metadata.json").read_text())
-    records = [r for r in (metadata.get("records") or []) if isinstance(r, dict)]
-    width, height = int(metadata["video_width"]), int(metadata["video_height"])
-    video_path = Path(metadata.get("video_input") or "")
+        return {"shapes": [], "failures": [], "skipped": reason}
     if not video_path.exists():
         log(f"skipping scene objects: source video missing at {video_path}")
-        return {"objects": [], "skipped": "source video missing"}
+        return {"shapes": [], "failures": [], "skipped": "source video missing"}
 
-    silhouettes = object_masks.load_subject_silhouettes(records, width, height, log)
-    if not silhouettes:
-        log("skipping scene objects: no reconstructed subject to judge occlusion by")
-        return {"objects": [], "skipped": "no subject silhouettes"}
+    subject_masks, width, height = _subject_coverage(
+        run_dir, video_path, subject_track, log
+    )
+    if not subject_masks:
+        log("skipping scene objects: nothing says where the subject is")
+        return {"shapes": [], "failures": [], "skipped": "no subject coverage"}
 
     scene_dir = run_dir / "scene"
     scene_dir.mkdir(parents=True, exist_ok=True)
 
     # Spread the first looks across the clip so a subject parked in front of the
     # object early on cannot hide it from every seed.
-    seed_indices = [
-        silhouettes[round(i * (len(silhouettes) - 1) / max(SEED_FRAMES - 1, 1))][0]
-        for i in range(min(SEED_FRAMES, len(silhouettes)))
+    seed_frames = [
+        subject_masks[round(i * (len(subject_masks) - 1) / max(SEED_FRAMES - 1, 1))][0]
+        for i in range(min(SEED_FRAMES, len(subject_masks)))
     ]
 
     detector = try_build_human_detector(
@@ -468,18 +478,20 @@ def build_scene_objects(
     )
     if detector is None:
         log("skipping scene objects: the detection model is unavailable")
-        return {"objects": [], "skipped": "detector unavailable"}
+        return {"shapes": [], "failures": [], "skipped": "detector unavailable"}
 
     # Segment everything first, then let the detection model go before the
     # shape model starts: each holds several gigabytes, and nothing needs them
     # both at once.
     found: list[dict] = []
     failures: list[dict] = []
-    for prompt in prompts:
+    for position, prompt in enumerate(prompts, start=1):
+        # Marker the job runner watches for, so the interface can say which
+        # object is being worked on instead of showing a still bar for minutes.
+        log(f"{STAGE_MARKER} looking for {prompt} ({position}/{len(prompts)})")
         try:
             found.append(_locate_object(
-                prompt, scene_dir, video_path, records, silhouettes,
-                seed_indices, detector, log,
+                prompt, scene_dir, video_path, subject_masks, seed_frames, detector, log,
             ))
         except (RuntimeError, ValueError, OSError) as error:
             log(f"could not add '{prompt}': {error}")
@@ -488,16 +500,111 @@ def build_scene_objects(
     del detector
     _release_memory()
 
-    placed: list[dict] = []
-    for target in found:
+    shaped: list[dict] = []
+    for position, target in enumerate(found, start=1):
+        log(f"{STAGE_MARKER} reconstructing {target['prompt']} "
+            f"({position}/{len(found)}, a few minutes)")
         try:
-            placed.append(_shape_and_place(target, run_dir, scene_dir, project_root, log))
+            shaped.append(_shape_object(target, scene_dir, project_root, log))
         except (RuntimeError, ValueError, OSError) as error:
             log(f"could not add '{target['prompt']}': {error}")
             failures.append({"prompt": target["prompt"], "error": str(error)})
 
     object_shapes.clear_cache(scene_dir / ".cache")
+    return {"shapes": shaped, "failures": failures, "skipped": None}
+
+
+def place_built_shapes(
+    run_dir: Path,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Stand every reconstructed shape on the floor the subject's feet defined.
+
+    Seconds of work, so it runs as soon as the reconstruction has produced
+    enough frames rather than at the end of everything.
+    """
+    scene_dir = run_dir / "scene"
+    pending_dir = scene_dir / PENDING_DIR
+    waiting = sorted(pending_dir.glob("*.json")) if pending_dir.is_dir() else []
+    if not waiting:
+        return {"objects": [], "failures": [], "skipped": None}
+
+    placed: list[dict] = []
+    failures: list[dict] = []
+    for position, entry in enumerate(waiting, start=1):
+        target = json.loads(entry.read_text())
+        log(f"{STAGE_MARKER} placing {target['prompt']} ({position}/{len(waiting)})")
+        name = target["name"]
+        try:
+            record = place_object(
+                run_dir, scene_dir / f"{name}.glb", scene_dir / f"{name}_mask.png",
+                name, log,
+            )
+        except (RuntimeError, ValueError, OSError, KeyError) as error:
+            log(f"could not place '{target['prompt']}': {error}")
+            failures.append({"prompt": target["prompt"], "error": str(error)})
+            continue
+        record["prompt"] = target["prompt"]
+        record["source_frame"] = target["source_frame"]
+        record["detection_score"] = target["detection_score"]
+        (scene_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
+        entry.unlink()
+        placed.append(record)
     return {"objects": placed, "failures": failures, "skipped": None}
+
+
+def build_scene_objects(
+    run_dir: Path,
+    prompts: tuple[str, ...],
+    project_root: Path | None = None,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Reconstruct each named object and place it, against a finished run."""
+    metadata = json.loads((run_dir / "run_metadata.json").read_text())
+    built = build_object_shapes(
+        run_dir, prompts, Path(metadata.get("video_input") or ""),
+        subject_track=None, project_root=project_root, log=log,
+    )
+    if built["skipped"]:
+        return {"objects": [], "failures": built["failures"], "skipped": built["skipped"]}
+    placed = place_built_shapes(run_dir, log)
+    return {
+        "objects": placed["objects"],
+        "failures": built["failures"] + placed["failures"],
+        "skipped": None,
+    }
+
+
+def _subject_coverage(
+    run_dir: Path,
+    video_path: Path,
+    subject_track: Path | None,
+    log: Callable[[str], None],
+) -> tuple[list[tuple[int, Any]], int, int]:
+    """Where the subject is on each frame, by whichever means exist yet.
+
+    Reconstructed outlines when the run has produced them, the detection step's
+    boxes when it has not — the boxes are coarser, but they are available
+    before the run starts, which is the point.
+    """
+    from . import object_masks
+
+    metadata = json.loads((run_dir / "run_metadata.json").read_text())
+    records = [r for r in (metadata.get("records") or []) if isinstance(r, dict)]
+    width = int(metadata.get("video_width") or 0)
+    height = int(metadata.get("video_height") or 0)
+
+    if records and width and height:
+        silhouettes = object_masks.load_subject_silhouettes(records, width, height, log)
+        if silhouettes:
+            return silhouettes, width, height
+
+    if subject_track and subject_track.exists():
+        boxes, width, height = object_masks.load_subject_boxes(subject_track, log)
+        if boxes:
+            return boxes, width, height
+
+    return [], width, height
 
 
 def _release_memory() -> None:
@@ -520,9 +627,8 @@ def _locate_object(
     prompt: str,
     scene_dir: Path,
     video_path: Path,
-    records: list[dict],
-    silhouettes: list[tuple[int, Any]],
-    seed_indices: list[int],
+    subject_masks: list[tuple[int, Any]],
+    seed_frames: list[int],
     detector: Any,
     log: Callable[[str], None],
 ) -> dict:
@@ -534,14 +640,13 @@ def _locate_object(
     from . import object_masks
 
     name = object_name(prompt)
-    video_index = {i: int(records[i].get("video_frame", i)) for i, _ in silhouettes}
 
     # Where is it? Any decent look will do: this outline only has to say which
     # pixels to watch while the subject moves around.
-    seed_frames = _read_frames(video_path, [video_index[i] for i in seed_indices])
+    seeds = _read_frames(video_path, seed_frames)
     coarse = None
-    for index in seed_indices:
-        frame = seed_frames.get(video_index[index])
+    for index in seed_frames:
+        frame = seeds.get(index)
         if frame is None:
             continue
         found = object_masks.segment_object(frame, prompt, detector)
@@ -550,15 +655,15 @@ def _locate_object(
         mask, score = found
         if coarse is None or mask.sum() > coarse.sum():
             coarse = mask
-            log(f"'{prompt}' found on frame {video_index[index]} "
+            log(f"'{prompt}' found on frame {index} "
                 f"(score {score:.2f}, {int(mask.sum())} px)")
     if coarse is None:
         raise ValueError(f"'{prompt}' was not found anywhere in the clip")
 
-    # When is it clearest? Ranking is free — the subject's outlines are already
-    # in hand — so every frame is considered, not a sample.
+    # When is it clearest? Ranking is free — the subject's whereabouts are
+    # already in hand — so every frame is considered, not a sample.
     candidates = object_masks.rank_frames(
-        coarse, silhouettes, limit=FINALIST_FRAMES
+        coarse, subject_masks, limit=FINALIST_FRAMES
     )
     if not candidates:
         raise ValueError(
@@ -566,16 +671,16 @@ def _locate_object(
             "so its depth cannot be measured"
         )
     log(f"'{prompt}': best frames "
-        + ", ".join(f"{video_index[c['frame']]} ({c['occlusion'] * 100:.1f}% hidden)"
+        + ", ".join(f"{c['frame']} ({c['occlusion'] * 100:.1f}% hidden)"
                     for c in candidates))
 
     # Segment the finalists properly and keep the fullest outline.
     finalist_frames = _read_frames(
-        video_path, [video_index[c["frame"]] for c in candidates]
+        video_path, [c["frame"] for c in candidates]
     )
     best: tuple[int, Any, float] | None = None
     for candidate in candidates:
-        index = video_index[candidate["frame"]]
+        index = candidate["frame"]
         frame = finalist_frames.get(index)
         if frame is None:
             continue
@@ -610,18 +715,17 @@ def _locate_object(
     }
 
 
-def _shape_and_place(
+def _shape_object(
     target: dict,
-    run_dir: Path,
     scene_dir: Path,
     project_root: Path | None,
     log: Callable[[str], None],
 ) -> dict:
-    """Reconstruct a located object's shape and solve where it stands."""
+    """Reconstruct a located object's shape and note that it awaits a floor."""
     from . import object_shapes
 
     name = target["name"]
-    mesh_path = object_shapes.reconstruct_mesh(
+    object_shapes.reconstruct_mesh(
         image_path=target["image_path"],
         mask_path=target["mask_path"],
         output_glb=scene_dir / f"{name}.glb",
@@ -629,9 +733,15 @@ def _shape_and_place(
         root=object_shapes.objects_root(project_root),
         log=log,
     )
-    record = place_object(run_dir, mesh_path, target["mask_path"], name, log)
-    record["prompt"] = target["prompt"]
-    record["source_frame"] = target["source_frame"]
-    record["detection_score"] = target["detection_score"]
-    (scene_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
+    # Kept out of the way of the viewer, which reads scene/*.json as objects it
+    # can draw — this one has no position yet.
+    pending_dir = scene_dir / PENDING_DIR
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "prompt": target["prompt"],
+        "name": name,
+        "source_frame": target["source_frame"],
+        "detection_score": target["detection_score"],
+    }
+    (pending_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
     return record

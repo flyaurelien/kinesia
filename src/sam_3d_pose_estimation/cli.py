@@ -205,8 +205,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scene_parser.add_argument("--run-id", required=True)
     scene_parser.add_argument(
-        "--prompts", required=True,
+        "--prompts", default="",
         help="objects to add, comma separated (for example: chair, table)",
+    )
+    scene_parser.add_argument(
+        "--stage", default="both", choices=["shape", "place", "both"],
+        help=(
+            "shape: find each object and reconstruct it, which needs nothing "
+            "from the subject and so can run first. place: stand the built "
+            "shapes on the floor the subject's feet measured."
+        ),
+    )
+    scene_parser.add_argument(
+        "--video", type=Path, default=None,
+        help="source video (defaults to the one recorded in the run)",
+    )
+    scene_parser.add_argument(
+        "--subject-track", type=Path, default=None,
+        help="detection-step track, used to avoid the subject before the run has outlines",
     )
     scene_parser.add_argument("--json", action="store_true")
 
@@ -626,25 +642,40 @@ def cmd_scene(args: argparse.Namespace) -> int:
     complete, and an object that could not be found is a shortfall to report,
     not a reason to mark the reconstruction failed.
     """
-    from .scene_objects import build_scene_objects, parse_object_prompts
+    from .scene_objects import (
+        build_object_shapes, parse_object_prompts, place_built_shapes,
+    )
     from .workspace import run_dir, sanitize_run_id
 
-    prompts = parse_object_prompts(args.prompts)
-    if not prompts:
-        print("no objects requested")
-        return 0
-
     directory = run_dir(sanitize_run_id(args.run_id))
-    if not (directory / "run_metadata.json").exists():
+    metadata_path = directory / "run_metadata.json"
+    if not metadata_path.exists():
         print(f"no such run: {args.run_id}")
         return 2
 
-    result = build_scene_objects(directory, prompts)
+    result: dict = {}
+    if args.stage in {"shape", "both"}:
+        prompts = parse_object_prompts(args.prompts)
+        if not prompts:
+            print("no objects requested")
+            return 0
+        video = args.video
+        if video is None:
+            video = Path(json.loads(metadata_path.read_text()).get("video_input") or "")
+        result = build_object_shapes(
+            directory, prompts, video, subject_track=args.subject_track,
+        )
+        built = ", ".join(shape["name"] for shape in result["shapes"]) or "none"
+        print(f"objects reconstructed: {built}")
+
+    if args.stage in {"place", "both"}:
+        placed = place_built_shapes(directory)
+        result = {**result, **placed}
+        names = ", ".join(obj["name"] for obj in placed["objects"]) or "none"
+        print(f"objects placed: {names}")
+
     if args.json:
-        print(json.dumps(result, indent=2))
-    else:
-        added = ", ".join(obj["name"] for obj in result["objects"]) or "none"
-        print(f"objects added: {added}")
+        print(json.dumps(result, indent=2, default=str))
     return 0
 
 
