@@ -269,8 +269,17 @@ def fit_pose_to_silhouette(
     cx, cy = width / 2.0, height / 2.0
     verts = mesh_vertices * scale
     # Work in a frame where Z is up and the object's underside is at zero.
+    #
+    # Reordering axes to put `up` last is a PERMUTATION, and an odd one mirrors
+    # the object rather than rotating it. A mirrored chair is indistinguishable
+    # from one turned 180 degrees, so the fit would land on the right spot at
+    # the right size facing exactly backwards — which is what it did. Negating
+    # one axis when the permutation is odd keeps the handedness.
     order = [i for i in range(3) if i != up_axis]
-    local = np.stack([verts[:, order[0]], verts[:, order[1]], verts[:, up_axis]], axis=1)
+    parity = 1.0 if (order[0], order[1], up_axis) in {(0, 1, 2), (1, 2, 0), (2, 0, 1)} else -1.0
+    local = np.stack(
+        [parity * verts[:, order[0]], verts[:, order[1]], verts[:, up_axis]], axis=1
+    )
     local[:, 2] -= local[:, 2].min()
     local[:, 0] -= local[:, 0].mean()
     local[:, 1] -= local[:, 1].mean()
