@@ -19,10 +19,11 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-# The bottom band of the object that fixes its depth. Fifteen rows is about the
-# thickness of a chair leg's contact patch at the distances these clips are shot
-# at — narrow enough to mean "the feet", wide enough to survive a ragged mask.
-CONTACT_BAND_PX = 15
+# How many rows the object's lowest point may be raised by the subject before
+# the frame is refused. A couple of pixels is mask noise; more than that and the
+# depth being read is the subject's, not the object's — a few pixels here is
+# tens of centimetres out there.
+CONTACT_TOLERANCE_PX = 3
 
 # Two candidate frames closer together than this show the same instant, so
 # keeping both would waste the expensive re-segmentation passes on a duplicate.
@@ -119,10 +120,18 @@ def score_frame(subject: np.ndarray, obj: np.ndarray) -> dict | None:
         return None
     rows = np.nonzero(obj.any(axis=1))[0]
     bottom = int(rows.max())
-    band = obj.copy()
-    band[: max(bottom - CONTACT_BAND_PX, 0)] = False
-    band_total = int(band.sum())
-    if band_total and (subject & band).sum() > 0:
+
+    # The depth comes from the object's lowest row, so that row is the only
+    # part the subject genuinely must not stand on. An earlier version refused
+    # any frame where the subject touched a band across the whole base, which
+    # for a long object like a table means every frame — the band spans the
+    # full width, and someone sitting at one end of it hides none of the
+    # contact that matters.
+    visible = obj & ~subject
+    if not visible.any():
+        return None
+    visible_bottom = int(np.nonzero(visible.any(axis=1))[0].max())
+    if bottom - visible_bottom > CONTACT_TOLERANCE_PX:
         return None
     return {
         "occlusion": float((subject & obj).sum() / total),
