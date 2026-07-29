@@ -65,8 +65,50 @@ def median_focal(records: list[dict]) -> float | None:
     return float(np.median(values)) if values else None
 
 
+def calibrate_floor_from_feet(records: list[dict], height: int) -> tuple[float, float] | None:
+    """Fit the image->depth relation of the FLOOR from the subject's own feet.
+
+    Every subject in a scene agrees with every other because they all reach
+    world space the same way: through the depth this pipeline estimates. An
+    object placed by textbook geometry instead does NOT inherit that estimate's
+    biases, so it lands beside them rather than among them — which is exactly
+    what a chair next to a person looks like when it is subtly wrong.
+
+    So the mapping is measured rather than assumed. A point on the floor at
+    depth z projects to v = f * h / z, so v * z is constant for every floor
+    point — and the subject's feet ARE floor points, sampled across the clip.
+    Fitting that constant captures the effective camera the reconstruction
+    behaves as if it had, including whatever bias it carries. Returns
+    (v_times_z, residual_fraction).
+    """
+    products: list[float] = []
+    cy = height / 2.0
+    for record in records:
+        joints = record.get("joints_cam_xyz")
+        focal = record.get("focal_length")
+        if not joints or not focal:
+            continue
+        feet = [np.asarray(joints[i], dtype=np.float64) for i in FOOT_JOINTS
+                if i < len(joints) and joints[i]]
+        if not feet:
+            continue
+        lowest = max(feet, key=lambda p: p[1])  # camera y grows downward
+        if lowest[2] <= 1e-6:
+            continue
+        v = float(focal) * lowest[1] / lowest[2]  # image row, relative to centre
+        products.append(v * lowest[2])
+    if len(products) < 30:
+        return None
+    values = np.asarray(products)
+    median = float(np.median(values))
+    if abs(median) < 1e-6:
+        return None
+    return median, float(values.std() / abs(median))
+
+
 def solve_placement(
-    mask: np.ndarray, focal: float, floor_z: float, width: int, height: int
+    mask: np.ndarray, focal: float, floor_z: float, width: int, height: int,
+    v_times_z: float | None = None,
 ) -> dict:
     """Where the object sits, in world metres, from its mask and the floor."""
     ys, xs = np.nonzero(mask)
@@ -75,16 +117,22 @@ def solve_placement(
     u0, u1 = float(xs.min()), float(xs.max())
     v0, v1 = float(ys.min()), float(ys.max())
 
-    # Pinhole, principal point at the image centre — the same model the
-    # reconstruction used, so the two agree by construction.
     cx, cy = width / 2.0, height / 2.0
-    # Camera y grows downward in the image and world z is up (world z = -cam y),
-    # so the mask's BOTTOM edge is the object's lowest point.
-    ray_y = (v1 - cy) / focal  # cam y per unit depth
-    if abs(ray_y) < 1e-9:
-        raise ValueError("object bottom is on the horizon; depth undetermined")
-    # world_z = -cam_y = -(ray_y * depth) must equal the floor.
-    depth = -floor_z / ray_y
+    if v_times_z is not None:
+        # Calibrated: the object's bottom is a floor point like the feet were,
+        # so it obeys the same constant.
+        v_bottom = v1 - cy
+        if abs(v_bottom) < 1e-6:
+            raise ValueError("object bottom is on the horizon; depth undetermined")
+        depth = v_times_z / v_bottom
+        # The focal implied by that same fit, used for the lateral direction so
+        # both axes come from one calibration rather than two sources.
+        focal = v_times_z / max(abs(floor_z), 1e-6)
+    else:
+        ray_y = (v1 - cy) / focal
+        if abs(ray_y) < 1e-9:
+            raise ValueError("object bottom is on the horizon; depth undetermined")
+        depth = -floor_z / ray_y
     if depth <= 0:
         raise ValueError(f"non-physical depth {depth:.3f} m — check the floor estimate")
 
@@ -129,9 +177,22 @@ def main() -> int:
     if mask is None:
         print(f"cannot read mask: {args.mask}")
         return 2
+    height_px = int(metadata["video_height"])
+    calib = calibrate_floor_from_feet(records, height_px)
+    if calib is not None:
+        v_times_z, residual = calib
+        print(f"floor calibrated on the subject's feet: v*z = {v_times_z:.1f} "
+              f"(spread {residual * 100:.1f}%, effective focal {v_times_z / abs(floor_z):.0f} px "
+              f"vs {focal:.0f} recorded)")
+    else:
+        v_times_z, residual = None, None
+        print("not enough foot samples to calibrate; falling back to the recorded focal")
     placement = solve_placement(
-        mask > 0, focal, floor_z, int(metadata["video_width"]), int(metadata["video_height"])
+        mask > 0, focal, floor_z, int(metadata["video_width"]), height_px, v_times_z
     )
+    placement["calibrated"] = v_times_z is not None
+    if residual is not None:
+        placement["calibration_spread"] = residual
 
     mesh = trimesh.load(args.mesh, force="mesh")
     vertices = np.asarray(mesh.vertices)
