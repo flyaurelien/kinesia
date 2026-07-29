@@ -25,6 +25,10 @@ export type GenerationJob = {
   processedFrames: number;
   totalFrames: number | null;
   progressPercent: number | null;
+  // What the job is doing when there are no frames to count — reconstructing a
+  // chair takes minutes and would otherwise show as a motionless bar. Null
+  // while the subject is being reconstructed, where the frame count says it.
+  stage: string | null;
   error: string | null;
   inputVideoPath: string;
   runDir: string;
@@ -626,6 +630,8 @@ function runCommand(job: GenerationJob, args: string[]): Promise<number> {
       for (const line of text.split(/\r?\n/g)) {
         pushLog(job, line);
         void appendRunLog(job, line);
+        const marked = /^\[scene\] (.+)$/.exec(line.trim());
+        if (marked) job.stage = marked[1];
       }
       updateProgress(job);
     };
@@ -691,6 +697,46 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
   }, 1000);
 
   try {
+    // Scene object shapes, before the person rather than after. Reconstructing
+    // a chair needs nothing from the subject — one frame and one outline — so
+    // there is no reason to make it wait behind the run. Where the object
+    // STANDS is a different matter: the floor is measured from the subject's
+    // feet, and that shared floor is what puts both in one space, so the
+    // placement happens further down, once the run has feet to offer.
+    const sceneObjectPrompts = (options.sceneObjectPromptsRaw ?? "").trim();
+    if (sceneObjectPrompts && !isCanceled(job)) {
+      job.stage = `preparing scene objects: ${sceneObjectPrompts}`;
+      try {
+        const shapeArgs = [
+          "run",
+          "sam3d",
+          "scene",
+          "--run-id",
+          job.runId,
+          "--prompts",
+          sceneObjectPrompts,
+          "--stage",
+          "shape",
+          "--video",
+          runVideoInputPath,
+        ];
+        if (options.subjectTrackFile) {
+          shapeArgs.push("--subject-track", options.subjectTrackFile);
+        }
+        const shapeCode = await runCommand(job, shapeArgs);
+        if (shapeCode !== 0) {
+          await appendRunLog(job, `scene object shapes exited with code ${shapeCode}`);
+        }
+      } catch (error) {
+        await appendRunLog(job, `scene object shapes failed: ${String(error)}`);
+      }
+      // Back to the frame count, which speaks for the run itself.
+      job.stage = null;
+    }
+    if (isCanceled(job)) {
+      return;
+    }
+
     const runArgs = [
       "run",
       "sam3d",
@@ -749,6 +795,35 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
       return;
     }
 
+    // Now that the run has measured the floor from the subject's feet, the
+    // shapes built at the start can be stood on it. Seconds of work, and put
+    // before the analysis so the objects show up in the viewer as early as
+    // they possibly can.
+    if (sceneObjectPrompts && !isCanceled(job)) {
+      job.stage = "placing scene objects";
+      try {
+        const placeCode = await runCommand(job, [
+          "run",
+          "sam3d",
+          "scene",
+          "--run-id",
+          job.runId,
+          "--stage",
+          "place",
+        ]);
+        if (placeCode !== 0) {
+          await appendRunLog(job, `scene object placement exited with code ${placeCode}`);
+        }
+      } catch (error) {
+        await appendRunLog(job, `scene object placement failed: ${String(error)}`);
+      }
+      job.stage = null;
+    }
+    if (isCanceled(job)) {
+      return;
+    }
+
+    job.stage = "analyzing";
     const analyzeCode = await runCommand(job, [
       "run",
       "sam3d",
@@ -769,39 +844,12 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
       return;
     }
 
-    // Scene objects, when asked for. Deliberately the last step and
-    // deliberately forgiving: the person is already reconstructed and
-    // analyzed by this point, so a chair that could not be found — or an
-    // object model that is not installed on this machine — must not turn a
-    // good run into a failed one.
-    const sceneObjectPrompts = (options.sceneObjectPromptsRaw ?? "").trim();
-    if (sceneObjectPrompts && !isCanceled(job)) {
-      try {
-        const sceneCode = await runCommand(job, [
-          "run",
-          "sam3d",
-          "scene",
-          "--run-id",
-          job.runId,
-          "--prompts",
-          sceneObjectPrompts,
-        ]);
-        if (sceneCode !== 0) {
-          await appendRunLog(job, `scene objects step exited with code ${sceneCode}`);
-        }
-      } catch (error) {
-        await appendRunLog(job, `scene objects step failed: ${String(error)}`);
-      }
-    }
-    if (isCanceled(job)) {
-      return;
-    }
-
     {
       const meta = await readMetadataProgress(job.runDir);
       job.processedFrames = Math.max(meta?.processed ?? 0, await countMeshFrames(job.runDir));
       if (meta?.total && !job.totalFrames) job.totalFrames = meta.total;
     }
+    job.stage = null;
     job.status = "completed";
     job.error = null;
     job.finishedAt = nowIso();
@@ -909,6 +957,7 @@ export async function createJobFromExistingUpload(
     processedFrames: 0,
     totalFrames: parseInteger(options.maxFramesRaw, null, 1),
     progressPercent: null,
+    stage: null,
     error: null,
     inputVideoPath: resolvedInputPath,
     runDir: directory,

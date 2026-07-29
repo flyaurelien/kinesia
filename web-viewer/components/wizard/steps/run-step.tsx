@@ -29,6 +29,7 @@ type Job = {
   processedFrames: number;
   totalFrames: number | null;
   progressPercent: number | null;
+  stage?: string | null;
   error: string | null;
 };
 
@@ -302,7 +303,9 @@ export function RunStep() {
                     <div className="of-job-prog-fill" style={{ width: `${pct}%` }} />
                   </div>
                   <div className="of-job-meta">
-                    {job.processedFrames}{job.totalFrames ? ` / ${job.totalFrames}` : ""} frames · {pct}%
+                    {job.stage
+                      ? job.stage
+                      : `${job.processedFrames}${job.totalFrames ? ` / ${job.totalFrames}` : ""} frames · ${pct}%`}
                   </div>
                 </div>
               );

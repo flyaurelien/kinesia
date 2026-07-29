@@ -98,6 +98,7 @@ type GenerationJob = {
   processedFrames: number;
   totalFrames: number | null;
   progressPercent: number | null;
+  stage?: string | null;
   error: string | null;
 };
 type RunLoadState = RunAssetPreloadProgress & {
@@ -704,8 +705,10 @@ function runDurationLabel(processedFrames: number, fps: number | null | undefine
   return formatHumanDuration(processedFrames / fps);
 }
 
-// "<processed>/<total> frames (<pct>%)" for a job (total/percent omitted when unknown).
+// What the job is doing: its own words for the steps that have no frames to
+// count (reconstructing an object takes minutes), the frame count otherwise.
 function jobFrameLabel(job: GenerationJob): string {
+  if (job.stage) return job.stage;
   const base = `${job.processedFrames}${job.totalFrames ? `/${job.totalFrames}` : ""} frames`;
   return job.progressPercent !== null ? `${base} · ${Math.round(job.progressPercent)}%` : base;
 }
