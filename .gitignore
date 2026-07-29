@@ -78,3 +78,6 @@ vendor/mlx_sam3/pyproject.toml
 
 # Benchmark datasets (multi-GB, never versioned)
 benchmarks/
+
+# Evaluation en cours — a vendorer proprement si on le garde
+vendor/sam3d-objects-mlx/
