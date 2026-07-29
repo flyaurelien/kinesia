@@ -24,8 +24,9 @@ happened to agree.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import trimesh
@@ -35,6 +36,21 @@ FOOT_JOINTS = [13, 15, 16, 17, 14, 18, 19, 20]
 FLOOR_QUANTILE = 0.10
 
 SCHEMA = "kinesia.scene_object.v1"
+
+# How many frames to try the prompt on before knowing where the object is. The
+# object is static, so one good look is enough — but the first frame tried may
+# be one where the subject stands right over it, so a few spread across the clip
+# make the search robust without costing much model time.
+SEED_FRAMES = 3
+
+# How many of the best-ranked frames get segmented again for the mask actually
+# used. The ranking works from an approximate outline; these passes produce the
+# real one.
+FINALIST_FRAMES = 3
+
+# At most this many objects per run, whatever the prompt asks for: each one
+# costs minutes and gigabytes, and a comma-separated list is easy to overfill.
+MAX_OBJECTS = 4
 
 
 def cam_to_world(point: np.ndarray) -> np.ndarray:
@@ -355,3 +371,267 @@ def place_object(
     log(f"centre (world): {[round(v, 3) for v in placement['centre_world']]}")
     log(f"written: {scene_dir / f'{name}.json'}")
     return out
+
+
+def parse_object_prompts(text: str | None) -> tuple[str, ...]:
+    """Split the objects the user asked for, and ask for none when they did not.
+
+    Deliberately unlike the subject prompt, which falls back to "person" when
+    empty: an empty objects field means no objects, not an object called
+    nothing.
+    """
+    raw = re.split(r"[,;|]", text or "")
+    seen: dict[str, str] = {}
+    for item in raw:
+        cleaned = " ".join(item.split())
+        if cleaned and cleaned.lower() not in seen:
+            seen[cleaned.lower()] = cleaned
+    return tuple(seen.values())[:MAX_OBJECTS]
+
+
+def object_name(prompt: str) -> str:
+    """A file-safe name for an object, from what it was called."""
+    slug = re.sub(r"[^a-z0-9]+", "_", prompt.lower()).strip("_")
+    return slug or "object"
+
+
+def _read_frames(video_path: Path, indices: list[int]) -> dict[int, Any]:
+    """Read the requested frames, honouring the container's display rotation."""
+    import cv2
+
+    from .video_io import open_video
+
+    frames: dict[int, Any] = {}
+    capture = open_video(video_path)
+    try:
+        for index in sorted(set(indices)):
+            capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                frames[index] = frame
+    finally:
+        capture.release()
+    return frames
+
+
+def build_scene_objects(
+    run_dir: Path,
+    prompts: tuple[str, ...],
+    project_root: Path | None = None,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Reconstruct each named object and place it in the subject's world.
+
+    Never raises for a missing model or a prompt that matches nothing: this runs
+    after a finished reconstruction, and losing the person because a chair could
+    not be found would be a poor trade.
+    """
+    from . import object_masks, object_shapes
+    from .sam3d_runtime import select_device, try_build_human_detector
+    from .subject_preview import DEFAULT_SAM3_CODE_ROOT
+
+    if not prompts:
+        return {"objects": [], "skipped": None}
+
+    reason = object_shapes.unavailable_reason(object_shapes.objects_root(project_root))
+    if reason:
+        log(f"skipping scene objects: {reason}")
+        return {"objects": [], "skipped": reason}
+
+    metadata = json.loads((run_dir / "run_metadata.json").read_text())
+    records = [r for r in (metadata.get("records") or []) if isinstance(r, dict)]
+    width, height = int(metadata["video_width"]), int(metadata["video_height"])
+    video_path = Path(metadata.get("video_input") or "")
+    if not video_path.exists():
+        log(f"skipping scene objects: source video missing at {video_path}")
+        return {"objects": [], "skipped": "source video missing"}
+
+    silhouettes = object_masks.load_subject_silhouettes(records, width, height, log)
+    if not silhouettes:
+        log("skipping scene objects: no reconstructed subject to judge occlusion by")
+        return {"objects": [], "skipped": "no subject silhouettes"}
+
+    scene_dir = run_dir / "scene"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+
+    # Spread the first looks across the clip so a subject parked in front of the
+    # object early on cannot hide it from every seed.
+    seed_indices = [
+        silhouettes[round(i * (len(silhouettes) - 1) / max(SEED_FRAMES - 1, 1))][0]
+        for i in range(min(SEED_FRAMES, len(silhouettes)))
+    ]
+
+    detector = try_build_human_detector(
+        detector_name="sam3",
+        device=select_device(),
+        sam3_code_root=DEFAULT_SAM3_CODE_ROOT,
+    )
+    if detector is None:
+        log("skipping scene objects: the detection model is unavailable")
+        return {"objects": [], "skipped": "detector unavailable"}
+
+    # Segment everything first, then let the detection model go before the
+    # shape model starts: each holds several gigabytes, and nothing needs them
+    # both at once.
+    found: list[dict] = []
+    failures: list[dict] = []
+    for prompt in prompts:
+        try:
+            found.append(_locate_object(
+                prompt, scene_dir, video_path, records, silhouettes,
+                seed_indices, detector, log,
+            ))
+        except (RuntimeError, ValueError, OSError) as error:
+            log(f"could not add '{prompt}': {error}")
+            failures.append({"prompt": prompt, "error": str(error)})
+
+    del detector
+    _release_memory()
+
+    placed: list[dict] = []
+    for target in found:
+        try:
+            placed.append(_shape_and_place(target, run_dir, scene_dir, project_root, log))
+        except (RuntimeError, ValueError, OSError) as error:
+            log(f"could not add '{target['prompt']}': {error}")
+            failures.append({"prompt": target["prompt"], "error": str(error)})
+
+    object_shapes.clear_cache(scene_dir / ".cache")
+    return {"objects": placed, "failures": failures, "skipped": None}
+
+
+def _release_memory() -> None:
+    """Give the detection model's memory back before the shape model asks."""
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except (ImportError, AttributeError):  # pragma: no cover - depends on build
+        pass
+
+
+def _locate_object(
+    prompt: str,
+    scene_dir: Path,
+    video_path: Path,
+    records: list[dict],
+    silhouettes: list[tuple[int, Any]],
+    seed_indices: list[int],
+    detector: Any,
+    log: Callable[[str], None],
+) -> dict:
+    """Find the object and the clearest view of it, and write both to disk.
+
+    Raises when the object is nowhere to be seen, or is never clear of the
+    subject at its base.
+    """
+    from . import object_masks
+
+    name = object_name(prompt)
+    video_index = {i: int(records[i].get("video_frame", i)) for i, _ in silhouettes}
+
+    # Where is it? Any decent look will do: this outline only has to say which
+    # pixels to watch while the subject moves around.
+    seed_frames = _read_frames(video_path, [video_index[i] for i in seed_indices])
+    coarse = None
+    for index in seed_indices:
+        frame = seed_frames.get(video_index[index])
+        if frame is None:
+            continue
+        found = object_masks.segment_object(frame, prompt, detector)
+        if found is None:
+            continue
+        mask, score = found
+        if coarse is None or mask.sum() > coarse.sum():
+            coarse = mask
+            log(f"'{prompt}' found on frame {video_index[index]} "
+                f"(score {score:.2f}, {int(mask.sum())} px)")
+    if coarse is None:
+        raise ValueError(f"'{prompt}' was not found anywhere in the clip")
+
+    # When is it clearest? Ranking is free — the subject's outlines are already
+    # in hand — so every frame is considered, not a sample.
+    candidates = object_masks.rank_frames(
+        coarse, silhouettes, limit=FINALIST_FRAMES
+    )
+    if not candidates:
+        raise ValueError(
+            f"the subject covers the base of '{prompt}' on every frame, "
+            "so its depth cannot be measured"
+        )
+    log(f"'{prompt}': best frames "
+        + ", ".join(f"{video_index[c['frame']]} ({c['occlusion'] * 100:.1f}% hidden)"
+                    for c in candidates))
+
+    # Segment the finalists properly and keep the fullest outline.
+    finalist_frames = _read_frames(
+        video_path, [video_index[c["frame"]] for c in candidates]
+    )
+    best: tuple[int, Any, float] | None = None
+    for candidate in candidates:
+        index = video_index[candidate["frame"]]
+        frame = finalist_frames.get(index)
+        if frame is None:
+            continue
+        found = object_masks.segment_object(frame, prompt, detector)
+        if found is None:
+            continue
+        mask, score = found
+        if not object_masks.usable_for_depth(mask, mask.shape[0]):
+            continue
+        if best is None or mask.sum() > best[1].sum():
+            best = (index, mask, score)
+    if best is None:
+        raise ValueError(f"'{prompt}' could not be segmented on any usable frame")
+
+    frame_index, mask, score = best
+    log(f"'{prompt}': using frame {frame_index} "
+        f"(score {score:.2f}, {int(mask.sum())} px)")
+
+    image_path = scene_dir / f"{name}_frame.png"
+    mask_path = scene_dir / f"{name}_mask.png"
+    import cv2
+
+    cv2.imwrite(str(image_path), finalist_frames[frame_index])
+    object_masks.write_mask(mask, mask_path)
+    return {
+        "prompt": prompt,
+        "name": name,
+        "image_path": image_path,
+        "mask_path": mask_path,
+        "source_frame": frame_index,
+        "detection_score": score,
+    }
+
+
+def _shape_and_place(
+    target: dict,
+    run_dir: Path,
+    scene_dir: Path,
+    project_root: Path | None,
+    log: Callable[[str], None],
+) -> dict:
+    """Reconstruct a located object's shape and solve where it stands."""
+    from . import object_shapes
+
+    name = target["name"]
+    mesh_path = object_shapes.reconstruct_mesh(
+        image_path=target["image_path"],
+        mask_path=target["mask_path"],
+        output_glb=scene_dir / f"{name}.glb",
+        cache_dir=scene_dir / ".cache" / name,
+        root=object_shapes.objects_root(project_root),
+        log=log,
+    )
+    record = place_object(run_dir, mesh_path, target["mask_path"], name, log)
+    record["prompt"] = target["prompt"]
+    record["source_frame"] = target["source_frame"]
+    record["detection_score"] = target["detection_score"]
+    (scene_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
+    return record

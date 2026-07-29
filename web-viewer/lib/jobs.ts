@@ -40,6 +40,7 @@ type CreateOptions = {
   promptBBoxRaw?: string | null;
   promptBBoxFrameRaw?: string | null;
   promptAnchorsJsonRaw?: string | null;
+  sceneObjectPromptsRaw?: string | null;
   startFrameRaw?: string | null;
   maxFramesRaw?: string | null;
   frameStepRaw?: string | null;
@@ -765,6 +766,34 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
       job.error = `sam3d analyze exited with code ${analyzeCode}`;
       job.finishedAt = nowIso();
       updateProgress(job);
+      return;
+    }
+
+    // Scene objects, when asked for. Deliberately the last step and
+    // deliberately forgiving: the person is already reconstructed and
+    // analyzed by this point, so a chair that could not be found — or an
+    // object model that is not installed on this machine — must not turn a
+    // good run into a failed one.
+    const sceneObjectPrompts = (options.sceneObjectPromptsRaw ?? "").trim();
+    if (sceneObjectPrompts && !isCanceled(job)) {
+      try {
+        const sceneCode = await runCommand(job, [
+          "run",
+          "sam3d",
+          "scene",
+          "--run-id",
+          job.runId,
+          "--prompts",
+          sceneObjectPrompts,
+        ]);
+        if (sceneCode !== 0) {
+          await appendRunLog(job, `scene objects step exited with code ${sceneCode}`);
+        }
+      } catch (error) {
+        await appendRunLog(job, `scene objects step failed: ${String(error)}`);
+      }
+    }
+    if (isCanceled(job)) {
       return;
     }
 

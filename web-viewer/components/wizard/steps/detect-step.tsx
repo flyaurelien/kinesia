@@ -14,7 +14,7 @@ const DEFAULT_STRIDE = 5;
  *  in, and pick which tracked subject to reconstruct. */
 export function DetectStep() {
   const { state, dispatch, goNext, goBack } = useWizard();
-  const { file, fileUrl, subjectPrompt, stagedUpload, detect } = state;
+  const { file, fileUrl, subjectPrompt, sceneObjectPrompt, stagedUpload, detect } = state;
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cursorRef = useRef(0); // next frame index to request from the poller
@@ -328,6 +328,27 @@ export function DetectStep() {
               Detection only (no kinematics) — fast and light. You can stop early and re-run if it looks wrong.
             </span>
           )}
+        </div>
+
+        {/* Objects to place in the same 3D space as the subject. */}
+        <div className="of-prompt">
+          <span className="of-prompt-label">Scene objects (optional)</span>
+          <div className="of-prompt-row">
+            <input
+              className="of-input"
+              type="text"
+              value={sceneObjectPrompt}
+              placeholder="chair, table"
+              onChange={(e) =>
+                dispatch({ type: "set_scene_object_prompt", prompt: e.target.value })
+              }
+              maxLength={120}
+            />
+          </div>
+          <span className="of-prompt-hint">
+            Reconstructed after the person and placed in the same space, so distances between
+            them are comparable. Static objects only, up to four — each adds a few minutes.
+          </span>
         </div>
 
         {/* Annotated preview video */}

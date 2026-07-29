@@ -35,7 +35,7 @@ DEFAULT_MHR_PATH = Path(
         DEFAULT_MODELS_ROOT / "sam-3d-body-dinov3" / "assets" / "mhr_model.pt",
     )
 )
-SUBCOMMANDS = {"run", "analyze", "doctor"}
+SUBCOMMANDS = {"run", "analyze", "scene", "doctor"}
 
 
 def sanitize_token(input_text: str) -> str:
@@ -199,6 +199,16 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--run-id", required=True)
     analyze_parser.add_argument("--preset", default=DEFAULT_ANALYSIS_PRESET)
     analyze_parser.add_argument("--json", action="store_true")
+
+    scene_parser = subparsers.add_parser(
+        "scene", help="Reconstruct named objects and place them in a run's world."
+    )
+    scene_parser.add_argument("--run-id", required=True)
+    scene_parser.add_argument(
+        "--prompts", required=True,
+        help="objects to add, comma separated (for example: chair, table)",
+    )
+    scene_parser.add_argument("--json", action="store_true")
 
     doctor_parser = subparsers.add_parser("doctor", help="Validate environment and model dependencies.")
     doctor_parser.add_argument("--checkpoint-path", type=Path, default=DEFAULT_CHECKPOINT_PATH)
@@ -609,6 +619,35 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scene(args: argparse.Namespace) -> int:
+    """Add the named objects to a finished run's 3D scene.
+
+    Returns 0 even when nothing could be added: the run itself is already
+    complete, and an object that could not be found is a shortfall to report,
+    not a reason to mark the reconstruction failed.
+    """
+    from .scene_objects import build_scene_objects, parse_object_prompts
+    from .workspace import run_dir, sanitize_run_id
+
+    prompts = parse_object_prompts(args.prompts)
+    if not prompts:
+        print("no objects requested")
+        return 0
+
+    directory = run_dir(sanitize_run_id(args.run_id))
+    if not (directory / "run_metadata.json").exists():
+        print(f"no such run: {args.run_id}")
+        return 2
+
+    result = build_scene_objects(directory, prompts)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        added = ", ".join(obj["name"] for obj in result["objects"]) or "none"
+        print(f"objects added: {added}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Validate the environment and model dependencies, printing the doctor report."""
     summary = run_doctor(
@@ -642,6 +681,8 @@ def main() -> None:
         raise SystemExit(cmd_run(args))
     if args.command == "analyze":
         raise SystemExit(cmd_analyze(args))
+    if args.command == "scene":
+        raise SystemExit(cmd_scene(args))
     if args.command == "doctor":
         raise SystemExit(cmd_doctor(args))
     parser.print_help()
