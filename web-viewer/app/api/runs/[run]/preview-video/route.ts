@@ -146,6 +146,21 @@ export async function GET(
     const { filePath: sourcePath, contentType } = await resolveRunVideoFile(run, "preview");
     const url = new URL(request.url);
     const variant = url.searchParams.get("variant");
+
+    // Both variants carve a tile out of the rendered COMPOSITE. When a run was
+    // processed without a preview, the preview lookup falls back to the plain
+    // source video — right for the Video tab, but cropping a quadrant of it
+    // yields a meaningless magnified corner of the room. Say it is missing
+    // instead of serving that.
+    if (variant === "web-panels" || variant === "segmentation") {
+      const { filePath: inputPath } = await resolveRunVideoFile(run, "input").catch(() => ({
+        filePath: "",
+      }));
+      if (inputPath && path.resolve(inputPath) === path.resolve(sourcePath)) {
+        return new NextResponse(null, { status: 404 });
+      }
+    }
+
     const filePath =
       variant === "web-panels"
         ? await ensureWebPanelsPreview(sourcePath)
