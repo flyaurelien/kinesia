@@ -334,21 +334,18 @@ def place_object(
     mesh = trimesh.load(str(mesh_path), force="mesh")
     vertices = np.asarray(mesh.vertices)
     extent = vertices.max(0) - vertices.min(0)
-    up_axis = int(np.argmax(extent))
-    # One factor: the mesh is normalised, so matching its height to the solved
-    # real height scales every dimension correctly.
-    scale = placement["height_m"] / float(extent[up_axis])
 
     scene_dir = run_dir / "scene"
     scene_dir.mkdir(parents=True, exist_ok=True)
     mesh_name = f"{name}.glb"
-    if Path(mesh_path).resolve() != (scene_dir / mesh_name).resolve():
-        (scene_dir / mesh_name).write_bytes(Path(mesh_path).read_bytes())
 
-    fit = fit_pose_to_silhouette(
-        vertices, up_axis, scale, mask > 0, placement["focal_px"], floor_z,
-        width_px, height_px,
+    fit, up_axis, scale, upright = _fit_upright(
+        vertices, extent, placement, mask > 0, floor_z, width_px, height_px, log,
     )
+    # Write the mesh the way up the fit settled on, so the viewer draws the
+    # same object that was measured rather than the raw one.
+    mesh.vertices = upright
+    mesh.export(scene_dir / mesh_name)
     log(f"silhouette: IoU {fit['seed_iou']:.3f} (naive centring) -> {fit['iou']:.3f} (fitted)")
     log(f"  floor position: {[round(v, 3) for v in fit['position_world']]}  "
         f"heading {np.degrees(fit['yaw_rad']):.0f} deg")
@@ -379,6 +376,53 @@ def place_object(
     log(f"centre (world): {[round(v, 3) for v in placement['centre_world']]}")
     log(f"written: {scene_dir / f'{name}.json'}")
     return out
+
+
+def _fit_upright(
+    vertices: np.ndarray,
+    extent: np.ndarray,
+    placement: dict,
+    mask: np.ndarray,
+    floor_z: float,
+    width_px: int,
+    height_px: int,
+    log: Callable[[str], None],
+) -> tuple[dict, int, float, np.ndarray]:
+    """Work out which way up the object goes, by trying and measuring.
+
+    The obvious guess — the longest dimension points up — holds for a chair and
+    fails for a table, which is wider than it is tall: the table gets stood on
+    its edge, and being wrong about up also makes the scale wrong, since the
+    scale comes from matching the object's height. So each axis is tried, both
+    ways up, and the one whose outline actually matches what was observed wins.
+
+    Flipping negates TWO axes rather than one. Negating a single axis mirrors
+    the object instead of turning it over, and a mirrored object can match the
+    outline while facing the wrong way.
+    """
+    best: tuple[dict, int, float, np.ndarray] | None = None
+    for axis in range(3):
+        if extent[axis] <= 1e-9:
+            continue
+        scale = placement["height_m"] / float(extent[axis])
+        other = next(i for i in range(3) if i != axis)
+        for flipped in (False, True):
+            oriented = vertices.copy()
+            if flipped:
+                oriented[:, axis] *= -1.0
+                oriented[:, other] *= -1.0
+            fit = fit_pose_to_silhouette(
+                oriented, axis, scale, mask, placement["focal_px"], floor_z,
+                width_px, height_px,
+            )
+            if best is None or fit["iou"] > best[0]["iou"]:
+                best = (fit, axis, scale, oriented)
+    if best is None:
+        raise ValueError("the mesh has no extent to stand on")
+    fit, axis, scale, oriented = best
+    log(f"upright axis {'XYZ'[axis]} "
+        f"({extent[axis] * scale * 100:.0f} cm tall), IoU {fit['iou']:.3f}")
+    return best
 
 
 def parse_object_prompts(text: str | None) -> tuple[str, ...]:
