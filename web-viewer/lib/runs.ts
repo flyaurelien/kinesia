@@ -15,7 +15,7 @@ import {
   runsRoot,
   usesConfiguredRunsRoot,
 } from "./store";
-import type { GaitCycle, GaitStat, RunDetail, RunFrame, RunGait, RunSignal, RunSubject, RunSummary } from "./types";
+import type { GaitCycle, GaitStat, RunDetail, RunFrame, RunGait, RunSignal, RunSubject, RunSummary, SceneObject } from "./types";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -976,6 +976,7 @@ export async function getRunDetail(runIdRaw: string, analysisId?: string | null)
     subject: subjectFromRecord(metadata?.subject ?? manifest?.subject),
     signals,
     gait,
+    sceneObjects: await loadSceneObjects(runId),
     frames: displayFrames,
     analyses: analysesFromManifest(manifest),
     qa,
@@ -1006,6 +1007,64 @@ export async function resolveRunVideoFile(runIdRaw: string, kind: "input" | "pre
 }
 
 // Read a whole mesh .ply file as raw bytes.
+// Absolute path of one file in a run's `scene/` directory — the reconstructed
+// static objects (a .glb and the .json placing it).
+//
+// The file name reaches this from a URL, so it is validated as a bare id and
+// the resolved path is checked to still sit inside the scene directory: a name
+// that escapes it must not be served whatever it contains.
+export async function runSceneFilePath(runIdRaw: string, fileRaw: string): Promise<string> {
+  const runId = ensureSafeId(runIdRaw);
+  const file = ensureSafeId(fileRaw);
+  const sceneDir = path.join(await runBaseDir(runId), "scene");
+  const filePath = path.resolve(sceneDir, file);
+  if (path.relative(sceneDir, filePath).startsWith("..")) {
+    throw new Error("Invalid scene file");
+  }
+  if (!(await fileExists(filePath))) {
+    throw new Error(`Scene file not found: ${file}`);
+  }
+  return filePath;
+}
+
+// Names of the scene objects a run has, empty when it has none.
+export async function listSceneObjects(runIdRaw: string): Promise<string[]> {
+  const runId = ensureSafeId(runIdRaw);
+  const sceneDir = path.join(await runBaseDir(runId), "scene");
+  const entries = await fs.readdir(sceneDir).catch(() => [] as string[]);
+  return entries.filter((name) => name.toLowerCase().endsWith(".glb")).sort();
+}
+
+// Static objects reconstructed for this run, already placed in the subject's
+// own coordinate space by scripts/place_scene_object.py.
+async function loadSceneObjects(runId: string): Promise<SceneObject[]> {
+  const sceneDir = path.join(await runBaseDir(runId), "scene");
+  const entries = await fs.readdir(sceneDir).catch(() => [] as string[]);
+  const out: SceneObject[] = [];
+  for (const entry of entries.filter((n) => n.toLowerCase().endsWith(".json")).sort()) {
+    const raw = await readJsonIfExists<JsonRecord>(path.join(sceneDir, entry));
+    const mesh = typeof raw?.mesh === "string" ? raw.mesh : null;
+    const scale = numericOrNull(raw?.scale);
+    const centre = Array.isArray(raw?.centre_world) ? raw!.centre_world : null;
+    if (!mesh || scale === null || !centre || centre.length < 3) continue;
+    const solved = (raw?.solved ?? {}) as JsonRecord;
+    out.push({
+      name: String(raw?.name ?? entry.replace(/\.json$/, "")),
+      meshUrl: `/api/runs/${encodeURIComponent(runId)}/scene/${encodeURIComponent(mesh)}`,
+      scale,
+      upAxis: (["X", "Y", "Z"].includes(String(raw?.up_axis)) ? String(raw?.up_axis) : "Y") as "X" | "Y" | "Z",
+      centreWorld: [Number(centre[0]), Number(centre[1]), Number(centre[2])],
+      solved: {
+        depthM: numericOrNull(solved.depth_m) ?? 0,
+        heightM: numericOrNull(solved.height_m) ?? 0,
+        widthM: numericOrNull(solved.width_m) ?? 0,
+        floorZ: numericOrNull(solved.floor_z) ?? 0,
+      },
+    });
+  }
+  return out;
+}
+
 export async function readMeshFile(runIdRaw: string, meshFileRaw: string): Promise<Buffer> {
   const runId = ensureSafeId(runIdRaw);
   const meshFile = ensureSafeId(meshFileRaw);

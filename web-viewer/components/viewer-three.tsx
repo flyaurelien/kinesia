@@ -7,7 +7,7 @@ import * as THREE from "three";
 
 import { apiFetch } from "../lib/api-client";
 import { filterSeries, smoothingAlpha } from "../lib/one_euro";
-import type { RunDetail, RunFrame } from "../lib/types";
+import type { RunDetail, RunFrame, SceneObject } from "../lib/types";
 
 type DisplayAnchor = {
   centerX: number;
@@ -41,6 +41,9 @@ type ThreeSpaceViewerProps = {
   // run, so isolating another subject must not stop computing them — only the
   // primary's mesh/joints are withheld.
   showPrimary?: boolean;
+  // Static reconstructed objects (chair, step) placed in the subject's space.
+  showSceneObjects?: boolean;
+  sceneObjectOpacity?: number;
   // Hold each subject at a fixed spot on the floor, showing pose only: the
   // joint rotations are what a clinician reads, while in-plane travel is the
   // noisiest thing a single camera infers. Vertical motion is kept, so a jump
@@ -1234,6 +1237,99 @@ function SkeletonBones({ joints }: { joints: THREE.Vector3[] }) {
 
 // Assembles one subject for a frame: drops it onto the grid, applies the upright rotation, and renders
 // the mesh, bones, and clickable joint markers according to the visibility toggles.
+
+// A static object reconstructed once for the clip (a chair, a step) and placed
+// in the SUBJECT's coordinate space, so the two can be read against each other.
+//
+// The object model returns a normalised shape whose own translation and scale
+// are not in the subject's units; `scale` and `centreWorld` here were solved
+// against the subject's floor instead (scripts/place_scene_object.py), which is
+// what puts both bodies in one space.
+function SceneObjectMesh({
+  object,
+  anchor,
+  opacity,
+}: {
+  object: SceneObject;
+  anchor: DisplayAnchor | null;
+  opacity: number;
+}) {
+  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let loaded: THREE.BufferGeometry | null = null;
+    import("three/examples/jsm/loaders/GLTFLoader.js")
+      .then(({ GLTFLoader }) => {
+        new GLTFLoader().load(object.meshUrl, (gltf) => {
+          if (cancelled) return;
+          const parts: THREE.BufferGeometry[] = [];
+          gltf.scene.updateMatrixWorld(true);
+          gltf.scene.traverse((child) => {
+            const mesh = child as THREE.Mesh;
+            if (mesh.isMesh && mesh.geometry) {
+              const g = mesh.geometry.clone();
+              g.applyMatrix4(mesh.matrixWorld);
+              parts.push(g);
+            }
+          });
+          if (parts.length === 0) return;
+          const merged = parts[0];
+          // Centre it so the placement below positions its middle, matching how
+          // centreWorld was measured (the mask's bounding box centre).
+          merged.computeBoundingBox();
+          const box = merged.boundingBox!;
+          const mid = box.getCenter(new THREE.Vector3());
+          merged.translate(-mid.x, -mid.y, -mid.z);
+          loaded = merged;
+          setGeometry(merged);
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      // Disposal is deferred like the body meshes: the frame loop may still be
+      // drawing the previous tree when this runs.
+      if (loaded) setTimeout(() => loaded?.dispose(), 0);
+    };
+  }, [object.meshUrl]);
+
+  // Ground it the way bodies are grounded: the viewer draws its grid at z = 0
+  // and places each body so its lowest point rests there, so an object placed
+  // by raw world height instead lands wherever that height happens to fall —
+  // below the floor, as it turned out. Only X and Y come from the solved world
+  // position; Z puts the object's underside on the same grid.
+  const position = useMemo(() => {
+    const centre = worldToViewer(new THREE.Vector3(...object.centreWorld), anchor);
+    return new THREE.Vector3(centre.x, centre.y, object.solved.heightM / 2);
+  }, [anchor, object.centreWorld, object.solved.heightM]);
+
+  if (!geometry) return null;
+  // The mesh's own up axis is not the viewer's: its solved height runs along
+  // upAxis, while the viewer's up is Z.
+  const toViewerUp =
+    object.upAxis === "Y"
+      ? new THREE.Euler(Math.PI / 2, 0, 0)
+      : object.upAxis === "X"
+        ? new THREE.Euler(0, 0, Math.PI / 2)
+        : new THREE.Euler(0, 0, 0);
+
+  return (
+    <group position={position} rotation={toViewerUp} scale={object.scale}>
+      <mesh geometry={geometry}>
+        <meshStandardMaterial
+          color="#9aa6bd"
+          roughness={0.85}
+          metalness={0.05}
+          transparent={opacity < 1}
+          opacity={opacity}
+          side={THREE.DoubleSide}
+        />
+      </mesh>
+    </group>
+  );
+}
+
 function MeshBody({
   runId,
   frame,
@@ -1667,6 +1763,16 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
       <ambientLight intensity={0.72} />
       <directionalLight position={[3, -4, 5]} intensity={1.8} castShadow />
       <Ground />
+      {props.showSceneObjects !== false
+        ? (props.runDetail.sceneObjects ?? []).map((object) => (
+            <SceneObjectMesh
+              key={object.name}
+              object={object}
+              anchor={anchor}
+              opacity={props.sceneObjectOpacity ?? 1}
+            />
+          ))
+        : null}
       {props.showMesh && props.showPrimary !== false ? (
         <MeshPreloader runId={props.runDetail.id} frames={props.runDetail.frames} frameIndex={safeIndex} />
       ) : null}

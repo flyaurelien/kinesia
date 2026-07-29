@@ -133,6 +133,19 @@ export type RunGait = {
   };
 };
 
+// A static object reconstructed once for the whole clip and placed in the same
+// metric world as the subject (see scripts/place_scene_object.py).
+export type SceneObject = {
+  name: string;
+  meshUrl: string;
+  // Metres per mesh unit — the object model outputs a normalised shape, so this
+  // is solved against the subject's floor rather than taken from it.
+  scale: number;
+  upAxis: "X" | "Y" | "Z";
+  centreWorld: [number, number, number];
+  solved: { depthM: number; heightM: number; widthM: number; floorZ: number };
+};
+
 // Full payload for a single run, including every frame and signal (viewer page).
 export type RunDetail = {
   id: string;
@@ -151,6 +164,7 @@ export type RunDetail = {
   signals: RunSignal[];
   gait?: RunGait | null;
   frames: RunFrame[];
+  sceneObjects: SceneObject[];
   analyses?: Array<{
     analysisId: string;
     preset: string;
