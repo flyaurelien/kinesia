@@ -208,6 +208,13 @@ def main() -> int:
     if Path(args.mesh).resolve() != (scene_dir / mesh_name).resolve():
         (scene_dir / mesh_name).write_bytes(Path(args.mesh).read_bytes())
 
+    fit = fit_pose_to_silhouette(
+        vertices, up_axis, scale, mask > 0, placement["focal_px"], floor_z,
+        int(metadata["video_width"]), height_px,
+    )
+    print(f"silhouette: IoU {fit['seed_iou']:.3f} (centrage naif) -> {fit['iou']:.3f} (ajuste)")
+    print(f"  position au sol: {[round(v,3) for v in fit['position_world']]}  cap {np.degrees(fit['yaw_rad']):.0f} deg")
+
     out = {
         "schema": "kinesia.scene_object.v1",
         "name": args.name,
@@ -215,6 +222,9 @@ def main() -> int:
         "scale": scale,
         "up_axis": "XYZ"[up_axis],
         "centre_world": placement["centre_world"],
+        "position_world": fit["position_world"],
+        "yaw_rad": fit["yaw_rad"],
+        "fit_iou": fit["iou"],
         "solved": placement,
         "note": (
             "Scale and position are solved against the SUBJECT's floor and the "
@@ -232,6 +242,100 @@ def main() -> int:
     print(f"written: {scene_dir / f'{args.name}.json'}")
     return 0
 
+
+
+def fit_pose_to_silhouette(
+    mesh_vertices: np.ndarray,
+    up_axis: int,
+    scale: float,
+    mask: np.ndarray,
+    focal: float,
+    floor_z: float,
+    width: int,
+    height: int,
+) -> dict:
+    """Find the floor position and heading whose silhouette matches the mask.
+
+    Centring the mesh on the mask's bounding box is wrong twice over: the
+    projection of a 3D centre is not the centre of its silhouette under
+    perspective, and it says nothing at all about which way the object faces.
+
+    Both fall out of one question — where must the object stand, and facing
+    where, for its outline to be the one we observed. Height is not searched:
+    the object rests on the floor, which the feet already fixed.
+    """
+    import cv2
+
+    cx, cy = width / 2.0, height / 2.0
+    verts = mesh_vertices * scale
+    # Work in a frame where Z is up and the object's underside is at zero.
+    order = [i for i in range(3) if i != up_axis]
+    local = np.stack([verts[:, order[0]], verts[:, order[1]], verts[:, up_axis]], axis=1)
+    local[:, 2] -= local[:, 2].min()
+    local[:, 0] -= local[:, 0].mean()
+    local[:, 1] -= local[:, 1].mean()
+
+    target = (mask > 0).astype(np.uint8)
+    ys, xs = np.nonzero(target)
+    if ys.size == 0:
+        raise ValueError("empty mask")
+
+    def silhouette(x_world: float, y_world: float, yaw: float) -> np.ndarray:
+        c, s = np.cos(yaw), np.sin(yaw)
+        rotated = np.stack(
+            [local[:, 0] * c - local[:, 1] * s, local[:, 0] * s + local[:, 1] * c, local[:, 2]],
+            axis=1,
+        )
+        # world -> camera is the inverse of cam_to_world = (-z, x, -y).
+        world = rotated + np.array([x_world, y_world, floor_z])
+        cam = np.stack([world[:, 1], -world[:, 2], -world[:, 0]], axis=1)
+        keep = cam[:, 2] > 1e-3
+        if keep.sum() < 10:
+            return np.zeros_like(target)
+        u = focal * cam[keep, 0] / cam[keep, 2] + cx
+        v = focal * cam[keep, 1] / cam[keep, 2] + cy
+        # Splat the projected vertices rather than filling their convex hull:
+        # a chair is mostly holes — between the legs, under the seat — and a
+        # hull fills every one of them, so it would be scored against a shape
+        # the object does not have.
+        canvas = np.zeros_like(target)
+        ui = np.clip(np.round(u).astype(np.int32), 0, width - 1)
+        vi = np.clip(np.round(v).astype(np.int32), 0, height - 1)
+        canvas[vi, ui] = 1
+        # Close the gaps between samples without swallowing the real openings.
+        return cv2.dilate(canvas, np.ones((3, 3), np.uint8), iterations=2)
+
+    def iou(x_world: float, y_world: float, yaw: float) -> float:
+        got = silhouette(x_world, y_world, yaw)
+        union = np.logical_or(got, target).sum()
+        return float(np.logical_and(got, target).sum() / union) if union else 0.0
+
+    # Seed from the naive placement, then coarse-to-fine over floor position and
+    # heading together — they trade off against each other, so searching one at
+    # a time would settle in the wrong place.
+    v_bottom = float(ys.max()) - cy
+    depth0 = abs(floor_z) * focal / max(v_bottom, 1e-6)
+    x0 = -depth0
+    y0 = (float(xs.mean()) - cx) / focal * depth0
+    best = (iou(x0, y0, 0.0), x0, y0, 0.0)
+    span_xy, span_yaw, steps = 0.9, np.pi, 7
+    for _ in range(5):
+        _, bx, by, byaw = best
+        for dx in np.linspace(-span_xy, span_xy, steps):
+            for dy in np.linspace(-span_xy, span_xy, steps):
+                for dyaw in np.linspace(-span_yaw, span_yaw, steps):
+                    score = iou(bx + dx, by + dy, byaw + dyaw)
+                    if score > best[0]:
+                        best = (score, bx + dx, by + dy, byaw + dyaw)
+        span_xy *= 0.45
+        span_yaw *= 0.45
+    score, x_world, y_world, yaw = best
+    return {
+        "iou": float(score),
+        "position_world": [float(x_world), float(y_world), float(floor_z)],
+        "yaw_rad": float(np.arctan2(np.sin(yaw), np.cos(yaw))),
+        "seed_iou": float(iou(x0, y0, 0.0)),
+    }
 
 if __name__ == "__main__":
     raise SystemExit(main())
