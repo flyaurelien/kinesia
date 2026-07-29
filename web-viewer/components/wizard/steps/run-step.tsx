@@ -48,6 +48,7 @@ export function RunStep() {
     file,
     fileUrl,
     subjectPrompt,
+    sceneObjectPrompt,
     segments,
     stagedUpload,
     detect,
@@ -121,6 +122,10 @@ export function RunStep() {
       formData.append("autoSelectStrategy", "patient");
       formData.append("renderPreview", "true");
       formData.append("sam3TextPrompts", subjectPrompt.trim() || "person");
+      // Added before the per-subject fan-out below so every job carries it.
+      if (sceneObjectPrompt.trim()) {
+        formData.append("sceneObjectPrompts", sceneObjectPrompt.trim());
+      }
 
       // Delete segments are cut out of the video (timeline compresses);
       // mask segments stay in the video but are skipped by inference.
@@ -185,6 +190,7 @@ export function RunStep() {
     detect,
     detectTrackFile,
     subjectPrompt,
+    sceneObjectPrompt,
   ]);
 
   /* ===== Derived ===== */

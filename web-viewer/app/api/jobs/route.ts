@@ -65,6 +65,7 @@ export async function POST(request: Request) {
     const cropBoxRaw = formData.get("cropBox");
     const sam3TextPromptsRaw = formData.get("sam3TextPrompts");
     const promptAnchorsJsonRaw = formData.get("promptAnchorsJson");
+    const sceneObjectPromptsRaw = formData.get("sceneObjectPrompts");
     const subjectTrackFile = await validateSubjectTrackFile(formData.get("subjectTrackFile"));
     const subjectIndexRaw = formData.get("subjectIndex");
     const subjectIndex =
@@ -125,6 +126,10 @@ export async function POST(request: Request) {
       promptAnchorsJsonRaw:
         typeof promptAnchorsJsonRaw === "string" && promptAnchorsJsonRaw.trim().length > 0
           ? promptAnchorsJsonRaw.trim()
+          : null,
+      sceneObjectPromptsRaw:
+        typeof sceneObjectPromptsRaw === "string" && sceneObjectPromptsRaw.trim().length > 0
+          ? sceneObjectPromptsRaw.trim()
           : null,
       subjectTrackFile,
       subjectIndex,

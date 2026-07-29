@@ -68,6 +68,10 @@ export type WizardState = {
   cutHistoryIndex: number;
   // Detection step
   subjectPrompt: string;
+  // Objects to reconstruct alongside the subject. Empty means none: unlike the
+  // subject prompt there is no sensible default, and guessing one would spend
+  // minutes reconstructing something nobody asked for.
+  sceneObjectPrompt: string;
   // Staged once here, reused by the run so the video uploads a single time.
   stagedUpload: { stagedUploadId: string; fileName: string } | null;
   detect: DetectSession | null;
@@ -109,6 +113,7 @@ type Action =
   | { type: "undo" }
   | { type: "redo" }
   | { type: "set_subject_prompt"; prompt: string }
+  | { type: "set_scene_object_prompt"; prompt: string }
   | { type: "set_staged_upload"; staged: { stagedUploadId: string; fileName: string } | null }
   | { type: "detect_start"; id: string; prompt: string; stride: number }
   | {
@@ -138,6 +143,7 @@ const INITIAL_STATE: WizardState = {
   cutHistory: [{ segments: [] }],
   cutHistoryIndex: 0,
   subjectPrompt: "person",
+  sceneObjectPrompt: "",
   stagedUpload: null,
   detect: null,
   detectTrackFile: null,
@@ -253,6 +259,8 @@ function reducer(state: WizardState, action: Action): WizardState {
     }
     case "set_subject_prompt":
       return { ...state, subjectPrompt: action.prompt };
+    case "set_scene_object_prompt":
+      return { ...state, sceneObjectPrompt: action.prompt };
     case "set_staged_upload":
       return { ...state, stagedUpload: action.staged };
     case "detect_start":
