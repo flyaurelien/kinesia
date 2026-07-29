@@ -3105,12 +3105,24 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                     // exact file the pipeline consumed, so the timeline maps
                     // 1:1 to the records); Segmentation shows the tinted
                     // segmentation render derived from the processed video.
+                    // A "source" timebase means no composite was rendered and
+                    // the preview lookup fell back to the plain input video —
+                    // there is no segmentation tile to cut out of it.
+                    const hasRender = runDetail.previewVideoTimebase !== "source";
                     const leftVideoUrl =
                       leftView === "seg"
-                        ? runDetail.previewVideoUrl
+                        ? runDetail.previewVideoUrl && hasRender
                           ? `${runDetail.previewVideoUrl}?variant=segmentation`
                           : null
                         : runDetail.inputVideoUrl ?? runDetail.previewVideoUrl;
+                    if (leftView === "seg" && !leftVideoUrl) {
+                      return (
+                        <div className="media-pane-empty">
+                          This run was processed without a preview render, so it has no
+                          segmentation view.
+                        </div>
+                      );
+                    }
                     return leftVideoUrl ? (
                       <video
                         key={`${runDetail.id}:${leftVideoUrl}`}
