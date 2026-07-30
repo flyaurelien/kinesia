@@ -187,6 +187,8 @@ def fit_pose_to_silhouette(
     floor_z: float,
     width: int,
     height: int,
+    occluded: np.ndarray | None = None,
+    passes: int = 5,
 ) -> dict:
     """Find the floor position and heading whose silhouette matches the mask.
 
@@ -195,8 +197,20 @@ def fit_pose_to_silhouette(
     perspective, and it says nothing at all about which way the object faces.
 
     Both fall out of one question — where must the object stand, and facing
-    where, for its outline to be the one we observed. Height is not searched:
-    the object rests on the floor, which the feet already fixed.
+    where, for its outline to be the one we observed. Height above the floor is
+    not searched: the object rests on it, and the feet already fixed it.
+
+    `occluded` marks pixels the subject stands in front of. There the object's
+    state is unknown, not absent, so they are left out of the score entirely.
+    Counting them as empty is what makes a chair come out two thirds of its
+    real size when someone is sitting on it: the backrest is never visible, so
+    every candidate large enough to have one is punished for the part hidden
+    behind the person.
+
+    Size is not searched here. It was once, as a fourth dimension of this same
+    descent, and it settled well short of the optimum: scale trades against
+    position, so narrowing both together walks into a local best. The caller
+    scans sizes from outside instead, running this fit whole at each one.
     """
     import cv2
 
@@ -256,10 +270,14 @@ def fit_pose_to_silhouette(
         # Close the gaps between samples without swallowing the real openings.
         return cv2.dilate(canvas, np.ones((3, 3), np.uint8), iterations=2)
 
+    # Pixels the subject covers say nothing about the object either way.
+    judged = np.ones_like(target, bool) if occluded is None else ~occluded.astype(bool)
+
     def iou(x_world: float, y_world: float, yaw: float) -> float:
-        got = silhouette(x_world, y_world, yaw)
-        union = np.logical_or(got, target).sum()
-        return float(np.logical_and(got, target).sum() / union) if union else 0.0
+        got = silhouette(x_world, y_world, yaw) & judged
+        seen = target & judged
+        union = np.logical_or(got, seen).sum()
+        return float(np.logical_and(got, seen).sum() / union) if union else 0.0
 
     # Seed from the naive placement, then coarse-to-fine over floor position and
     # heading together — they trade off against each other, so searching one at
@@ -270,7 +288,7 @@ def fit_pose_to_silhouette(
     y0 = (float(xs.mean()) - cx) / focal * depth0
     best = (iou(x0, y0, 0.0), x0, y0, 0.0)
     span_xy, span_yaw, steps = 0.9, np.pi, 7
-    for _ in range(5):
+    for _ in range(passes):
         _, bx, by, byaw = best
         for dx in np.linspace(-span_xy, span_xy, steps):
             for dy in np.linspace(-span_xy, span_xy, steps):
@@ -295,6 +313,7 @@ def place_object(
     mask_path: Path,
     name: str = "object",
     log: Callable[[str], None] = print,
+    occluded: np.ndarray | None = None,
 ) -> dict:
     """Solve an object's pose against a finished run and write it under scene/.
 
@@ -341,7 +360,18 @@ def place_object(
 
     fit, up_axis, scale, upright = _fit_upright(
         vertices, extent, placement, mask > 0, floor_z, width_px, height_px, log,
+        occluded,
     )
+    # The fit may have found the object bigger than its visible mask suggested,
+    # which happens whenever part of it never showed.
+    # The solved size follows the size the fit measured, not the mask's extent.
+    measured_height = float(extent[up_axis]) * scale
+    if placement["height_m"] > 1e-9:
+        ratio = measured_height / placement["height_m"]
+        placement["width_m"] *= ratio
+        placement["height_m"] = measured_height
+        if abs(ratio - 1.0) > 0.03:
+            placement["measured_beyond_mask"] = ratio
     # Write the mesh the way up the fit settled on, so the viewer draws the
     # same object that was measured rather than the raw one.
     mesh.vertices = upright
@@ -387,6 +417,7 @@ def _fit_upright(
     width_px: int,
     height_px: int,
     log: Callable[[str], None],
+    occluded: np.ndarray | None = None,
 ) -> tuple[dict, int, float, np.ndarray]:
     """Work out which way up the object goes, by trying and measuring.
 
@@ -413,16 +444,38 @@ def _fit_upright(
                 oriented[:, other] *= -1.0
             fit = fit_pose_to_silhouette(
                 oriented, axis, scale, mask, placement["focal_px"], floor_z,
-                width_px, height_px,
+                width_px, height_px, occluded,
             )
             if best is None or fit["iou"] > best[0]["iou"]:
                 best = (fit, axis, scale, oriented)
     if best is None:
         raise ValueError("the mesh has no extent to stand on")
+
+    # Which way up is settled; now measure the size. Taking the object's height
+    # to be its mask's height assumes the whole of it showed. A seated person
+    # hides a chair's back entirely, leaving floor-to-seat — barely half — so
+    # the size has to be found rather than read off.
     fit, axis, scale, oriented = best
+    grown = 1.0
+    coarse = np.exp(np.linspace(np.log(0.6), np.log(2.2), 7))
+    for stage, candidates in ((0, coarse), (1, None)):
+        if stage == 1:
+            step = coarse[1] / coarse[0]
+            candidates = grown * np.exp(
+                np.linspace(-np.log(step), np.log(step), 5)
+            )
+        for candidate in candidates:
+            trial = fit_pose_to_silhouette(
+                oriented, axis, scale * float(candidate), mask, placement["focal_px"],
+                floor_z, width_px, height_px, occluded, passes=3 if stage == 0 else 5,
+            )
+            if trial["iou"] > fit["iou"]:
+                fit, grown = trial, float(candidate)
+    scale *= grown
     log(f"upright axis {'XYZ'[axis]} "
-        f"({extent[axis] * scale * 100:.0f} cm tall), IoU {fit['iou']:.3f}")
-    return best
+        f"({extent[axis] * scale * 100:.0f} cm tall), IoU {fit['iou']:.3f}"
+        + (f", {grown:.2f}x what the mask alone showed" if abs(grown - 1) > 0.03 else ""))
+    return fit, axis, scale, oriented
 
 
 def parse_object_prompts(text: str | None) -> tuple[str, ...]:
@@ -583,6 +636,7 @@ def place_built_shapes(
             record = place_object(
                 run_dir, scene_dir / f"{name}.glb", scene_dir / f"{name}_mask.png",
                 name, log,
+                occluded=_subject_on_frame(run_dir, target.get("source_frame")),
             )
         except (RuntimeError, ValueError, OSError, KeyError) as error:
             log(f"could not place '{target['prompt']}': {error}")
@@ -617,6 +671,45 @@ def build_scene_objects(
         "failures": built["failures"] + placed["failures"],
         "skipped": None,
     }
+
+
+def _subject_on_frame(run_dir: Path, video_frame: int | None) -> np.ndarray | None:
+    """The subject's outline on one frame, to be excluded from the fit's score.
+
+    Without it, everything the person hides counts as proof the object is not
+    there.
+    """
+    if video_frame is None:
+        return None
+    from . import object_masks
+
+    metadata = json.loads((run_dir / "run_metadata.json").read_text())
+    width = int(metadata.get("video_width") or 0)
+    height = int(metadata.get("video_height") or 0)
+    if not width or not height:
+        return None
+    for record in metadata.get("records") or []:
+        if not isinstance(record, dict) or record.get("video_frame") != video_frame:
+            continue
+        mesh_path, focal = record.get("mesh_path"), record.get("focal_length")
+        if not mesh_path or not focal:
+            return None
+        try:
+            mesh = trimesh.load(mesh_path, force="mesh")
+        except (ValueError, OSError):
+            return None
+        outline = object_masks.subject_silhouette(
+            np.asarray(mesh.vertices, dtype=np.float64), float(focal), width, height
+        )
+        # Widen it a little: the reconstruction's edge and the person's real
+        # edge differ by a pixel or two, and those pixels are the ones that
+        # would otherwise argue hardest against a correct size.
+        import cv2
+
+        return cv2.dilate(
+            outline.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1
+        ).astype(bool)
+    return None
 
 
 def _subject_coverage(
