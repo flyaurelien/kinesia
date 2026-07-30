@@ -411,6 +411,41 @@ class TestSceneObjectTransforms(unittest.TestCase):
 
 
 class TestSubjectInteractionResolution(unittest.TestCase):
+    def test_global_scale_overlap_is_resolved_around_floor_contact(self):
+        subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        subject.apply_translation((-4.0, 0.0, 1.1))
+        object_mesh = trimesh.creation.box(extents=(0.8, 0.8, 1.4))
+        object_to_world = np.eye(4, dtype=np.float64)
+        object_to_world[:3, 3] = [-4.0, 0.0, 0.7]
+        floor_pivot = np.array([-4.0, 0.0, 0.0])
+
+        corrected, evidence = resolve_floor_object_body_penetration(
+            object_to_world,
+            object_mesh,
+            subject,
+            np.zeros((240, 320), dtype=bool),
+            focal=200.0,
+            floor_pivot_world=floor_pivot,
+        )
+
+        self.assertEqual(evidence["status"], "corrected")
+        self.assertAlmostEqual(evidence["scale_factor"], 0.4)
+        self.assertEqual(evidence["translation_world_m"], [0.0, 0.0, 0.0])
+        self.assertLessEqual(evidence["penetrating_surface_fraction_after"], 0.003)
+        self.assertLessEqual(evidence["contact_distance_after_m"], 0.12)
+        np.testing.assert_allclose(
+            corrected[:3, :3],
+            object_to_world[:3, :3] * evidence["scale_factor"],
+        )
+        transformed = transform_points(corrected, np.asarray(object_mesh.vertices))
+        self.assertAlmostEqual(float(transformed[:, 2].min()), floor_pivot[2])
+        np.testing.assert_allclose(
+            transform_points(corrected, np.zeros((1, 3)))[0],
+            floor_pivot + evidence["scale_factor"] * (
+                object_to_world[:3, 3] - floor_pivot
+            ),
+        )
+
     def test_floor_object_overlap_is_resolved_without_changing_rotation_scale_or_floor(self):
         subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
         subject.apply_translation((-4.0, 0.0, 0.0))
@@ -451,6 +486,7 @@ class TestSubjectInteractionResolution(unittest.TestCase):
 
         self.assertEqual(evidence["status"], "clear")
         self.assertEqual(evidence["translation_world_m"], [0.0, 0.0, 0.0])
+        self.assertEqual(evidence["scale_factor"], 1.0)
         np.testing.assert_allclose(corrected, object_to_world)
 
 
