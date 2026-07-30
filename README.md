@@ -38,8 +38,8 @@ the 3D reconstruction.*
   JSON, and a tracking-box MP4.
 - **Fully local** — after the one-time model download, nothing leaves your machine.
 - **Experimental scene objects** — optionally reconstruct static objects that
-  rest on the ground, or track a known-size spherical object's trajectory; see
-  the [capture constraints](#capture-constraints-and-experimental-scene-objects).
+  rest on the ground, or track a prompted moving object frame by frame; see the
+  [capture constraints](#capture-constraints-and-experimental-scene-objects).
 
 ## How it works
 
@@ -75,11 +75,15 @@ relationship between subjects and scene objects are not reliable.
 Human reconstruction is the supported workflow. Scene-object reconstruction is
 an experimental opt-in feature with a deliberately narrower contract:
 
-- A static object creates one mesh and uses SAM 3D Objects' local-to-camera
-  translation, rotation, and scale directly for its fixed pose.
+- A static object creates one mesh, retains SAM 3D Objects' quaternion-derived
+  orientation, and aligns its globally ambiguous model scale to the subject's
+  metric floor from the source mask. This keeps the object and subject in one
+  measured reference frame without any class-specific pose rule.
 - A moving object is reconstructed once, then SAM 3D Objects estimates its
   local-to-camera translation, rotation, and scale on every reconstructed
-  frame. A missing pose is hidden rather than extrapolated across a gap.
+  frame. A missing pose is hidden rather than extrapolated across a gap. Its
+  per-frame model scale remains relative unless the sequence supplies a shared
+  metric anchor.
 - Monocular depth, orientation, scale, and ground-contact inference are
   uncertain. Inspect every object placement before using it in analysis or
   presentation material.

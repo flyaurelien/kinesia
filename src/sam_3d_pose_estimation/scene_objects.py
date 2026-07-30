@@ -1,24 +1,12 @@
-"""Place a reconstructed object in the SAME metric world as the reconstructed
-person, and write the placement the viewer consumes.
+"""Place reconstructed objects in the metric world of the reconstructed person.
 
-SAM 3D Objects returns a normalised shape: its mesh spans about one unit and
-its predicted translation/scale live in the model's own frame, not metres. Used
-directly, a chair comes out 35 cm tall and 1.5 m from the camera. Any
-"hand-to-object distance in centimetres" built on that would be quietly wrong.
-
-So the scale is not taken from the object model at all. It is solved from
-geometry the human reconstruction already gives us:
-
-  - the object stands on the floor, and the floor height is known from the
-    subject's own feet across the clip;
-  - the ray through the BOTTOM of the object's mask therefore meets the floor
-    at exactly one depth;
-  - at that depth, the mask's pixel height fixes the object's real height,
-    through the same pinhole focal length the pipeline used for the person.
-
-Both bodies then share one metric frame because they were solved against the
-same floor and the same camera — not because two independent scale estimates
-happened to agree.
+SAM 3D Objects predicts an object's shape and full local-to-camera orientation,
+but its scene scale is scale-shift invariant. A static object is therefore
+aligned to the human reconstruction through geometric evidence shared by both:
+the source mask's floor-contact ray and the floor reconstructed from the
+subject's feet. That provides one global similarity scale and a floor
+translation without changing the model's quaternion-derived orientation or the
+mesh's internal proportions.
 """
 
 from __future__ import annotations
@@ -69,13 +57,18 @@ def cam_to_world(point: np.ndarray) -> np.ndarray:
 
 CAMERA_TO_WORLD = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
 
+# SAM 3D Objects predicts pose in PyTorch3D camera coordinates: +X points left
+# in the image and +Y points up. The body pipeline consumes image coordinates
+# with +X right and +Y down. The runtime also exports its Z-up decoded mesh as
+# a Y-up GLB using ``[x, z, -y]``. Applying both declared conversions is what
+# preserves the orientation represented by the model quaternion in our world.
+MODEL_CAMERA_TO_WORLD = CAMERA_TO_WORLD @ np.diag([-1.0, -1.0, 1.0])
+MODEL_LOCAL_TO_GLB = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
+GLB_TO_MODEL_LOCAL = MODEL_LOCAL_TO_GLB.T
 
-def model_pose_to_world_matrix(pose: dict[str, Any]) -> np.ndarray:
-    """Convert SAM 3D Objects local-to-camera pose fields into object-to-world.
 
-    This consumes the model output directly: no object-class, floor, upright
-    axis, silhouette or size heuristic is involved.
-    """
+def _model_pose_components(pose: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Validate and unpack the local-to-camera pose emitted by the object model."""
     def vector(name: str, length: int) -> np.ndarray:
         value = np.asarray(pose.get(name), dtype=np.float64).reshape(-1)
         if value.shape != (length,) or not np.all(np.isfinite(value)):
@@ -97,10 +90,84 @@ def model_pose_to_world_matrix(pose: dict[str, Any]) -> np.ndarray:
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
     ])
+    return translation, rotation, scale
+
+
+def model_pose_to_world_matrix(pose: dict[str, Any]) -> np.ndarray:
+    """Convert an object-runtime GLB pose into this project's world frame.
+
+    The returned transform applies the model quaternion exactly. It only
+    converts the runtime's documented camera and exported-mesh coordinate
+    conventions to the coordinate convention used by the person pipeline.
+    """
+    translation, rotation, scale = _model_pose_components(pose)
     matrix = np.eye(4)
-    matrix[:3, :3] = CAMERA_TO_WORLD @ rotation @ np.diag(scale)
-    matrix[:3, 3] = CAMERA_TO_WORLD @ translation
+    matrix[:3, :3] = MODEL_CAMERA_TO_WORLD @ rotation @ np.diag(scale) @ GLB_TO_MODEL_LOCAL
+    matrix[:3, 3] = MODEL_CAMERA_TO_WORLD @ translation
     return matrix
+
+
+def _model_pose_camera_vertices(pose: dict[str, Any], mesh_vertices: np.ndarray) -> np.ndarray:
+    """Transform exported GLB vertices into the object runtime's camera frame."""
+    vertices = np.asarray(mesh_vertices, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
+        raise ValueError("mesh_vertices must be a non-empty Nx3 array")
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError("mesh_vertices must contain only finite values")
+    translation, rotation, scale = _model_pose_components(pose)
+    local = (GLB_TO_MODEL_LOCAL @ vertices.T).T
+    return (rotation @ (local * scale).T).T + translation
+
+
+def calibrate_model_pose_to_subject_frame(
+    pose: dict[str, Any],
+    mesh_vertices: np.ndarray,
+    placement: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Align a static model pose with the metric subject frame.
+
+    SAM 3D Objects leaves one global scene scale ambiguous. The model mesh is
+    projected to find its lowest visible image point, whose depth is aligned to
+    the mask-to-floor depth measured in the subject's calibrated camera frame.
+    The resulting global similarity preserves the quaternion rotation and all
+    relative mesh proportions. A final vertical translation puts the model's
+    geometric base exactly on the shared floor.
+    """
+    target_depth = float(placement["depth_m"])
+    floor_z = float(placement["floor_z"])
+    if not np.isfinite(target_depth) or target_depth <= 1e-9:
+        raise ValueError("static placement needs a positive metric depth")
+    if not np.isfinite(floor_z):
+        raise ValueError("static placement needs a finite floor height")
+
+    camera_vertices = _model_pose_camera_vertices(pose, mesh_vertices)
+    visible = camera_vertices[:, 2] > 1e-9
+    if not np.any(visible):
+        raise ValueError("model pose puts every mesh vertex behind the camera")
+    projected_vertical = -camera_vertices[visible, 1] / camera_vertices[visible, 2]
+    base_depth = float(camera_vertices[visible][int(np.argmax(projected_vertical)), 2])
+    if not np.isfinite(base_depth) or base_depth <= 1e-9:
+        raise ValueError("model pose has no positive visible base depth")
+
+    model_to_subject_scale = target_depth / base_depth
+    matrix = model_pose_to_world_matrix(pose)
+    matrix[:3, :3] *= model_to_subject_scale
+    matrix[:3, 3] *= model_to_subject_scale
+
+    transformed = transform_points(matrix, np.asarray(mesh_vertices, dtype=np.float64))
+    lowest_vertex_z = float(transformed[:, 2].min())
+    floor_offset = floor_z - lowest_vertex_z
+    matrix[2, 3] += floor_offset
+    final_lowest_vertex_z = float(
+        transform_points(matrix, np.asarray(mesh_vertices, dtype=np.float64))[:, 2].min()
+    )
+    return matrix, {
+        "model_to_subject_scale": float(model_to_subject_scale),
+        "model_visible_base_depth": base_depth,
+        "subject_visible_base_depth_m": target_depth,
+        "floor_offset_m": float(floor_offset),
+        "floor_residual_m": float(final_lowest_vertex_z - floor_z),
+    }
 
 
 def upright_rotation(up_axis: int) -> np.ndarray:
@@ -638,23 +705,16 @@ def fit_pose_to_silhouette(
     }
 
 
-def place_object(
+def _solve_static_placement(
     run_dir: Path,
-    mesh_path: Path,
     mask_path: Path,
-    name: str = "object",
-    log: Callable[[str], None] = print,
-    occluded: np.ndarray | None = None,
-) -> dict:
-    """Solve an object's pose against a finished run and write it under scene/.
-
-    Returns the record written to scene/<name>.json.
-    """
+    log: Callable[[str], None],
+) -> tuple[dict[str, Any], np.ndarray, int, int]:
+    """Measure one static object's metric floor placement from its source mask."""
     import cv2
 
     metadata = json.loads((run_dir / "run_metadata.json").read_text())
-    records = [r for r in (metadata.get("records") or []) if isinstance(r, dict)]
-
+    records = [record for record in (metadata.get("records") or []) if isinstance(record, dict)]
     focal = median_focal(records)
     floor_z, floor_reference = floor_height_for_run(metadata, records)
     if focal is None or floor_z is None:
@@ -666,9 +726,9 @@ def place_object(
     width_px = int(metadata["video_width"])
     height_px = int(metadata["video_height"])
 
-    calib = calibrate_floor_from_feet(records, height_px)
-    if calib is not None:
-        v_times_z, residual = calib
+    calibration = calibrate_floor_from_feet(records, height_px)
+    if calibration is not None:
+        v_times_z, residual = calibration
         log(f"floor calibrated on the subject's feet: v*z = {v_times_z:.1f} "
             f"(spread {residual * 100:.1f}%, effective focal {v_times_z / abs(floor_z):.0f} px "
             f"vs {focal:.0f} recorded)")
@@ -681,6 +741,24 @@ def place_object(
     placement["floor_reference"] = floor_reference
     if residual is not None:
         placement["calibration_spread"] = residual
+    return placement, mask > 0, width_px, height_px
+
+
+def place_object(
+    run_dir: Path,
+    mesh_path: Path,
+    mask_path: Path,
+    name: str = "object",
+    log: Callable[[str], None] = print,
+    occluded: np.ndarray | None = None,
+) -> dict:
+    """Solve an object's pose against a finished run and write it under scene/.
+
+    Returns the record written to scene/<name>.json.
+    """
+    placement, mask, width_px, height_px = _solve_static_placement(run_dir, mask_path, log)
+    floor_z = float(placement["floor_z"])
+    focal = float(placement["focal_px"])
 
     mesh = trimesh.load(str(mesh_path), force="mesh")
     vertices = np.asarray(mesh.vertices)
@@ -691,7 +769,7 @@ def place_object(
     mesh_name = f"{name}.glb"
 
     fit, up_axis, scale, upright, flipped = _fit_upright(
-        vertices, extent, placement, mask > 0, floor_z, width_px, height_px, log,
+        vertices, extent, placement, mask, floor_z, width_px, height_px, log,
         occluded,
     )
     # The fit may have found the object bigger than its visible mask suggested,
@@ -719,7 +797,7 @@ def place_object(
     transform_validation = _transform_validation(
         upright, object_to_world, mesh_pivot_local, position_world
     )
-    quality = _placement_quality(mask > 0, occluded, fit, placement)
+    quality = _placement_quality(mask, occluded, fit, placement)
     log(f"silhouette: IoU {fit['seed_iou']:.3f} (naive centring) -> {fit['iou']:.3f} (fitted)")
     log(f"  floor position: {[round(v, 3) for v in fit['position_world']]}  "
         f"heading {np.degrees(fit['yaw_rad']):.0f} deg")
@@ -773,6 +851,79 @@ def place_object(
     log(f"centre (world): {[round(v, 3) for v in placement['centre_world']]}")
     log(f"written: {scene_dir / f'{name}.json'}")
     return out
+
+
+def place_model_pose_object(
+    run_dir: Path,
+    mesh_path: Path,
+    mask_path: Path,
+    model_pose: dict[str, Any],
+    name: str,
+    log: Callable[[str], None] = print,
+    occluded: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Place a static model-pose mesh without altering its predicted orientation."""
+    placement, mask, _, _ = _solve_static_placement(run_dir, mask_path, log)
+    mesh = trimesh.load(str(mesh_path), force="mesh")
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    object_to_world, calibration = calibrate_model_pose_to_subject_frame(
+        model_pose, vertices, placement
+    )
+    transformed = transform_points(object_to_world, vertices)
+    scale = max(1.0, float(np.abs(transformed).max(initial=0.0)))
+    tolerance = float(np.finfo(np.float64).eps * 128.0 * scale)
+    floor_z = float(placement["floor_z"])
+    hidden = np.zeros_like(mask, dtype=bool) if occluded is None else np.asarray(occluded, dtype=bool)
+    if hidden.shape != mask.shape:
+        raise ValueError("occluded mask must have the same shape as mask")
+    quality = {
+        "source": "sam3d_objects_model_pose_subject_calibrated",
+        "orientation_source": "sam3d_objects_quaternion",
+        "metric_alignment": "subject_floor_and_object_mask",
+        "floor_reference": str(placement["floor_reference"]),
+        "mask_pixels": int(mask.sum()),
+        "occluded_mask_pixels": int(np.logical_and(mask, hidden).sum()),
+    }
+    if placement.get("calibration_spread") is not None:
+        quality["floor_calibration_spread"] = float(placement["calibration_spread"])
+    transform_checks = {
+        "finite_matrix": bool(np.all(np.isfinite(object_to_world))),
+        "positive_determinant": bool(np.linalg.det(object_to_world[:3, :3]) > 0.0),
+        "mesh_is_on_shared_floor": bool(
+            abs(float(transformed[:, 2].min()) - floor_z) <= tolerance
+        ),
+    }
+    record = {
+        "schema": SCHEMA,
+        "name": name,
+        "mesh": f"{name}.glb",
+        "object_to_world": object_to_world.tolist(),
+        "transform_contract": {
+            "schema": TRANSFORM_SCHEMA,
+            "matrix_layout": "row_major",
+            "vector_convention": "column_vector",
+            "source_mesh": "mesh",
+        },
+        "model_pose": model_pose,
+        "model_pose_calibration": calibration,
+        "quality": quality,
+        "transform_validation": {
+            "status": "valid" if all(transform_checks.values()) else "invalid",
+            "checks": transform_checks,
+            "issues": [name for name, passed in transform_checks.items() if not passed],
+            "numerical_tolerance_m": tolerance,
+            "lowest_vertex_z_m": float(transformed[:, 2].min()),
+        },
+        "solved": placement,
+        "note": (
+            "Orientation is the SAM 3D Objects quaternion after documented "
+            "camera and GLB axis conversion. Its scale-shift-invariant scene "
+            "scale is aligned once to the subject's metric floor and source mask."
+        ),
+    }
+    log(f"model orientation retained; subject-frame scale {calibration['model_to_subject_scale']:.4f}")
+    log(f"shared-floor offset {calibration['floor_offset_m']:.4f} m")
+    return record
 
 
 def _fit_upright(
@@ -979,42 +1130,60 @@ def place_built_shapes(
     run_dir: Path,
     log: Callable[[str], None] = print,
 ) -> dict:
-    """Stand every reconstructed shape on the floor the subject's feet defined.
+    """Place every reconstructed shape in the subject's metric frame.
 
-    Seconds of work, so it runs as soon as the reconstruction has produced
-    enough frames rather than at the end of everything.
+    Existing model-pose artifacts are deliberately refreshed too. This lets a
+    corrected coordinate conversion be applied without repeating the expensive
+    shape reconstruction.
     """
     scene_dir = run_dir / "scene"
     pending_dir = scene_dir / PENDING_DIR
     waiting = sorted(pending_dir.glob("*.json")) if pending_dir.is_dir() else []
-    if not waiting:
+    targets: list[tuple[dict[str, Any], Path | None]] = [
+        (json.loads(entry.read_text()), entry) for entry in waiting
+    ]
+    seen_names = {str(target.get("name") or "") for target, _ in targets}
+    for pose_file in sorted(scene_dir.glob("*_model_pose.json")):
+        name = pose_file.stem.removesuffix("_model_pose")
+        if not name or name in seen_names:
+            continue
+        record_path = scene_dir / f"{name}.json"
+        if not record_path.is_file():
+            continue
+        existing = json.loads(record_path.read_text())
+        if not isinstance(existing.get("model_pose"), dict):
+            continue
+        targets.append(({
+            "prompt": str(existing.get("prompt") or name),
+            "name": name,
+            "source_frame": existing.get("source_frame"),
+            "detection_score": existing.get("detection_score"),
+            "model_pose": pose_file.name,
+        }, None))
+        seen_names.add(name)
+
+    if not targets:
         return {"objects": [], "failures": [], "skipped": None}
 
     placed: list[dict] = []
     failures: list[dict] = []
-    for position, entry in enumerate(waiting, start=1):
-        target = json.loads(entry.read_text())
-        log(f"{STAGE_MARKER} placing {target['prompt']} ({position}/{len(waiting)})")
+    for position, (target, pending_entry) in enumerate(targets, start=1):
+        prompt = str(target.get("prompt") or target.get("name") or "object")
+        log(f"{STAGE_MARKER} placing {prompt} ({position}/{len(targets)})")
         name = target["name"]
         try:
             pose_file = scene_dir / str(target.get("model_pose") or "")
             if pose_file.is_file():
                 model_pose = json.loads(pose_file.read_text())
-                object_to_world = model_pose_to_world_matrix(model_pose)
-                record = {
-                    "schema": SCHEMA,
-                    "name": name,
-                    "mesh": f"{name}.glb",
-                    "object_to_world": object_to_world.tolist(),
-                    "transform_contract": {
-                        "schema": TRANSFORM_SCHEMA,
-                        "matrix_layout": "row_major",
-                        "vector_convention": "column_vector",
-                        "source_mesh": "mesh",
-                    },
-                    "model_pose": model_pose,
-                    "quality": {"source": "sam3d_objects_model_pose"},
-                }
+                record = place_model_pose_object(
+                    run_dir,
+                    scene_dir / f"{name}.glb",
+                    scene_dir / f"{name}_mask.png",
+                    model_pose,
+                    name,
+                    log,
+                    occluded=_subject_on_frame(run_dir, target.get("source_frame")),
+                )
             else:
                 record = place_object(
                     run_dir, scene_dir / f"{name}.glb", scene_dir / f"{name}_mask.png",
@@ -1022,14 +1191,15 @@ def place_built_shapes(
                     occluded=_subject_on_frame(run_dir, target.get("source_frame")),
                 )
         except (RuntimeError, ValueError, OSError, KeyError) as error:
-            log(f"could not place '{target['prompt']}': {error}")
-            failures.append({"prompt": target["prompt"], "error": str(error)})
+            log(f"could not place '{prompt}': {error}")
+            failures.append({"prompt": prompt, "error": str(error)})
             continue
-        record["prompt"] = target["prompt"]
-        record["source_frame"] = target["source_frame"]
-        record["detection_score"] = target["detection_score"]
+        record["prompt"] = prompt
+        record["source_frame"] = target.get("source_frame")
+        record["detection_score"] = target.get("detection_score")
         (scene_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
-        entry.unlink()
+        if pending_entry is not None:
+            pending_entry.unlink()
         placed.append(record)
     return {"objects": placed, "failures": failures, "skipped": None}
 
