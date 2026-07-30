@@ -6,7 +6,9 @@ aligned to the human reconstruction through geometric evidence shared by both:
 the source mask's floor-contact ray and the floor reconstructed from the
 subject's feet. That provides one global similarity scale and a floor
 translation without changing the model's quaternion-derived orientation or the
-mesh's internal proportions.
+mesh's internal proportions. A final generic interaction pass rejects any
+placement whose reconstructed surface passes through the reconstructed subject
+while retaining the visible object-mask evidence and the shared floor.
 """
 
 from __future__ import annotations
@@ -22,6 +24,17 @@ import trimesh
 # COCO-WholeBody foot joints, as used everywhere else in the pipeline.
 FOOT_JOINTS = [13, 15, 16, 17, 14, 18, 19, 20]
 FLOOR_QUANTILE = 0.10
+
+# The interaction pass evaluates an object's surface against a closed voxel
+# occupancy made from the subject mesh. It is deliberately category-agnostic:
+# every static reconstructed mesh follows exactly the same geometric test.
+BODY_OCCUPANCY_PITCH_M = 0.02
+MAX_BODY_OCCUPANCY_CELLS = 1_500_000
+MAX_INTERACTION_SURFACE_SAMPLES = 16_000
+INTERACTION_TRIGGER_FRACTION = 0.01
+INTERACTION_ACCEPTED_FRACTION = 0.003
+INTERACTION_DIRECTION_SAMPLES = 32
+INTERACTION_RADIAL_SAMPLES = 28
 
 SCHEMA = "kinesia.scene_object.v1"
 TRANSFORM_SCHEMA = "kinesia.scene_object_transform.v1"
@@ -317,6 +330,270 @@ def transform_points(matrix: np.ndarray, points: np.ndarray) -> np.ndarray:
     homogeneous = np.column_stack((vertices, np.ones(len(vertices), dtype=np.float64)))
     transformed = (transform @ homogeneous.T).T
     return transformed[:, :3] / transformed[:, 3:4]
+
+
+def _evenly_spaced_points(points: np.ndarray, limit: int) -> np.ndarray:
+    """Keep a deterministic, bounded sample of an Nx3 point cloud."""
+    if len(points) <= limit:
+        return points
+    indices = np.linspace(0, len(points) - 1, limit, dtype=np.int64)
+    return points[indices]
+
+
+def _mesh_surface_samples(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Return deterministic surface samples without depending on an acceleration index."""
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
+        raise ValueError("mesh must contain finite Nx3 vertices")
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError("mesh vertices must be finite")
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if faces.ndim == 2 and faces.shape[1] == 3 and len(faces):
+        face_centres = vertices[faces].mean(axis=1)
+        points = np.vstack((vertices, face_centres))
+    else:
+        points = vertices
+    return _evenly_spaced_points(points, MAX_INTERACTION_SURFACE_SAMPLES)
+
+
+def _subject_mesh_world_on_frame(
+    run_dir: Path,
+    video_frame: int | None,
+) -> tuple[trimesh.Trimesh | None, float | None]:
+    """Load the source-frame body mesh in the shared world coordinate system."""
+    if video_frame is None:
+        return None, None
+    try:
+        metadata = json.loads((run_dir / "run_metadata.json").read_text())
+    except (OSError, ValueError):
+        return None, None
+    for record in metadata.get("records") or []:
+        if not isinstance(record, dict) or record.get("video_frame") != video_frame:
+            continue
+        mesh_path = record.get("mesh_path")
+        if not mesh_path:
+            return None, None
+        path = Path(str(mesh_path))
+        if not path.is_absolute():
+            path = run_dir / path
+        try:
+            mesh = trimesh.load(path, force="mesh")
+            vertices = np.asarray(mesh.vertices, dtype=np.float64)
+            faces = np.asarray(mesh.faces, dtype=np.int64)
+        except (OSError, ValueError, TypeError):
+            return None, None
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
+            return None, None
+        if faces.ndim != 2 or faces.shape[1] != 3 or len(faces) == 0:
+            return None, None
+        focal = record.get("focal_length")
+        return (
+            trimesh.Trimesh(
+                vertices=vertices @ CAMERA_TO_WORLD.T,
+                faces=faces,
+                process=False,
+            ),
+            float(focal) if isinstance(focal, (int, float)) and focal > 0 else None,
+        )
+    return None, None
+
+
+def _subject_occupancy(
+    subject_mesh_world: trimesh.Trimesh,
+) -> tuple[Any, float] | None:
+    """Build a bounded, closed occupancy grid for an exact subject mesh."""
+    if not subject_mesh_world.is_watertight:
+        return None
+    vertices = np.asarray(subject_mesh_world.vertices, dtype=np.float64)
+    extents = np.ptp(vertices, axis=0)
+    if not np.all(np.isfinite(extents)) or np.any(extents <= 1e-9):
+        return None
+    pitch = BODY_OCCUPANCY_PITCH_M
+    cells = float(np.prod(np.ceil(extents / pitch) + 3))
+    if cells > MAX_BODY_OCCUPANCY_CELLS:
+        pitch *= float((cells / MAX_BODY_OCCUPANCY_CELLS) ** (1.0 / 3.0))
+    try:
+        occupancy = subject_mesh_world.voxelized(pitch).fill()
+    except (ValueError, RuntimeError):
+        return None
+    if len(occupancy.points) == 0:
+        return None
+    return occupancy, float(pitch)
+
+
+def _world_vertex_silhouette(
+    world_vertices: np.ndarray,
+    focal: float,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Project world vertices into the source camera as a sparse silhouette."""
+    import cv2
+
+    world = np.asarray(world_vertices, dtype=np.float64)
+    canvas = np.zeros((height, width), dtype=np.uint8)
+    if world.ndim != 2 or world.shape[1] != 3 or len(world) == 0:
+        return canvas.astype(bool)
+    # This is the inverse of cam_to_world = (-camera_z, camera_x, -camera_y).
+    camera = np.column_stack((world[:, 1], -world[:, 2], -world[:, 0]))
+    visible = np.isfinite(camera).all(axis=1) & (camera[:, 2] > 1e-6)
+    if not np.any(visible):
+        return canvas.astype(bool)
+    projected = camera[visible]
+    u = focal * projected[:, 0] / projected[:, 2] + width / 2.0
+    v = focal * projected[:, 1] / projected[:, 2] + height / 2.0
+    valid = np.isfinite(u) & np.isfinite(v) & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    if not np.any(valid):
+        return canvas.astype(bool)
+    canvas[np.rint(v[valid]).astype(np.int32), np.rint(u[valid]).astype(np.int32)] = 1
+    return cv2.dilate(canvas, np.ones((3, 3), np.uint8), iterations=2).astype(bool)
+
+
+def _visible_mask_iou(
+    world_vertices: np.ndarray,
+    mask: np.ndarray,
+    focal: float,
+    occluded: np.ndarray | None,
+) -> float:
+    """Score only object pixels that are observable outside the subject outline."""
+    target = np.asarray(mask, dtype=bool)
+    hidden = np.zeros_like(target, dtype=bool) if occluded is None else np.asarray(occluded, dtype=bool)
+    if hidden.shape != target.shape:
+        raise ValueError("occluded mask must have the same shape as mask")
+    prediction = _world_vertex_silhouette(
+        world_vertices,
+        float(focal),
+        int(target.shape[1]),
+        int(target.shape[0]),
+    )
+    judged = ~hidden
+    union = int(np.logical_and(np.logical_or(prediction, target), judged).sum())
+    if union == 0:
+        return 0.0
+    return float(np.logical_and(np.logical_and(prediction, target), judged).sum() / union)
+
+
+def _floor_translation_candidates(max_distance_m: float, pitch_m: float) -> list[np.ndarray]:
+    """Generate floor-preserving translation candidates around an initial pose."""
+    candidates = [np.zeros(3, dtype=np.float64)]
+    minimum_radius = min(max_distance_m, max(pitch_m, 0.01))
+    radii = np.linspace(minimum_radius, max_distance_m, INTERACTION_RADIAL_SAMPLES)
+    angles = np.linspace(0.0, 2.0 * np.pi, INTERACTION_DIRECTION_SAMPLES, endpoint=False)
+    for radius in radii:
+        for angle in angles:
+            candidates.append(np.array([
+                radius * np.cos(angle),
+                radius * np.sin(angle),
+                0.0,
+            ], dtype=np.float64))
+    return candidates
+
+
+def resolve_floor_object_body_penetration(
+    object_to_world: np.ndarray,
+    mesh: trimesh.Trimesh,
+    subject_mesh_world: trimesh.Trimesh | None,
+    mask: np.ndarray,
+    focal: float,
+    occluded: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Resolve a static mesh/body overlap using only geometric source evidence.
+
+    The object retains its model-predicted orientation, scale, and floor height.
+    When surface samples lie inside the watertight source-frame body mesh, the
+    solver searches translations parallel to the floor. It selects a clear
+    candidate by its visible source-mask reprojection, then by the smallest
+    movement. No prompt text or object category participates in this decision.
+    """
+    matrix = np.asarray(object_to_world, dtype=np.float64)
+    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+        raise ValueError("object_to_world must be a finite 4x4 matrix")
+    if subject_mesh_world is None:
+        return matrix.copy(), {
+            "status": "unavailable",
+            "reason": "source_frame_subject_mesh_missing",
+            "translation_world_m": [0.0, 0.0, 0.0],
+            "floor_preserved": True,
+        }
+    occupancy_result = _subject_occupancy(subject_mesh_world)
+    if occupancy_result is None:
+        return matrix.copy(), {
+            "status": "unavailable",
+            "reason": "source_frame_subject_mesh_not_closed",
+            "translation_world_m": [0.0, 0.0, 0.0],
+            "floor_preserved": True,
+        }
+    occupancy, pitch = occupancy_result
+    if not np.isfinite(focal) or focal <= 0:
+        raise ValueError("focal must be finite and positive")
+    surface_local = _mesh_surface_samples(mesh)
+    surface_world = transform_points(matrix, surface_local)
+    vertices_world = transform_points(matrix, np.asarray(mesh.vertices, dtype=np.float64))
+    inside_before = np.asarray(occupancy.is_filled(surface_world), dtype=bool)
+    sample_count = int(len(surface_world))
+    hits_before = int(inside_before.sum())
+    fraction_before = float(hits_before / max(sample_count, 1))
+    visible_iou_before = _visible_mask_iou(vertices_world, mask, focal, occluded)
+    shared = {
+        "method": "watertight_subject_occupancy_visible_mask",
+        "voxel_pitch_m": pitch,
+        "surface_samples": sample_count,
+        "penetrating_surface_samples_before": hits_before,
+        "penetrating_surface_fraction_before": fraction_before,
+        "visible_mask_iou_before": visible_iou_before,
+        "floor_preserved": True,
+    }
+    if fraction_before <= INTERACTION_TRIGGER_FRACTION:
+        return matrix.copy(), {
+            **shared,
+            "status": "clear",
+            "penetrating_surface_samples_after": hits_before,
+            "penetrating_surface_fraction_after": fraction_before,
+            "visible_mask_iou_after": visible_iou_before,
+            "translation_world_m": [0.0, 0.0, 0.0],
+        }
+
+    object_extent = float(np.ptp(surface_world[:, :2], axis=0).max(initial=0.0))
+    subject_extent = float(np.ptp(subject_mesh_world.vertices[:, :2], axis=0).max(initial=0.0))
+    max_distance = min(2.0, max(0.25, 1.25 * max(object_extent, subject_extent)))
+    accepted_hits = max(1, int(np.ceil(sample_count * INTERACTION_ACCEPTED_FRACTION)))
+    candidates: list[tuple[float, float, np.ndarray, int, float]] = []
+    for translation in _floor_translation_candidates(max_distance, pitch):
+        hits = int(np.asarray(occupancy.is_filled(surface_world + translation), dtype=bool).sum())
+        if hits > accepted_hits:
+            continue
+        iou = _visible_mask_iou(vertices_world + translation, mask, focal, occluded)
+        distance = float(np.linalg.norm(translation[:2]))
+        # Image evidence stays primary; the tiny distance term settles otherwise
+        # identical projections without inventing a semantic direction.
+        score = iou - 0.015 * distance / max(max_distance, 1e-9)
+        candidates.append((score, iou, translation, hits, distance))
+    if not candidates:
+        return matrix.copy(), {
+            **shared,
+            "status": "unresolved",
+            "reason": "no_floor_preserving_clear_candidate",
+            "penetrating_surface_samples_after": hits_before,
+            "penetrating_surface_fraction_after": fraction_before,
+            "visible_mask_iou_after": visible_iou_before,
+            "translation_world_m": [0.0, 0.0, 0.0],
+            "candidate_search_radius_m": max_distance,
+        }
+    _, iou_after, translation, hits_after, _ = max(
+        candidates,
+        key=lambda candidate: (candidate[0], candidate[1], -candidate[4]),
+    )
+    adjusted = matrix.copy()
+    adjusted[:3, 3] += translation
+    return adjusted, {
+        **shared,
+        "status": "corrected",
+        "penetrating_surface_samples_after": hits_after,
+        "penetrating_surface_fraction_after": float(hits_after / sample_count),
+        "visible_mask_iou_after": iou_after,
+        "translation_world_m": [float(value) for value in translation],
+        "candidate_search_radius_m": max_distance,
+    }
 
 
 def _homogeneous_rotation(rotation: np.ndarray) -> np.ndarray:
@@ -755,6 +1032,7 @@ def place_object(
     name: str = "object",
     log: Callable[[str], None] = print,
     occluded: np.ndarray | None = None,
+    source_frame: int | None = None,
 ) -> dict:
     """Solve an object's pose against a finished run and write it under scene/.
 
@@ -795,6 +1073,17 @@ def place_object(
     object_to_world, mesh_pivot_local = world_from_mesh_matrix(
         upright, up_axis, scale, position_world, float(fit["yaw_rad"])
     )
+    subject_mesh_world, source_focal = _subject_mesh_world_on_frame(run_dir, source_frame)
+    object_to_world, interaction = resolve_floor_object_body_penetration(
+        object_to_world,
+        mesh,
+        subject_mesh_world,
+        mask,
+        source_focal if source_focal is not None else focal,
+        occluded,
+    )
+    position_world = position_world + np.asarray(interaction["translation_world_m"], dtype=np.float64)
+    fit["position_world"] = [float(value) for value in position_world]
     flip_matrix = upright_flip_matrix(up_axis, flipped)
     raw_mesh_to_world = object_to_world @ _homogeneous_rotation(flip_matrix)
     raw_mesh_pivot_local = flip_matrix.T @ mesh_pivot_local
@@ -802,6 +1091,7 @@ def place_object(
         upright, object_to_world, mesh_pivot_local, position_world
     )
     quality = _placement_quality(mask, occluded, fit, placement)
+    quality["subject_interaction"] = interaction["status"]
     log(f"silhouette: IoU {fit['seed_iou']:.3f} (naive centring) -> {fit['iou']:.3f} (fitted)")
     log(f"  floor position: {[round(v, 3) for v in fit['position_world']]}  "
         f"heading {np.degrees(fit['yaw_rad']):.0f} deg")
@@ -837,6 +1127,7 @@ def place_object(
             "up_axis": "XYZ"[up_axis],
             "flipped": flipped,
         },
+        "subject_interaction": interaction,
         "quality": quality,
         "transform_validation": transform_validation,
         "solved": placement,
@@ -853,6 +1144,16 @@ def place_object(
     log(f"solved size: {placement['width_m'] * 100:.0f} x {placement['height_m'] * 100:.0f} cm")
     log(f"mesh scale factor: {scale:.4f}")
     log(f"centre (world): {[round(v, 3) for v in placement['centre_world']]}")
+    if interaction["status"] == "corrected":
+        shift = interaction["translation_world_m"]
+        log(
+            "subject separation corrected by "
+            f"[{shift[0]:.3f}, {shift[1]:.3f}, {shift[2]:.3f}] m "
+            f"({interaction['penetrating_surface_fraction_before'] * 100:.1f}% -> "
+            f"{interaction['penetrating_surface_fraction_after'] * 100:.1f}% sampled overlap)"
+        )
+    elif interaction["status"] == "unresolved":
+        log("subject separation could not find a floor-preserving clear placement")
     log(f"written: {scene_dir / f'{name}.json'}")
     return out
 
@@ -865,6 +1166,7 @@ def place_model_pose_object(
     name: str,
     log: Callable[[str], None] = print,
     occluded: np.ndarray | None = None,
+    source_frame: int | None = None,
 ) -> dict[str, Any]:
     """Place a static model-pose mesh without altering its predicted orientation."""
     placement, mask, _, _ = _solve_static_placement(run_dir, mask_path, log)
@@ -872,6 +1174,15 @@ def place_model_pose_object(
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     object_to_world, calibration = calibrate_model_pose_to_subject_frame(
         model_pose, vertices, placement
+    )
+    subject_mesh_world, source_focal = _subject_mesh_world_on_frame(run_dir, source_frame)
+    object_to_world, interaction = resolve_floor_object_body_penetration(
+        object_to_world,
+        mesh,
+        subject_mesh_world,
+        mask,
+        source_focal if source_focal is not None else float(placement.get("focal_px", 0.0)),
+        occluded,
     )
     transformed = transform_points(object_to_world, vertices)
     scale = max(1.0, float(np.abs(transformed).max(initial=0.0)))
@@ -887,6 +1198,7 @@ def place_model_pose_object(
         "floor_reference": str(placement["floor_reference"]),
         "mask_pixels": int(mask.sum()),
         "occluded_mask_pixels": int(np.logical_and(mask, hidden).sum()),
+        "subject_interaction": interaction["status"],
     }
     if placement.get("calibration_spread") is not None:
         quality["floor_calibration_spread"] = float(placement["calibration_spread"])
@@ -910,6 +1222,7 @@ def place_model_pose_object(
         },
         "model_pose": model_pose,
         "model_pose_calibration": calibration,
+        "subject_interaction": interaction,
         "quality": quality,
         "transform_validation": {
             "status": "valid" if all(transform_checks.values()) else "invalid",
@@ -927,6 +1240,16 @@ def place_model_pose_object(
     }
     log(f"model orientation retained; subject-frame scale {calibration['model_to_subject_scale']:.4f}")
     log(f"shared-floor offset {calibration['floor_offset_m']:.4f} m")
+    if interaction["status"] == "corrected":
+        shift = interaction["translation_world_m"]
+        log(
+            "subject separation corrected by "
+            f"[{shift[0]:.3f}, {shift[1]:.3f}, {shift[2]:.3f}] m "
+            f"({interaction['penetrating_surface_fraction_before'] * 100:.1f}% -> "
+            f"{interaction['penetrating_surface_fraction_after'] * 100:.1f}% sampled overlap)"
+        )
+    elif interaction["status"] == "unresolved":
+        log("subject separation could not find a floor-preserving clear placement")
     return record
 
 
@@ -1187,12 +1510,14 @@ def place_built_shapes(
                     name,
                     log,
                     occluded=_subject_on_frame(run_dir, target.get("source_frame")),
+                    source_frame=target.get("source_frame"),
                 )
             else:
                 record = place_object(
                     run_dir, scene_dir / f"{name}.glb", scene_dir / f"{name}_mask.png",
                     name, log,
                     occluded=_subject_on_frame(run_dir, target.get("source_frame")),
+                    source_frame=target.get("source_frame"),
                 )
         except (RuntimeError, ValueError, OSError, KeyError) as error:
             log(f"could not place '{prompt}': {error}")
