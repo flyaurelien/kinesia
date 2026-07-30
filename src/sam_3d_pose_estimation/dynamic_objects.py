@@ -15,8 +15,7 @@ from .video_io import open_video
 
 SCHEMA = "kinesia.dynamic_object.v1"
 STAGE_MARKER = "[scene]"
-DEFAULT_FRAME_STRIDE = 5
-MAX_INTERPOLATION_GAP_FRAMES = 12
+DEFAULT_FRAME_STRIDE = 1
 
 
 def mask_iou(left: np.ndarray, right: np.ndarray) -> float:
@@ -248,7 +247,10 @@ def track_dynamic_objects(
                 "quality": {
                     "observed_frames": len(poses),
                     "coverage": float(len(poses) / max(1, len(records))),
-                    "max_interpolation_gap_frames": max(MAX_INTERPOLATION_GAP_FRAMES, frame_stride),
+                    # A missing model pose is hidden rather than extrapolated.
+                    # With the default stride of one, the viewer never fills a
+                    # multi-frame gap with an invented trajectory.
+                    "max_interpolation_gap_frames": frame_stride,
                     "source": "sam3d_objects_model_pose",
                 },
             }

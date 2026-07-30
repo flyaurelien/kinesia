@@ -10,7 +10,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from sam_3d_pose_estimation.cli import cmd_scene
+from sam_3d_pose_estimation.cli import build_parser, cmd_scene
 
 
 def scene_args(**overrides: object) -> Namespace:
@@ -21,7 +21,7 @@ def scene_args(**overrides: object) -> Namespace:
         "stage": "shape",
         "video": None,
         "subject_track": None,
-        "dynamic_frame_stride": 5,
+        "dynamic_frame_stride": 1,
         "json": False,
     }
     values.update(overrides)
@@ -46,6 +46,13 @@ class SceneCommandTests(unittest.TestCase):
                     result = cmd_scene(scene_args())
 
         self.assertEqual(result, 1)
+
+    def test_dynamic_mode_defaults_to_every_reconstructed_frame(self) -> None:
+        args = build_parser().parse_args([
+            "scene", "--run-id", "fixture", "--stage", "dynamic", "--prompts", "object",
+        ])
+
+        self.assertEqual(args.dynamic_frame_stride, 1)
 
     def test_dynamic_mode_rejects_a_non_positive_frame_stride(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

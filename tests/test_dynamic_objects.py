@@ -121,6 +121,7 @@ class DynamicObjectArtifactTests(unittest.TestCase):
         self.assertEqual(len(poses), 2)
         self.assertEqual(poses[0]["model_pose"], pose)
         self.assertEqual(poses[0]["object_to_world"][0], [0.0, 0.0, -4.0, -3.0])
+        self.assertEqual(result["objects"][0]["quality"]["max_interpolation_gap_frames"], 1)
 
 
 if __name__ == "__main__":
