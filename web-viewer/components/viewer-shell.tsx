@@ -3174,7 +3174,15 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
                       runDetail={runDetail}
                       frameIndex={safeFrameIndex}
                       frameCursor={safeFrameCursor}
-                      uprightMode
+                      // A pose-only viewer may remove camera tilt for easier
+                      // kinematic reading. In a shared scene that would rotate
+                      // only the person and break their measured relationship
+                      // to static or dynamic geometry, so keep every actor in
+                      // the same recovered coordinate frame.
+                      uprightMode={
+                        (runDetail.sceneObjects?.length ?? 0) === 0
+                        && (runDetail.dynamicObjects?.length ?? 0) === 0
+                      }
                       showMesh={showMesh && runDetail.hasMeshes}
                       showJoints={showJoints}
                       showBones={showBones}

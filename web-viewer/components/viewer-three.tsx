@@ -570,10 +570,10 @@ function frameHasMeaningfulRoot(frame: RunFrame): boolean {
   return Math.hypot(root[0], root[1], root[2]) > 1e-4;
 }
 
-// Rotation that stands the body upright by aligning its hip->shoulder (or foot->shoulder) axis with world up;
-// returns identity for small tilts or when the required joints are missing.
-// Raw body-up direction (shoulder centre relative to feet/hips) in viewer
-// space; null when the joints are unavailable.
+// Rotation that removes camera tilt from the torso while preserving the pose of
+// the whole body. Feet are deliberately not part of this axis: their position
+// relative to the shoulders encodes a valid seated, crouched, lunge, or floor
+// posture and must not be rotated away.
 function bodyUpVector(frame: RunFrame | null, anchor: DisplayAnchor | null): THREE.Vector3 | null {
   if (frame?.subjectPresent === false) {
     return null;
@@ -591,18 +591,8 @@ function bodyUpVector(frame: RunFrame | null, anchor: DisplayAnchor | null): THR
   }
   const hipCenter = leftHip.clone().add(rightHip).multiplyScalar(0.5);
   const shoulderCenter = leftShoulder.clone().add(rightShoulder).multiplyScalar(0.5);
-  const footPoints = [13, 14, 15, 16, 17, 18, 19, 20]
-    .map((index) => joints[index])
-    .filter((joint): joint is [number, number, number] => Boolean(joint))
-    .map((joint) => camToWorld(joint, anchor));
-  const footCenter =
-    footPoints.length > 0
-      ? footPoints.reduce((sum, point) => sum.add(point), new THREE.Vector3()).multiplyScalar(1 / footPoints.length)
-      : null;
   const trunkUp = shoulderCenter.clone().sub(hipCenter);
-  const fullBodyUp = footCenter ? shoulderCenter.clone().sub(footCenter) : trunkUp;
-  const bodyUp = fullBodyUp.length() > 1e-5 ? fullBodyUp : trunkUp;
-  return bodyUp.length() > 1e-5 ? bodyUp.normalize() : null;
+  return trunkUp.length() > 1e-5 ? trunkUp.normalize() : null;
 }
 
 // Upright correction from an up vector, with a graduated fade: a SMALL tilt is
