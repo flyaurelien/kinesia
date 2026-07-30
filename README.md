@@ -108,8 +108,10 @@ matched to what is actually reliable at that time scale:
   (Hungarian assignment, constant-velocity prediction). Appearance embeddings
   only order near-ties, and are ignored entirely inside a crossing where the
   two people overlap — exactly where embeddings become contaminated and
-  confidently wrong. New identities are never born inside a crossing or a
-  dissolve, so occlusion fragments cannot become ghost subjects.
+  confidently wrong. Detection runs on every video frame. Confident nested
+  fragments sharing the same box boundaries are removed before association;
+  new identities are never born inside a crossing or a dissolve, so duplicate
+  and occlusion fragments cannot become ghost subjects.
 - **Appearance re-identification** brings a subject back after a real absence
   (left the frame and returned), with strict or lenient thresholds depending on
   how recently the track was seen.

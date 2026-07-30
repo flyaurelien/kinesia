@@ -362,12 +362,9 @@ def densify_anchor_track(
 ) -> list[tuple[int, np.ndarray]]:
     """Fill small gaps in a sparse chosen-subject anchor track by interpolation.
 
-    The detect step samples the chosen subject at a stride (e.g. every 5th
-    frame), but the reconstruction processes EVERY frame (effective_frame_step
-    is forced to 1). A frame with no anchor falls back to the live identity
-    tracker, which can pick the other person at a crossing — so without this the
-    chosen-subject lock would only hold on one frame in `stride`, and identity
-    swaps re-enter the output on all the others.
+    Current detection processes every frame. Older chosen-subject artifacts can
+    still be sampled at a larger stride; a frame without an anchor falls back to
+    the live identity tracker, which can pick another person at a crossing.
 
     Linearly interpolate the subject box across gaps up to ``max_gap_factor``
     times the (estimated) sampling stride, so every frame inside a covered span

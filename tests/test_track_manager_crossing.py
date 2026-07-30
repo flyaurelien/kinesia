@@ -114,6 +114,37 @@ class TestCrossingNoSwap(unittest.TestCase):
         self.assertEqual(res[0][0], id_a, "post-cut re-ID lost A")
         self.assertEqual(res[1][0], id_b, "post-cut re-ID lost B")
 
+    def test_full_reentry_box_reuses_identity_instead_of_fragmenting_track(self):
+        tm = TrackManager()
+        full = np.array([0.0, 900.0, 115.0, 3480.0], dtype=np.float32)
+        fragment = np.array([0.0, 980.0, 60.0, 1150.0], dtype=np.float32)
+        reentry_fragment = np.array([0.0, 900.0, 113.0, 1235.0], dtype=np.float32)
+        identity = tm.update(0, [{"bbox": full, "emb": _E_A, "score": 0.96}])[0][0]
+        tm.update(5, [{"bbox": fragment, "emb": _E_A, "score": 0.86}])
+
+        result = tm.update(10, [
+            {"bbox": reentry_fragment, "emb": _E_A, "score": 0.55},
+            {"bbox": full, "emb": _E_A, "score": 0.90},
+        ])
+
+        self.assertEqual(result[0][0], -1, "nested fragment was not suppressed")
+        self.assertEqual(result[1][0], identity, "full re-entry box lost its identity")
+        self.assertEqual(len(tm.tracks), 1, "duplicate detection created a new person")
+
+    def test_spatially_distinct_nested_people_are_not_deduplicated(self):
+        tm = TrackManager()
+        outer = np.array([0.0, 0.0, 200.0, 600.0], dtype=np.float32)
+        inner = np.array([60.0, 160.0, 140.0, 420.0], dtype=np.float32)
+
+        result = tm.update(0, [
+            {"bbox": outer, "emb": _E_A, "score": 0.95},
+            {"bbox": inner, "emb": _E_B, "score": 0.70},
+        ])
+
+        self.assertGreaterEqual(result[0][0], 0)
+        self.assertGreaterEqual(result[1][0], 0)
+        self.assertNotEqual(result[0][0], result[1][0])
+
 
 class TestSegmentedLinking(unittest.TestCase):
     """Montage behaviour: within a segment position rules; across a dissolve the

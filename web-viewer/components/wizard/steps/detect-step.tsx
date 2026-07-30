@@ -7,7 +7,7 @@ import { clamp, formatTimecode } from "../../../lib/video-timeline";
 import { stageUpload } from "../upload-client";
 import { useWizard, type DetectDet } from "../state";
 
-const DEFAULT_STRIDE = 5;
+const DEFAULT_STRIDE = 1;
 
 /** Detect step: run a full-video, detection-only pass that streams per-frame
  *  boxes for every person (SAM3 via MLX), play the annotated result as it fills
