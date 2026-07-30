@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--json", action="store_true")
 
     scene_parser = subparsers.add_parser(
-        "scene", help="Reconstruct static scene objects or track a known-size dynamic sphere."
+        "scene", help="Reconstruct static scene objects or model-pose moving objects."
     )
     scene_parser.add_argument("--run-id", required=True)
     scene_parser.add_argument(
@@ -213,8 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "shape: find each object and reconstruct it, which needs nothing "
             "from the subject and so can run first. place: stand the built "
-            "shapes on the floor the subject's feet measured. dynamic: track "
-            "known-size spherical objects through the completed run."
+            "shapes on the floor the subject's feet measured. dynamic: sample "
+            "SAM 3D Objects poses through the completed run."
         ),
     )
     scene_parser.add_argument(
@@ -226,16 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="detection-step track, used to avoid the subject before the run has outlines",
     )
     scene_parser.add_argument(
-        "--dynamic-sphere-diameter-m",
-        type=float,
-        default=None,
-        help="Known physical diameter in metres, required for --stage dynamic.",
-    )
-    scene_parser.add_argument(
         "--dynamic-frame-stride",
         type=int,
-        default=1,
-        help="Track every Nth reconstructed frame for --stage dynamic (default: 1).",
+        default=5,
+        help="Run the object pose model every Nth reconstructed frame (default: 5).",
     )
     scene_parser.add_argument("--json", action="store_true")
 
@@ -670,26 +664,18 @@ def cmd_scene(args: argparse.Namespace) -> int:
         if not prompts:
             print("no dynamic objects requested")
             return 0
-        if len(prompts) != 1:
-            print("dynamic sphere tracking accepts exactly one prompt/object per invocation")
-            return 2
-        diameter_m = args.dynamic_sphere_diameter_m
-        if diameter_m is None or diameter_m <= 0:
-            print("--dynamic-sphere-diameter-m must be a positive value for --stage dynamic")
-            return 2
         if args.dynamic_frame_stride < 1:
             print("--dynamic-frame-stride must be at least 1")
             return 2
-        from .dynamic_objects import track_dynamic_spheres
+        from .dynamic_objects import track_dynamic_objects
 
         video = args.video
         if video is None:
             video = Path(json.loads(metadata_path.read_text()).get("video_input") or "")
-        result = track_dynamic_spheres(
+        result = track_dynamic_objects(
             directory,
             prompts,
             video,
-            diameter_m=float(diameter_m),
             frame_stride=int(args.dynamic_frame_stride),
         )
         names = ", ".join(obj["name"] for obj in result["objects"]) or "none"
@@ -701,7 +687,7 @@ def cmd_scene(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(result, indent=2, default=str))
         # The completed human run remains valid, but callers must be able to
-        # surface a requested ball that was not actually reconstructed.
+        # surface a requested object that was not actually reconstructed.
         return 0 if result.get("objects") and not result.get("failures") else 1
 
     shape_result: dict | None = None

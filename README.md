@@ -75,26 +75,18 @@ relationship between subjects and scene objects are not reliable.
 Human reconstruction is the supported workflow. Scene-object reconstruction is
 an experimental opt-in feature with a deliberately narrower contract:
 
-- It creates one mesh and one fixed pose from a reference frame for an object
-  that is static, upright, and touching the ground.
-- A visible, approximately circular sphere such as a ball can be tracked over
-  time when its physical diameter is supplied. It exports 3D position and
-  velocity in the shared world frame, but not orientation or spin.
-- Other moving, held, thrown, airborne, rolling, deforming, or generic objects
-  are unsupported.
+- A static object creates one mesh and uses SAM 3D Objects' local-to-camera
+  translation, rotation, and scale directly for its fixed pose.
+- A moving object is reconstructed once, then SAM 3D Objects estimates its
+  local-to-camera translation, rotation, and scale every five reconstructed
+  frames. The viewer interpolates those model poses in the shared world frame.
 - Monocular depth, orientation, scale, and ground-contact inference are
   uncertain. Inspect every object placement before using it in analysis or
   presentation material.
 
-Before metric sphere tracking, Kinesia estimates global feature motion. It
-rejects a clip when it detects a pan, translation, rotation, or zoom that would
-invalidate the shared camera/world frame. A textureless clip can remain
-unverified, so a fixed tripod is still a capture requirement rather than a
-guarantee inferred from the video.
-
-The app continues a human-reconstruction run when the optional static-object
-runtime is absent; it skips static mesh reconstruction and records the reason
-in the run log. The dynamic-sphere tracker remains available.
+The app continues a human-reconstruction run when the optional object runtime
+is absent; it skips the requested scene-object reconstruction and records the
+reason in the run log.
 
 ### Identity tracking
 
@@ -200,11 +192,6 @@ separate runtime. The current integration targets **macOS on Apple Silicon** thr
 [Sam3D-Objects-MLX port](https://github.com/ZimengXiong/Sam3D-Objects-MLX).
 Its code and all SAM 3D Objects checkpoints stay outside this repository; no
 object-model code or weights are redistributed by Kinesia.
-
-The known-diameter dynamic-sphere tracker does not need this optional runtime:
-it uses the main Kinesia SAM 3 installation. It still requires a fixed camera,
-a visible roughly circular sphere, and a supplied real-world diameter. Spin is
-not inferred for an unmarked sphere.
 
 Install the known-compatible external runtime at the path Kinesia checks by
 default:
@@ -323,9 +310,8 @@ uv run --no-sync sam3d run --video-input input/example.mp4 --run-id example_p2 \
 # derive kinematics for a run
 uv run --no-sync sam3d analyze --run-id example_processed
 
-# experimentally track a 22 cm ball through a fixed-camera completed run
-uv run --no-sync sam3d scene --run-id example_processed --stage dynamic --prompts ball \
-  --dynamic-sphere-diameter-m 0.22
+# reconstruct a generic moving object using SAM 3D model poses every 5 frames
+uv run --no-sync sam3d scene --run-id example_processed --stage dynamic --prompts object
 ```
 
 Artifacts land under `output/<run_id>/` (meshes, metadata, previews, kinematics).

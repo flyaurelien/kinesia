@@ -165,28 +165,26 @@ export type SceneObject = {
   solved: { depthM: number; heightM: number; widthM: number; floorZ: number };
 };
 
-// One observed pose of a known-size sphere. Positions share the same metric
-// world frame as static scene objects and reconstructed subjects.
-export type DynamicSpherePose = {
+// One model-derived object transform at a reconstructed run frame.
+export type DynamicObjectPose = {
   frameIndex: number;
   videoFrame: number | null;
   timeS: number | null;
-  positionWorld: [number, number, number];
-  confidence: number | null;
+  objectToWorld: SceneObjectMatrix;
+  detectorScore: number | null;
 };
 
-// The first dynamic scene-object contract. A sphere has no orientation because
-// spin cannot be inferred reliably from a single unmarked camera view.
-export type DynamicSphere = {
-  kind: "sphere";
+// A mesh reconstructed once, then placed by the model's pose on sampled frames.
+export type DynamicObject = {
+  kind: "mesh";
   name: string;
   prompt: string | null;
-  radiusM: number;
-  poses: DynamicSpherePose[];
+  meshUrl: string;
+  poses: DynamicObjectPose[];
   maxInterpolationGapFrames: number;
 };
 
-export type DynamicSceneObject = DynamicSphere;
+export type DynamicSceneObject = DynamicObject;
 
 // Full payload for a single run, including every frame and signal (viewer page).
 export type RunDetail = {
