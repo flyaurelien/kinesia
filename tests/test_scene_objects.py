@@ -14,10 +14,12 @@ import trimesh
 
 from sam_3d_pose_estimation.scene_objects import (
     FOOT_JOINTS,
+    calibrate_model_pose_to_subject_frame,
     canonical_mesh_frame,
     fit_pose_to_silhouette,
     floor_height_for_run,
     model_pose_to_world_matrix,
+    place_built_shapes,
     place_object,
     rasterize_mesh_silhouette,
     transform_points,
@@ -88,16 +90,50 @@ def _angle_error(left: float, right: float) -> float:
 
 
 class TestSceneObjectTransforms(unittest.TestCase):
-    def test_model_pose_maps_directly_from_camera_to_world(self):
+    def test_model_pose_converts_runtime_camera_and_glb_axes_to_world(self):
         matrix = model_pose_to_world_matrix({
             "translation_l2c": [[1.0, 2.0, 3.0]],
             "rotation_quaternion_wxyz_l2c": [[1.0, 0.0, 0.0, 0.0]],
             "scale_l2c": [[2.0, 3.0, 4.0]],
         })
-        np.testing.assert_allclose(matrix[:3, 3], [-3.0, 1.0, -2.0])
+        np.testing.assert_allclose(matrix[:3, 3], [-3.0, -1.0, 2.0])
         np.testing.assert_allclose(matrix[:3, :3], np.array([
-            [0.0, 0.0, -4.0], [2.0, 0.0, 0.0], [0.0, -3.0, 0.0],
+            [0.0, -4.0, 0.0], [-2.0, 0.0, 0.0], [0.0, 0.0, -3.0],
         ]))
+
+    def test_model_pose_metric_alignment_preserves_orientation_and_shared_floor(self):
+        pose = {
+            "translation_l2c": [0.0, -0.5, 2.0],
+            "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
+            "scale_l2c": [1.0, 1.0, 1.0],
+        }
+        vertices = np.array([
+            [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [-0.5, 0.5, 0.5],
+            [0.5, 0.5, 0.5],
+        ], dtype=np.float64)
+        direct = model_pose_to_world_matrix(pose)
+        matrix, calibration = calibrate_model_pose_to_subject_frame(
+            pose,
+            vertices,
+            {"depth_m": 4.0, "floor_z": -1.25},
+        )
+
+        self.assertGreater(calibration["model_to_subject_scale"], 0.0)
+        self.assertAlmostEqual(calibration["floor_residual_m"], 0.0, places=12)
+        np.testing.assert_allclose(
+            matrix[:3, :3] / calibration["model_to_subject_scale"],
+            direct[:3, :3],
+            atol=1e-12,
+        )
+        world_vertices = transform_points(matrix, vertices)
+        self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
+        self.assertGreater(float(np.linalg.det(matrix[:3, :3])), 0.0)
 
     def test_model_pose_rejects_an_invalid_rotation(self):
         with self.assertRaisesRegex(ValueError, "rotation quaternion"):
@@ -303,6 +339,57 @@ class TestSceneObjectTransforms(unittest.TestCase):
             transform_points(raw_to_world, raw_vertices),
             atol=1e-12,
         )
+
+    def test_model_pose_artifact_is_recalibrated_without_reconstructing_its_mesh(self):
+        pose = {
+            "translation_l2c": [0.0, -0.5, 2.0],
+            "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
+            "scale_l2c": [1.0, 1.0, 1.0],
+        }
+        placement = {
+            "depth_m": 4.0,
+            "floor_z": -1.25,
+            "floor_reference": "world_anchor",
+            "calibrated": True,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            scene_dir = run_dir / "scene"
+            scene_dir.mkdir()
+            (run_dir / "run_metadata.json").write_text(json.dumps({
+                "video_width": 320,
+                "video_height": 240,
+                "records": [],
+            }))
+            trimesh.creation.box().export(scene_dir / "fixture.glb")
+            (scene_dir / "fixture_model_pose.json").write_text(json.dumps(pose))
+            (scene_dir / "fixture.json").write_text(json.dumps({
+                "name": "fixture",
+                "prompt": "fixture",
+                "source_frame": 0,
+                "detection_score": 0.9,
+                "model_pose": pose,
+            }))
+            mask = np.ones((240, 320), dtype=bool)
+            with mock.patch(
+                "sam_3d_pose_estimation.scene_objects._solve_static_placement",
+                return_value=(placement, mask, 320, 240),
+            ):
+                result = place_built_shapes(run_dir, log=lambda _: None)
+            record = json.loads((scene_dir / "fixture.json").read_text())
+            mesh = trimesh.load(scene_dir / "fixture.glb", force="mesh")
+
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(len(result["objects"]), 1)
+        self.assertEqual(
+            record["quality"]["source"],
+            "sam3d_objects_model_pose_subject_calibrated",
+        )
+        world_vertices = transform_points(
+            np.asarray(record["object_to_world"], dtype=np.float64),
+            np.asarray(mesh.vertices, dtype=np.float64),
+        )
+        self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
 
 
 if __name__ == "__main__":

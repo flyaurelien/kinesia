@@ -11,6 +11,8 @@ import cv2
 import numpy as np
 import torch
 
+from .workspace import project_root_from
+
 
 class _MHRMPSWrapper(torch.nn.Module):
     """Run TorchScript MHR on CPU when model tensors are on MPS."""
@@ -128,6 +130,19 @@ def add_optional_repo_to_path(repo_root: Path | None) -> Path | None:
     if str(resolved) not in sys.path:
         sys.path.insert(0, str(resolved))
     return resolved
+
+
+def default_sam3d_code_root() -> Path:
+    """Resolve the body-runtime root from configuration or the active project.
+
+    The installed package lives under ``.venv``; deriving a vendor directory
+    from this module's file would therefore point inside the environment rather
+    than at the checkout that owns the models and external runtimes.
+    """
+    configured = os.environ.get("SAM3D_CODE_ROOT")
+    if configured:
+        return Path(configured)
+    return project_root_from(Path.cwd()) / "vendor" / "sam-3d-body-main"
 
 
 def _ensure_pkg_resources_shim() -> None:
@@ -327,14 +342,7 @@ def try_build_human_detector(
         try:
             import tools.build_detector  # noqa: F401
         except ModuleNotFoundError:
-            add_sam3d_repo_to_path(
-                Path(
-                    os.environ.get(
-                        "SAM3D_CODE_ROOT",
-                        Path(__file__).resolve().parents[2] / "vendor" / "sam-3d-body-main",
-                    )
-                )
-            )
+            add_sam3d_repo_to_path(default_sam3d_code_root())
         from tools.build_detector import HumanDetector
 
         # Auto device: CUDA on a GPU box, MPS on Apple Silicon, else CPU. The
