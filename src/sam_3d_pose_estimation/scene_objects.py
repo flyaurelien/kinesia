@@ -2,13 +2,13 @@
 
 SAM 3D Objects predicts an object's shape and full local-to-camera orientation,
 but its scene scale is scale-shift invariant. A static object is therefore
-aligned to the human reconstruction through geometric evidence shared by both:
-the source mask's floor-contact ray and the floor reconstructed from the
-subject's feet. That provides one global similarity scale and a floor
+initially aligned to the human reconstruction through geometric evidence shared
+by both: the source mask's floor-contact ray and the floor reconstructed from
+the subject's feet. That provides one global similarity scale and a floor
 translation without changing the model's quaternion-derived orientation or the
-mesh's internal proportions. A final generic interaction pass rejects any
-placement whose reconstructed surface passes through the reconstructed subject
-while retaining the visible object-mask evidence and the shared floor.
+mesh's internal proportions. A final generic interaction pass refines that
+global scale around the floor contact when needed, preventing body penetration
+while retaining near-surface contact and the visible object-mask evidence.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 import numpy as np
 import trimesh
+from scipy.spatial import cKDTree
 
 # COCO-WholeBody foot joints, as used everywhere else in the pipeline.
 FOOT_JOINTS = [13, 15, 16, 17, 14, 18, 19, 20]
@@ -35,6 +36,11 @@ INTERACTION_TRIGGER_FRACTION = 0.01
 INTERACTION_ACCEPTED_FRACTION = 0.003
 INTERACTION_DIRECTION_SAMPLES = 32
 INTERACTION_RADIAL_SAMPLES = 28
+INTERACTION_SCALE_SAMPLES = 14
+INTERACTION_MIN_SCALE = 0.35
+INTERACTION_CONTACT_QUANTILE = 0.05
+INTERACTION_CONTACT_MAX_DISTANCE_M = 0.12
+MAX_INTERACTION_CONTACT_SAMPLES = 2_000
 
 SCHEMA = "kinesia.scene_object.v1"
 TRANSFORM_SCHEMA = "kinesia.scene_object_transform.v1"
@@ -489,6 +495,49 @@ def _floor_translation_candidates(max_distance_m: float, pitch_m: float) -> list
     return candidates
 
 
+def _scale_about_world_pivot(
+    matrix: np.ndarray,
+    pivot_world: np.ndarray,
+    factor: float,
+) -> np.ndarray:
+    """Uniformly scale a world transform around a fixed world-space pivot."""
+    adjusted = np.asarray(matrix, dtype=np.float64).copy()
+    pivot = np.asarray(pivot_world, dtype=np.float64)
+    if adjusted.shape != (4, 4) or pivot.shape != (3,):
+        raise ValueError("matrix must be 4x4 and pivot_world must contain three values")
+    if not np.isfinite(factor) or factor <= 0:
+        raise ValueError("factor must be finite and positive")
+    adjusted[:3, :3] *= factor
+    adjusted[:3, 3] = pivot + factor * (adjusted[:3, 3] - pivot)
+    return adjusted
+
+
+def _floor_pivot_from_vertices(vertices_world: np.ndarray, pitch_m: float) -> np.ndarray:
+    """Estimate a stable floor-contact pivot from an object's world vertices."""
+    vertices = np.asarray(vertices_world, dtype=np.float64)
+    floor_z = float(vertices[:, 2].min())
+    height = float(np.ptp(vertices[:, 2]))
+    tolerance = max(float(pitch_m) * 2.0, height * 0.01, 1e-6)
+    floor_vertices = vertices[vertices[:, 2] <= floor_z + tolerance]
+    if len(floor_vertices) == 0:
+        floor_vertices = vertices[[int(np.argmin(vertices[:, 2]))]]
+    return np.array([
+        float(np.median(floor_vertices[:, 0])),
+        float(np.median(floor_vertices[:, 1])),
+        floor_z,
+    ])
+
+
+def _surface_contact_distance(
+    surface_world: np.ndarray,
+    subject_tree: cKDTree,
+) -> float:
+    """Return a robust near-surface distance between object and subject meshes."""
+    samples = _evenly_spaced_points(surface_world, MAX_INTERACTION_CONTACT_SAMPLES)
+    distances, _ = subject_tree.query(samples, k=1)
+    return float(np.quantile(distances, INTERACTION_CONTACT_QUANTILE))
+
+
 def resolve_floor_object_body_penetration(
     object_to_world: np.ndarray,
     mesh: trimesh.Trimesh,
@@ -496,14 +545,16 @@ def resolve_floor_object_body_penetration(
     mask: np.ndarray,
     focal: float,
     occluded: np.ndarray | None = None,
+    floor_pivot_world: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Resolve a static mesh/body overlap using only geometric source evidence.
 
-    The object retains its model-predicted orientation, scale, and floor height.
-    When surface samples lie inside the watertight source-frame body mesh, the
-    solver searches translations parallel to the floor. It selects a clear
-    candidate by its visible source-mask reprojection, then by the smallest
-    movement. No prompt text or object category participates in this decision.
+    The object retains its model-predicted orientation, proportions, and floor
+    height. When it intersects the source-frame body, the solver first resolves
+    the model's global scene-scale ambiguity around the floor contact while
+    preserving near-surface contact. A floor-parallel translation is only used
+    when no contact-preserving scale exists. No prompt text or object category
+    participates in this decision.
     """
     matrix = np.asarray(object_to_world, dtype=np.float64)
     if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
@@ -513,6 +564,7 @@ def resolve_floor_object_body_penetration(
             "status": "unavailable",
             "reason": "source_frame_subject_mesh_missing",
             "translation_world_m": [0.0, 0.0, 0.0],
+            "scale_factor": 1.0,
             "floor_preserved": True,
         }
     occupancy_result = _subject_occupancy(subject_mesh_world)
@@ -521,6 +573,7 @@ def resolve_floor_object_body_penetration(
             "status": "unavailable",
             "reason": "source_frame_subject_mesh_not_closed",
             "translation_world_m": [0.0, 0.0, 0.0],
+            "scale_factor": 1.0,
             "floor_preserved": True,
         }
     occupancy, pitch = occupancy_result
@@ -534,13 +587,27 @@ def resolve_floor_object_body_penetration(
     hits_before = int(inside_before.sum())
     fraction_before = float(hits_before / max(sample_count, 1))
     visible_iou_before = _visible_mask_iou(vertices_world, mask, focal, occluded)
+    subject_surface = _evenly_spaced_points(
+        _mesh_surface_samples(subject_mesh_world),
+        MAX_INTERACTION_CONTACT_SAMPLES,
+    )
+    subject_tree = cKDTree(subject_surface)
+    contact_before = _surface_contact_distance(surface_world, subject_tree)
+    if floor_pivot_world is None:
+        floor_pivot = _floor_pivot_from_vertices(vertices_world, pitch)
+    else:
+        floor_pivot = np.asarray(floor_pivot_world, dtype=np.float64)
+        if floor_pivot.shape != (3,) or not np.all(np.isfinite(floor_pivot)):
+            raise ValueError("floor_pivot_world must contain three finite values")
     shared = {
-        "method": "watertight_subject_occupancy_visible_mask",
+        "method": "subject_occupancy_contact_visible_mask",
         "voxel_pitch_m": pitch,
         "surface_samples": sample_count,
         "penetrating_surface_samples_before": hits_before,
         "penetrating_surface_fraction_before": fraction_before,
         "visible_mask_iou_before": visible_iou_before,
+        "contact_distance_before_m": contact_before,
+        "floor_pivot_world": [float(value) for value in floor_pivot],
         "floor_preserved": True,
     }
     if fraction_before <= INTERACTION_TRIGGER_FRACTION:
@@ -550,24 +617,59 @@ def resolve_floor_object_body_penetration(
             "penetrating_surface_samples_after": hits_before,
             "penetrating_surface_fraction_after": fraction_before,
             "visible_mask_iou_after": visible_iou_before,
+            "contact_distance_after_m": contact_before,
             "translation_world_m": [0.0, 0.0, 0.0],
+            "scale_factor": 1.0,
+        }
+
+    accepted_hits = max(1, int(np.ceil(sample_count * INTERACTION_ACCEPTED_FRACTION)))
+    scale_candidates: list[tuple[float, float, float, np.ndarray, int]] = []
+    for factor in np.linspace(INTERACTION_MIN_SCALE, 1.0, INTERACTION_SCALE_SAMPLES):
+        candidate_matrix = _scale_about_world_pivot(matrix, floor_pivot, float(factor))
+        candidate_surface = transform_points(candidate_matrix, surface_local)
+        hits = int(np.asarray(occupancy.is_filled(candidate_surface), dtype=bool).sum())
+        if hits > accepted_hits:
+            continue
+        contact = _surface_contact_distance(candidate_surface, subject_tree)
+        if contact > INTERACTION_CONTACT_MAX_DISTANCE_M:
+            continue
+        candidate_vertices = transform_points(
+            candidate_matrix, np.asarray(mesh.vertices, dtype=np.float64)
+        )
+        iou = _visible_mask_iou(candidate_vertices, mask, focal, occluded)
+        scale_candidates.append((contact, -iou, -float(factor), candidate_matrix, hits))
+    if scale_candidates:
+        contact_after, negative_iou, negative_factor, adjusted, hits_after = min(
+            scale_candidates,
+            key=lambda candidate: (candidate[0], candidate[1], candidate[2]),
+        )
+        return adjusted, {
+            **shared,
+            "status": "corrected",
+            "penetrating_surface_samples_after": hits_after,
+            "penetrating_surface_fraction_after": float(hits_after / sample_count),
+            "visible_mask_iou_after": -negative_iou,
+            "contact_distance_after_m": contact_after,
+            "translation_world_m": [0.0, 0.0, 0.0],
+            "scale_factor": -negative_factor,
         }
 
     object_extent = float(np.ptp(surface_world[:, :2], axis=0).max(initial=0.0))
     subject_extent = float(np.ptp(subject_mesh_world.vertices[:, :2], axis=0).max(initial=0.0))
     max_distance = min(2.0, max(0.25, 1.25 * max(object_extent, subject_extent)))
-    accepted_hits = max(1, int(np.ceil(sample_count * INTERACTION_ACCEPTED_FRACTION)))
-    candidates: list[tuple[float, float, np.ndarray, int, float]] = []
+    candidates: list[tuple[float, float, np.ndarray, int, float, float]] = []
     for translation in _floor_translation_candidates(max_distance, pitch):
-        hits = int(np.asarray(occupancy.is_filled(surface_world + translation), dtype=bool).sum())
+        candidate_surface = surface_world + translation
+        hits = int(np.asarray(occupancy.is_filled(candidate_surface), dtype=bool).sum())
         if hits > accepted_hits:
             continue
+        contact = _surface_contact_distance(candidate_surface, subject_tree)
         iou = _visible_mask_iou(vertices_world + translation, mask, focal, occluded)
         distance = float(np.linalg.norm(translation[:2]))
         # Image evidence stays primary; the tiny distance term settles otherwise
         # identical projections without inventing a semantic direction.
         score = iou - 0.015 * distance / max(max_distance, 1e-9)
-        candidates.append((score, iou, translation, hits, distance))
+        candidates.append((score, iou, translation, hits, distance, contact))
     if not candidates:
         return matrix.copy(), {
             **shared,
@@ -576,10 +678,12 @@ def resolve_floor_object_body_penetration(
             "penetrating_surface_samples_after": hits_before,
             "penetrating_surface_fraction_after": fraction_before,
             "visible_mask_iou_after": visible_iou_before,
+            "contact_distance_after_m": contact_before,
             "translation_world_m": [0.0, 0.0, 0.0],
+            "scale_factor": 1.0,
             "candidate_search_radius_m": max_distance,
         }
-    _, iou_after, translation, hits_after, _ = max(
+    _, iou_after, translation, hits_after, _, contact_after = max(
         candidates,
         key=lambda candidate: (candidate[0], candidate[1], -candidate[4]),
     )
@@ -591,7 +695,9 @@ def resolve_floor_object_body_penetration(
         "penetrating_surface_samples_after": hits_after,
         "penetrating_surface_fraction_after": float(hits_after / sample_count),
         "visible_mask_iou_after": iou_after,
+        "contact_distance_after_m": contact_after,
         "translation_world_m": [float(value) for value in translation],
+        "scale_factor": 1.0,
         "candidate_search_radius_m": max_distance,
     }
 
@@ -1081,7 +1187,9 @@ def place_object(
         mask,
         source_focal if source_focal is not None else focal,
         occluded,
+        floor_pivot_world=position_world,
     )
+    scale *= float(interaction["scale_factor"])
     position_world = position_world + np.asarray(interaction["translation_world_m"], dtype=np.float64)
     fit["position_world"] = [float(value) for value in position_world]
     flip_matrix = upright_flip_matrix(up_axis, flipped)
@@ -1147,7 +1255,8 @@ def place_object(
     if interaction["status"] == "corrected":
         shift = interaction["translation_world_m"]
         log(
-            "subject separation corrected by "
+            "subject interaction corrected with uniform scale "
+            f"{interaction['scale_factor']:.3f} and translation "
             f"[{shift[0]:.3f}, {shift[1]:.3f}, {shift[2]:.3f}] m "
             f"({interaction['penetrating_surface_fraction_before'] * 100:.1f}% -> "
             f"{interaction['penetrating_surface_fraction_after'] * 100:.1f}% sampled overlap)"
@@ -1184,6 +1293,7 @@ def place_model_pose_object(
         source_focal if source_focal is not None else float(placement.get("focal_px", 0.0)),
         occluded,
     )
+    calibration["interaction_scale_factor"] = float(interaction["scale_factor"])
     transformed = transform_points(object_to_world, vertices)
     scale = max(1.0, float(np.abs(transformed).max(initial=0.0)))
     tolerance = float(np.finfo(np.float64).eps * 128.0 * scale)
@@ -1235,7 +1345,8 @@ def place_model_pose_object(
         "note": (
             "Orientation is the SAM 3D Objects quaternion after documented "
             "camera and GLB axis conversion. Its scale-shift-invariant scene "
-            "scale is aligned once to the subject's metric floor and source mask."
+            "scale is aligned to the subject's metric floor and source mask, "
+            "then refined uniformly from body contact when required."
         ),
     }
     log(f"model orientation retained; subject-frame scale {calibration['model_to_subject_scale']:.4f}")
@@ -1243,7 +1354,8 @@ def place_model_pose_object(
     if interaction["status"] == "corrected":
         shift = interaction["translation_world_m"]
         log(
-            "subject separation corrected by "
+            "subject interaction corrected with uniform scale "
+            f"{interaction['scale_factor']:.3f} and translation "
             f"[{shift[0]:.3f}, {shift[1]:.3f}, {shift[2]:.3f}] m "
             f"({interaction['penetrating_surface_fraction_before'] * 100:.1f}% -> "
             f"{interaction['penetrating_surface_fraction_after'] * 100:.1f}% sampled overlap)"
