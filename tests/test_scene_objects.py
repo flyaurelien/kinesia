@@ -14,6 +14,9 @@ import trimesh
 
 from sam_3d_pose_estimation.scene_objects import (
     FOOT_JOINTS,
+    align_object_pointmap_to_subject,
+    apply_scene_alignment_to_model_pose,
+    cam_to_world,
     calibrate_model_pose_to_subject_frame,
     canonical_mesh_frame,
     fit_pose_to_silhouette,
@@ -152,6 +155,40 @@ class TestSceneObjectTransforms(unittest.TestCase):
         world_vertices = transform_points(matrix, vertices)
         self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
         self.assertGreater(float(np.linalg.det(matrix[:3, :3])), 0.0)
+
+    def test_shared_scene_alignment_sets_scale_without_changing_proportions(self):
+        pose = {
+            "translation_l2c": [0.1, -0.4, 2.0],
+            "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
+            "scale_l2c": [0.5, 0.5, 0.5],
+        }
+        vertices = np.asarray(trimesh.creation.box().vertices)
+        direct = model_pose_to_world_matrix(pose)
+        alignment = {
+            "method": "shared_subject_pointmap_similarity",
+            "scale": 2.4,
+            "translation_camera": [0.1, -0.2, 0.7],
+            "sample_count": 400,
+            "inlier_count": 360,
+            "rms_m": 0.02,
+        }
+
+        matrix, calibration = calibrate_model_pose_to_subject_frame(
+            pose,
+            vertices,
+            {"depth_m": 4.0, "floor_z": -1.25},
+            alignment,
+        )
+
+        self.assertEqual(calibration["method"], "shared_subject_pointmap_similarity")
+        self.assertEqual(calibration["scene_alignment"], alignment)
+        np.testing.assert_allclose(
+            matrix[:3, :3] / alignment["scale"],
+            direct[:3, :3],
+            atol=1e-12,
+        )
+        world_vertices = transform_points(matrix, vertices)
+        self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
 
     def test_model_pose_rejects_an_invalid_rotation(self):
         with self.assertRaisesRegex(ValueError, "rotation quaternion"):
@@ -363,6 +400,15 @@ class TestSceneObjectTransforms(unittest.TestCase):
             "translation_l2c": [0.0, -0.5, 2.0],
             "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
             "scale_l2c": [1.0, 1.0, 1.0],
+            "scene_pointmap": "fixture_pointmap.npz",
+        }
+        alignment = {
+            "method": "shared_subject_pointmap_similarity",
+            "scale": 2.0,
+            "translation_camera": [0.0, 0.0, 0.5],
+            "sample_count": 400,
+            "inlier_count": 350,
+            "rms_m": 0.02,
         }
         placement = {
             "depth_m": 4.0,
@@ -380,6 +426,10 @@ class TestSceneObjectTransforms(unittest.TestCase):
                 "records": [],
             }))
             trimesh.creation.box().export(scene_dir / "fixture.glb")
+            np.savez_compressed(
+                scene_dir / "fixture_pointmap.npz",
+                pointmap=np.zeros((240, 320, 3), dtype=np.float32),
+            )
             (scene_dir / "fixture_model_pose.json").write_text(json.dumps(pose))
             (scene_dir / "fixture.json").write_text(json.dumps({
                 "name": "fixture",
@@ -389,13 +439,25 @@ class TestSceneObjectTransforms(unittest.TestCase):
                 "model_pose": pose,
             }))
             mask = np.ones((240, 320), dtype=bool)
-            with mock.patch(
-                "sam_3d_pose_estimation.scene_objects._solve_static_placement",
-                return_value=(placement, mask, 320, 240),
+            with (
+                mock.patch(
+                    "sam_3d_pose_estimation.scene_objects._solve_static_placement",
+                    return_value=(placement, mask, 320, 240),
+                ),
+                mock.patch(
+                    "sam_3d_pose_estimation.scene_objects._subject_mesh_world_on_frame",
+                    return_value=(trimesh.creation.box(), 200.0),
+                ),
+                mock.patch(
+                    "sam_3d_pose_estimation.scene_objects.align_object_pointmap_to_subject",
+                    return_value=alignment,
+                ),
             ):
                 result = place_built_shapes(run_dir, log=lambda _: None)
             record = json.loads((scene_dir / "fixture.json").read_text())
-            mesh = trimesh.load(scene_dir / "fixture.glb", force="mesh")
+            mesh_vertices = np.asarray(
+                trimesh.load(scene_dir / "fixture.glb", force="mesh").vertices
+            )
 
         self.assertEqual(result["failures"], [])
         self.assertEqual(len(result["objects"]), 1)
@@ -403,50 +465,57 @@ class TestSceneObjectTransforms(unittest.TestCase):
             record["quality"]["source"],
             "sam3d_objects_model_pose_subject_calibrated",
         )
-        world_vertices = transform_points(
-            np.asarray(record["object_to_world"], dtype=np.float64),
-            np.asarray(mesh.vertices, dtype=np.float64),
+        matrix = np.asarray(record["object_to_world"], dtype=np.float64)
+        direct = apply_scene_alignment_to_model_pose(pose, alignment)
+        np.testing.assert_allclose(
+            matrix[:3, :3],
+            direct[:3, :3],
         )
+        world_vertices = transform_points(matrix, mesh_vertices)
         self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
 
 
-class TestSubjectInteractionResolution(unittest.TestCase):
-    def test_global_scale_overlap_is_resolved_around_floor_contact(self):
-        subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
-        subject.apply_translation((-4.0, 0.0, 1.1))
-        object_mesh = trimesh.creation.box(extents=(0.8, 0.8, 1.4))
-        object_to_world = np.eye(4, dtype=np.float64)
-        object_to_world[:3, 3] = [-4.0, 0.0, 0.7]
-        floor_pivot = np.array([-4.0, 0.0, 0.0])
+class TestSharedSceneAlignment(unittest.TestCase):
+    def test_recovers_one_similarity_from_shared_subject_pixels(self):
+        x, y = np.meshgrid(
+            np.linspace(-0.8, 0.8, 20),
+            np.linspace(-0.6, 0.6, 20),
+        )
+        z = 4.8 + 0.2 * x + 0.1 * y
+        body_camera = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
+        body_world = np.asarray([cam_to_world(point) for point in body_camera])
+        subject = trimesh.Trimesh(
+            vertices=body_world,
+            faces=np.empty((0, 3), dtype=np.int64),
+            process=False,
+        )
+        expected_scale = 2.4
+        expected_translation = np.array([0.1, -0.2, 0.7])
+        pointmap = np.full((240, 320, 3), np.nan, dtype=np.float64)
+        u = np.rint(200.0 * body_camera[:, 0] / body_camera[:, 2] + 160).astype(int)
+        v = np.rint(200.0 * body_camera[:, 1] / body_camera[:, 2] + 120).astype(int)
+        source_camera = (body_camera - expected_translation) / expected_scale
+        source_pytorch3d = source_camera * np.array([-1.0, -1.0, 1.0])
+        pointmap[v, u] = source_pytorch3d
 
-        corrected, evidence = resolve_floor_object_body_penetration(
-            object_to_world,
-            object_mesh,
+        alignment = align_object_pointmap_to_subject(
+            pointmap,
             subject,
-            np.zeros((240, 320), dtype=bool),
             focal=200.0,
-            floor_pivot_world=floor_pivot,
+            image_width=320,
+            image_height=240,
         )
 
-        self.assertEqual(evidence["status"], "corrected")
-        self.assertGreaterEqual(evidence["scale_factor"], 0.55)
-        self.assertLessEqual(evidence["scale_factor"], 1.0)
-        self.assertLessEqual(evidence["penetrating_surface_samples_after"], 1)
-        self.assertLessEqual(evidence["contact_distance_after_m"], 0.12)
+        self.assertEqual(alignment["method"], "shared_subject_pointmap_similarity")
+        self.assertAlmostEqual(alignment["scale"], expected_scale, places=10)
         np.testing.assert_allclose(
-            corrected[:3, :3],
-            object_to_world[:3, :3] * evidence["scale_factor"],
+            alignment["translation_camera"], expected_translation, atol=1e-10
         )
-        transformed = transform_points(corrected, np.asarray(object_mesh.vertices))
-        self.assertAlmostEqual(float(transformed[:, 2].min()), floor_pivot[2])
-        np.testing.assert_allclose(
-            transform_points(corrected, np.zeros((1, 3)))[0],
-            floor_pivot + evidence["scale_factor"] * (
-                object_to_world[:3, 3] - floor_pivot
-            ) + np.asarray(evidence["translation_world_m"]),
-        )
+        self.assertLess(alignment["rms_m"], 1e-10)
 
-    def test_floor_object_overlap_preserves_orientation_proportions_and_floor(self):
+
+class TestSubjectInteractionResolution(unittest.TestCase):
+    def test_overlap_is_reported_without_modifying_the_calibrated_pose(self):
         subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
         subject.apply_translation((-4.0, 0.0, 0.0))
         object_mesh = trimesh.creation.box(extents=(0.6, 0.6, 0.6))
@@ -461,24 +530,17 @@ class TestSubjectInteractionResolution(unittest.TestCase):
             focal=200.0,
         )
 
-        self.assertEqual(evidence["status"], "corrected")
+        self.assertEqual(evidence["status"], "overlap_detected")
         self.assertGreater(evidence["penetrating_surface_fraction_before"], 0.5)
-        self.assertLessEqual(evidence["penetrating_surface_fraction_after"], 0.03)
-        self.assertTrue(evidence["floor_preserved"])
-        np.testing.assert_allclose(
-            corrected[:3, :3],
-            object_to_world[:3, :3] * evidence["scale_factor"],
+        self.assertEqual(
+            evidence["penetrating_surface_fraction_after"],
+            evidence["penetrating_surface_fraction_before"],
         )
-        original_vertices = transform_points(
-            object_to_world, np.asarray(object_mesh.vertices)
-        )
-        corrected_vertices = transform_points(
-            corrected, np.asarray(object_mesh.vertices)
-        )
-        self.assertAlmostEqual(
-            float(corrected_vertices[:, 2].min()),
-            float(original_vertices[:, 2].min()),
-        )
+        self.assertTrue(evidence["pose_preserved"])
+        self.assertFalse(evidence["pose_modified"])
+        self.assertEqual(evidence["scale_factor"], 1.0)
+        self.assertEqual(evidence["translation_world_m"], [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(corrected, object_to_world)
 
     def test_clear_floor_object_is_left_at_its_model_position(self):
         subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
