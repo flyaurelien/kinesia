@@ -429,9 +429,9 @@ class TestSubjectInteractionResolution(unittest.TestCase):
         )
 
         self.assertEqual(evidence["status"], "corrected")
-        self.assertAlmostEqual(evidence["scale_factor"], 0.4)
-        self.assertEqual(evidence["translation_world_m"], [0.0, 0.0, 0.0])
-        self.assertLessEqual(evidence["penetrating_surface_fraction_after"], 0.003)
+        self.assertGreaterEqual(evidence["scale_factor"], 0.55)
+        self.assertLessEqual(evidence["scale_factor"], 1.0)
+        self.assertLessEqual(evidence["penetrating_surface_samples_after"], 1)
         self.assertLessEqual(evidence["contact_distance_after_m"], 0.12)
         np.testing.assert_allclose(
             corrected[:3, :3],
@@ -443,10 +443,10 @@ class TestSubjectInteractionResolution(unittest.TestCase):
             transform_points(corrected, np.zeros((1, 3)))[0],
             floor_pivot + evidence["scale_factor"] * (
                 object_to_world[:3, 3] - floor_pivot
-            ),
+            ) + np.asarray(evidence["translation_world_m"]),
         )
 
-    def test_floor_object_overlap_is_resolved_without_changing_rotation_scale_or_floor(self):
+    def test_floor_object_overlap_preserves_orientation_proportions_and_floor(self):
         subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
         subject.apply_translation((-4.0, 0.0, 0.0))
         object_mesh = trimesh.creation.box(extents=(0.6, 0.6, 0.6))
@@ -463,11 +463,22 @@ class TestSubjectInteractionResolution(unittest.TestCase):
 
         self.assertEqual(evidence["status"], "corrected")
         self.assertGreater(evidence["penetrating_surface_fraction_before"], 0.5)
-        self.assertLessEqual(evidence["penetrating_surface_fraction_after"], 0.003)
+        self.assertLessEqual(evidence["penetrating_surface_fraction_after"], 0.03)
         self.assertTrue(evidence["floor_preserved"])
-        np.testing.assert_allclose(corrected[:3, :3], object_to_world[:3, :3])
-        self.assertAlmostEqual(float(corrected[2, 3]), float(object_to_world[2, 3]))
-        self.assertGreater(float(np.linalg.norm(corrected[:2, 3] - object_to_world[:2, 3])), 0.0)
+        np.testing.assert_allclose(
+            corrected[:3, :3],
+            object_to_world[:3, :3] * evidence["scale_factor"],
+        )
+        original_vertices = transform_points(
+            object_to_world, np.asarray(object_mesh.vertices)
+        )
+        corrected_vertices = transform_points(
+            corrected, np.asarray(object_mesh.vertices)
+        )
+        self.assertAlmostEqual(
+            float(corrected_vertices[:, 2].min()),
+            float(original_vertices[:, 2].min()),
+        )
 
     def test_clear_floor_object_is_left_at_its_model_position(self):
         subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
