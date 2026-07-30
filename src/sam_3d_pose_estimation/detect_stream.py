@@ -7,7 +7,7 @@ be stopped early.
 Run as a module (the web layer spawns it):
 
     python -m sam_3d_pose_estimation.detect_stream \
-        --video-input <video> --out-dir <scratch> [--prompt person] [--stride 5]
+        --video-input <video> --out-dir <scratch> [--prompt person] [--stride 1]
 
 It writes three files under ``--out-dir``:
   - ``progress.json``  {status, pid, processed, total_to_process, total_frames,
@@ -149,8 +149,12 @@ _NEW_ID_MAX_IOU = 0.35   # a leftover detection overlapping an existing track ab
                          # this spawns NO identity (crossing fragment — suppressed).
 _SCENE_CUT_DIFF = 28.0   # mean |Δgray| (0-255) between consecutive processed frames
                          # (32x18 downsample) above which the frame is a hard cut:
-                         # position is void there. Walking at stride 5 stays ~3-12;
+                         # position is void there. Ordinary motion stays ~3-12;
                          # a white flash or a room change jumps to 60-120.
+_NESTED_DUPLICATE_COVERAGE = 0.90
+_NESTED_DUPLICATE_AREA_RATIO = 1.50
+_NESTED_DUPLICATE_SCORE_MARGIN = 0.10
+_NESTED_DUPLICATE_EDGE_TOLERANCE = 0.03
 
 
 def _frame_signature(frame_bgr: np.ndarray) -> np.ndarray:
@@ -163,6 +167,64 @@ def _is_scene_change(sig: np.ndarray, prev_sig: np.ndarray | None) -> bool:
     if prev_sig is None:
         return False
     return float(np.abs(sig - prev_sig).mean()) >= _SCENE_CUT_DIFF
+
+
+def _nested_duplicate_keep_indices(dets: list[dict]) -> list[int]:
+    """Keep detections after removing confident nested fragments.
+
+    A detector can emit both a partial crop and a full box for the same subject
+    on one frame. Standard IoU suppression misses that case because the small
+    fragment has little area relative to the full box. A fragment is removed
+    only when the larger box contains it, shares at least two boundaries, and
+    has clearly higher confidence. Spatially distinct nested people therefore
+    remain separate observations.
+    """
+    dropped: set[int] = set()
+    for small_index, small in enumerate(dets):
+        if small_index in dropped:
+            continue
+        small_box = np.asarray(small["bbox"], dtype=np.float32)
+        small_width = max(0.0, float(small_box[2] - small_box[0]))
+        small_height = max(0.0, float(small_box[3] - small_box[1]))
+        small_area = small_width * small_height
+        if small_area <= 1e-6:
+            dropped.add(small_index)
+            continue
+        for large_index, large in enumerate(dets):
+            if large_index == small_index or large_index in dropped:
+                continue
+            large_box = np.asarray(large["bbox"], dtype=np.float32)
+            large_width = max(0.0, float(large_box[2] - large_box[0]))
+            large_height = max(0.0, float(large_box[3] - large_box[1]))
+            large_area = large_width * large_height
+            if large_area < _NESTED_DUPLICATE_AREA_RATIO * small_area:
+                continue
+            ix = max(
+                0.0,
+                min(float(small_box[2]), float(large_box[2]))
+                - max(float(small_box[0]), float(large_box[0])),
+            )
+            iy = max(
+                0.0,
+                min(float(small_box[3]), float(large_box[3]))
+                - max(float(small_box[1]), float(large_box[1])),
+            )
+            if ix * iy / small_area < _NESTED_DUPLICATE_COVERAGE:
+                continue
+            tolerance = _NESTED_DUPLICATE_EDGE_TOLERANCE * max(
+                large_width, large_height
+            )
+            aligned_edges = sum(
+                abs(float(small_box[edge]) - float(large_box[edge])) <= tolerance
+                for edge in range(4)
+            )
+            score_margin = float(large.get("score", 0.0)) - float(
+                small.get("score", 0.0)
+            )
+            if aligned_edges >= 2 and score_margin >= _NESTED_DUPLICATE_SCORE_MARGIN:
+                dropped.add(small_index)
+                break
+    return [index for index in range(len(dets)) if index not in dropped]
 
 
 class _Track:
@@ -322,6 +384,9 @@ class TrackManager:
 
         Returns one ``(track_id, bbox)`` per detection; ``track_id`` is -1 for
         suppressed crossing fragments."""
+        original_dets = dets
+        kept_indices = _nested_duplicate_keep_indices(original_dets)
+        dets = [original_dets[index] for index in kept_indices]
         assigned: dict[int, int] = {}
         unmatched_d = set(range(len(dets)))
 
@@ -498,7 +563,11 @@ class TrackManager:
             assigned[j] = t.id
             unmatched_d.discard(j)
 
-        return [(assigned[j], dets[j]["bbox"]) for j in range(len(dets))]
+        filtered = [(assigned[j], dets[j]["bbox"]) for j in range(len(dets))]
+        result = [(-1, det["bbox"]) for det in original_dets]
+        for source_index, assignment in zip(kept_indices, filtered):
+            result[source_index] = assignment
+        return result
 
     def summary(self) -> list[dict]:
         # Only identities present long enough surface (short blips/hallucinations
@@ -871,7 +940,7 @@ def run(args: argparse.Namespace) -> int:
 
     # Hallucination filter, expressed as a DURATION in seconds → frames, so it scales
     # with the real fps and stride (e.g. 1.0 s = 30 detection-points at 30 fps stride 1,
-    # 6 at stride 5). A subject present for less time never surfaces.
+    # 6 at a legacy stride of 5). A subject present for less time never surfaces.
     min_duration_sec = float(getattr(args, "min_duration_sec", 1.0) or 0.0)
     min_surface_frames = max(1, round(min_duration_sec * fps / stride)) if min_duration_sec > 0 else 1
 
@@ -980,7 +1049,7 @@ def main() -> int:
     parser.add_argument("--video-input", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--prompt", default="person")
-    parser.add_argument("--stride", type=int, default=5)
+    parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--confidence", type=float, default=0.5)
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--min-duration-sec", type=float, default=1.0,

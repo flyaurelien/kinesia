@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     const prompt =
       typeof body.prompt === "string" && body.prompt.trim() ? body.prompt.trim().slice(0, 120) : "person";
     const strideRaw = Number(body.stride);
-    const stride = Number.isFinite(strideRaw) ? Math.min(30, Math.max(1, Math.round(strideRaw))) : 5;
+    const stride = Number.isFinite(strideRaw) ? Math.min(30, Math.max(1, Math.round(strideRaw))) : 1;
     // Hallucination filter in seconds (subjects present for less are ignored).
     const durRaw = Number(body.minDurationSec);
     const minDurationSec = Number.isFinite(durRaw) ? Math.min(30, Math.max(0, durRaw)) : 1.0;
