@@ -22,6 +22,7 @@ from sam_3d_pose_estimation.scene_objects import (
     place_built_shapes,
     place_object,
     rasterize_mesh_silhouette,
+    resolve_floor_object_body_penetration,
     transform_points,
     upright_flip_matrix,
     upright_rotation,
@@ -407,6 +408,50 @@ class TestSceneObjectTransforms(unittest.TestCase):
             np.asarray(mesh.vertices, dtype=np.float64),
         )
         self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
+
+
+class TestSubjectInteractionResolution(unittest.TestCase):
+    def test_floor_object_overlap_is_resolved_without_changing_rotation_scale_or_floor(self):
+        subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        subject.apply_translation((-4.0, 0.0, 0.0))
+        object_mesh = trimesh.creation.box(extents=(0.6, 0.6, 0.6))
+        object_to_world = np.eye(4, dtype=np.float64)
+        object_to_world[:3, 3] = [-4.0, 0.0, 0.0]
+
+        corrected, evidence = resolve_floor_object_body_penetration(
+            object_to_world,
+            object_mesh,
+            subject,
+            np.zeros((240, 320), dtype=bool),
+            focal=200.0,
+        )
+
+        self.assertEqual(evidence["status"], "corrected")
+        self.assertGreater(evidence["penetrating_surface_fraction_before"], 0.5)
+        self.assertLessEqual(evidence["penetrating_surface_fraction_after"], 0.003)
+        self.assertTrue(evidence["floor_preserved"])
+        np.testing.assert_allclose(corrected[:3, :3], object_to_world[:3, :3])
+        self.assertAlmostEqual(float(corrected[2, 3]), float(object_to_world[2, 3]))
+        self.assertGreater(float(np.linalg.norm(corrected[:2, 3] - object_to_world[:2, 3])), 0.0)
+
+    def test_clear_floor_object_is_left_at_its_model_position(self):
+        subject = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+        subject.apply_translation((-4.0, 0.0, 0.0))
+        object_mesh = trimesh.creation.box(extents=(0.6, 0.6, 0.6))
+        object_to_world = np.eye(4, dtype=np.float64)
+        object_to_world[:3, 3] = [-4.0, 2.0, 0.0]
+
+        corrected, evidence = resolve_floor_object_body_penetration(
+            object_to_world,
+            object_mesh,
+            subject,
+            np.zeros((240, 320), dtype=bool),
+            focal=200.0,
+        )
+
+        self.assertEqual(evidence["status"], "clear")
+        self.assertEqual(evidence["translation_world_m"], [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(corrected, object_to_world)
 
 
 if __name__ == "__main__":
