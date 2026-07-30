@@ -30,6 +30,9 @@ export type GenerationJob = {
   // while the subject is being reconstructed, where the frame count says it.
   stage: string | null;
   error: string | null;
+  // Optional scene reconstruction must never invalidate a completed human run,
+  // but a requested object that was not produced must be visible to the user.
+  warnings: string[];
   inputVideoPath: string;
   runDir: string;
   recentLogs: string[];
@@ -45,6 +48,9 @@ type CreateOptions = {
   promptBBoxFrameRaw?: string | null;
   promptAnchorsJsonRaw?: string | null;
   sceneObjectPromptsRaw?: string | null;
+  dynamicSpherePromptsRaw?: string | null;
+  dynamicSphereDiameterMRaw?: string | null;
+  dynamicFrameStrideRaw?: string | null;
   startFrameRaw?: string | null;
   maxFramesRaw?: string | null;
   frameStepRaw?: string | null;
@@ -586,6 +592,15 @@ function pushLog(job: GenerationJob, line: string): void {
   }
 }
 
+// Record a non-fatal problem exactly once. Scene objects are optional, so the
+// job can complete with human kinematics intact while the UI still reports the
+// requested artifact was unavailable.
+function addWarning(job: GenerationJob, message: string): void {
+  if (!job.warnings.includes(message)) {
+    job.warnings.push(message);
+  }
+}
+
 // Append a log line to the run's persistent logs/job.log file.
 async function appendRunLog(job: GenerationJob, line: string): Promise<void> {
   const trimmed = line.trim();
@@ -704,6 +719,9 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
     // feet, and that shared floor is what puts both in one space, so the
     // placement happens further down, once the run has feet to offer.
     const sceneObjectPrompts = (options.sceneObjectPromptsRaw ?? "").trim();
+    const dynamicSpherePrompts = (options.dynamicSpherePromptsRaw ?? "").trim();
+    const dynamicSphereDiameterM = parseNumber(options.dynamicSphereDiameterMRaw, null, 0);
+    const dynamicFrameStride = parseInteger(options.dynamicFrameStrideRaw, 1, 1) ?? 1;
     if (sceneObjectPrompts && !isCanceled(job)) {
       job.stage = `preparing scene objects: ${sceneObjectPrompts}`;
       try {
@@ -726,9 +744,11 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
         const shapeCode = await runCommand(job, shapeArgs);
         if (shapeCode !== 0) {
           await appendRunLog(job, `scene object shapes exited with code ${shapeCode}`);
+          addWarning(job, "One or more static scene objects could not be reconstructed. See the job log.");
         }
       } catch (error) {
         await appendRunLog(job, `scene object shapes failed: ${String(error)}`);
+        addWarning(job, "One or more static scene objects could not be reconstructed. See the job log.");
       }
       // Back to the frame count, which speaks for the run itself.
       job.stage = null;
@@ -813,9 +833,62 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
         ]);
         if (placeCode !== 0) {
           await appendRunLog(job, `scene object placement exited with code ${placeCode}`);
+          addWarning(job, "One or more static scene objects could not be placed. See the job log.");
         }
       } catch (error) {
         await appendRunLog(job, `scene object placement failed: ${String(error)}`);
+        addWarning(job, "One or more static scene objects could not be placed. See the job log.");
+      }
+      job.stage = null;
+    }
+    if (isCanceled(job)) {
+      return;
+    }
+
+    // A moving sphere has a different geometric contract from a static scene
+    // object: it is lifted on every frame from its known diameter, never forced
+    // onto the subject's floor. Run this only after the subject pass made the
+    // effective focal length available in the run metadata.
+    if (dynamicSpherePrompts && !isCanceled(job)) {
+      if (dynamicSphereDiameterM === null || dynamicSphereDiameterM <= 0) {
+        job.status = "failed";
+        job.error = "A positive dynamic sphere diameter is required.";
+        job.finishedAt = nowIso();
+        updateProgress(job);
+        return;
+      }
+      job.stage = `tracking dynamic sphere: ${dynamicSpherePrompts}`;
+      try {
+        const dynamicCode = await runCommand(job, [
+          "run",
+          "sam3d",
+          "scene",
+          "--run-id",
+          job.runId,
+          "--stage",
+          "dynamic",
+          "--prompts",
+          dynamicSpherePrompts,
+          "--dynamic-sphere-diameter-m",
+          String(dynamicSphereDiameterM),
+          "--dynamic-frame-stride",
+          String(dynamicFrameStride),
+          "--video",
+          runVideoInputPath,
+        ]);
+        if (dynamicCode !== 0) {
+          await appendRunLog(job, `dynamic sphere tracking exited with code ${dynamicCode}`);
+          addWarning(
+            job,
+            "The requested moving sphere was not tracked. Human kinematics remain available; see the job log.",
+          );
+        }
+      } catch (error) {
+        await appendRunLog(job, `dynamic sphere tracking failed: ${String(error)}`);
+        addWarning(
+          job,
+          "The requested moving sphere was not tracked. Human kinematics remain available; see the job log.",
+        );
       }
       job.stage = null;
     }
@@ -959,6 +1032,7 @@ export async function createJobFromExistingUpload(
     progressPercent: null,
     stage: null,
     error: null,
+    warnings: [],
     inputVideoPath: resolvedInputPath,
     runDir: directory,
     recentLogs: [],

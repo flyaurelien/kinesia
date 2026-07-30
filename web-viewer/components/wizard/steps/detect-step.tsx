@@ -14,7 +14,16 @@ const DEFAULT_STRIDE = 5;
  *  in, and pick which tracked subject to reconstruct. */
 export function DetectStep() {
   const { state, dispatch, goNext, goBack } = useWizard();
-  const { file, fileUrl, subjectPrompt, sceneObjectPrompt, stagedUpload, detect } = state;
+  const {
+    file,
+    fileUrl,
+    subjectPrompt,
+    sceneObjectPrompt,
+    sceneObjectMode,
+    sceneSphereDiameterM,
+    stagedUpload,
+    detect,
+  } = state;
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cursorRef = useRef(0); // next frame index to request from the poller
@@ -332,22 +341,57 @@ export function DetectStep() {
 
         {/* Objects to place in the same 3D space as the subject. */}
         <div className="of-prompt">
-          <span className="of-prompt-label">Scene objects (optional)</span>
+          <label className="of-prompt-label" htmlFor="scene-object-prompt">Scene object (optional)</label>
           <div className="of-prompt-row">
             <input
+              id="scene-object-prompt"
               className="of-input"
               type="text"
               value={sceneObjectPrompt}
-              placeholder="chair, table"
+              placeholder={sceneObjectMode === "dynamic_sphere" ? "ball" : "chair, table"}
               onChange={(e) =>
                 dispatch({ type: "set_scene_object_prompt", prompt: e.target.value })
               }
               maxLength={120}
             />
           </div>
+          <div className="of-prompt-row" style={{ marginTop: 8 }}>
+            <label className="of-prompt-label" htmlFor="scene-object-mode">Mode</label>
+            <select
+              id="scene-object-mode"
+              className="of-input"
+              value={sceneObjectMode}
+              onChange={(event) => dispatch({
+                type: "set_scene_object_mode",
+                mode: event.target.value === "dynamic_sphere" ? "dynamic_sphere" : "static",
+              })}
+            >
+              <option value="static">Static object on the floor</option>
+              <option value="dynamic_sphere">Moving spherical object</option>
+            </select>
+          </div>
+          {sceneObjectMode === "dynamic_sphere" ? (
+            <div className="of-prompt-row" style={{ marginTop: 8 }}>
+              <label className="of-prompt-label" htmlFor="scene-sphere-diameter">Diameter (m)</label>
+              <input
+                id="scene-sphere-diameter"
+                className="of-input"
+                type="number"
+                min="0.001"
+                step="0.001"
+                inputMode="decimal"
+                value={sceneSphereDiameterM}
+                onChange={(event) => dispatch({
+                  type: "set_scene_sphere_diameter_m",
+                  diameterM: event.target.value,
+                })}
+              />
+            </div>
+          ) : null}
           <span className="of-prompt-hint">
-            Reconstructed after the person and placed in the same space, so distances between
-            them are comparable. Static objects only, up to four — each adds a few minutes.
+            {sceneObjectMode === "dynamic_sphere"
+              ? "Tracks one known-size sphere through a fixed-camera video. Its position and velocity are exported; spin is not inferred."
+              : "Reconstructed after the person and placed in the same space, so distances between them are comparable. Static objects only, up to four — each adds a few minutes."}
           </span>
         </div>
 

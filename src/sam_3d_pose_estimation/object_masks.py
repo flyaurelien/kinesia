@@ -42,6 +42,31 @@ def segment_object(
     one costs seconds and gigabytes, so callers hold it across every prompt and
     every pass rather than rebuilding it here.
     """
+    instances = segment_object_instances(image_bgr, prompt, detector, confidence)
+    return instances[0] if instances else None
+
+
+def segment_object_instances(
+    image_bgr: np.ndarray,
+    prompt: str,
+    detector: Any,
+    confidence: float = 0.5,
+) -> list[tuple[np.ndarray, float]]:
+    """Return every segmented instance of a prompt, highest confidence first.
+
+    Static reconstruction needs the single strongest instance, while a temporal
+    tracker must choose the instance that preserves an existing identity. Keeping
+    this model interaction here avoids two subtly different mask conversions.
+
+    Args:
+        image_bgr: Source video frame in OpenCV BGR order.
+        prompt: Open-vocabulary object description.
+        detector: Loaded SAM 3 detector.
+        confidence: SAM 3 confidence threshold.
+
+    Returns:
+        Boolean masks paired with detector confidence, sorted descending.
+    """
     import cv2
     from PIL import Image
 
@@ -53,11 +78,16 @@ def segment_object(
 
     scores = state["scores"]
     if scores.numel() == 0:
-        return None
-    # The instances come back in detection order, not sorted by score.
-    best = int(scores.argmax())
-    mask = state["masks"][best, 0].detach().cpu().numpy()
-    return np.ascontiguousarray(mask).astype(bool), float(scores[best])
+        return []
+    order = scores.argsort(descending=True).detach().cpu().tolist()
+    masks = state["masks"]
+    return [
+        (
+            np.ascontiguousarray(masks[int(index), 0].detach().cpu().numpy()).astype(bool),
+            float(scores[int(index)]),
+        )
+        for index in order
+    ]
 
 
 def subject_silhouette(

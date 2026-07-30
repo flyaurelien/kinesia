@@ -66,6 +66,9 @@ export async function POST(request: Request) {
     const sam3TextPromptsRaw = formData.get("sam3TextPrompts");
     const promptAnchorsJsonRaw = formData.get("promptAnchorsJson");
     const sceneObjectPromptsRaw = formData.get("sceneObjectPrompts");
+    const dynamicSpherePromptsRaw = formData.get("dynamicSpherePrompts");
+    const dynamicSphereDiameterMRaw = formData.get("dynamicSphereDiameterM");
+    const dynamicFrameStrideRaw = formData.get("dynamicFrameStride");
     const subjectTrackFile = await validateSubjectTrackFile(formData.get("subjectTrackFile"));
     const subjectIndexRaw = formData.get("subjectIndex");
     const subjectIndex =
@@ -130,6 +133,18 @@ export async function POST(request: Request) {
       sceneObjectPromptsRaw:
         typeof sceneObjectPromptsRaw === "string" && sceneObjectPromptsRaw.trim().length > 0
           ? sceneObjectPromptsRaw.trim()
+          : null,
+      dynamicSpherePromptsRaw:
+        typeof dynamicSpherePromptsRaw === "string" && dynamicSpherePromptsRaw.trim().length > 0
+          ? dynamicSpherePromptsRaw.trim()
+          : null,
+      dynamicSphereDiameterMRaw:
+        typeof dynamicSphereDiameterMRaw === "string" && dynamicSphereDiameterMRaw.trim().length > 0
+          ? dynamicSphereDiameterMRaw.trim()
+          : null,
+      dynamicFrameStrideRaw:
+        typeof dynamicFrameStrideRaw === "string" && dynamicFrameStrideRaw.trim().length > 0
+          ? dynamicFrameStrideRaw.trim()
           : null,
       subjectTrackFile,
       subjectIndex,
