@@ -31,6 +31,7 @@ type Job = {
   progressPercent: number | null;
   stage?: string | null;
   error: string | null;
+  warnings?: string[];
 };
 
 const POLL_INTERVAL_MS = 2200;
@@ -50,6 +51,8 @@ export function RunStep() {
     fileUrl,
     subjectPrompt,
     sceneObjectPrompt,
+    sceneObjectMode,
+    sceneSphereDiameterM,
     segments,
     stagedUpload,
     detect,
@@ -124,8 +127,16 @@ export function RunStep() {
       formData.append("renderPreview", "true");
       formData.append("sam3TextPrompts", subjectPrompt.trim() || "person");
       // Added before the per-subject fan-out below so every job carries it.
-      if (sceneObjectPrompt.trim()) {
+      if (sceneObjectPrompt.trim() && sceneObjectMode === "static") {
         formData.append("sceneObjectPrompts", sceneObjectPrompt.trim());
+      }
+      if (sceneObjectPrompt.trim() && sceneObjectMode === "dynamic_sphere") {
+        const diameterM = Number(sceneSphereDiameterM);
+        if (!Number.isFinite(diameterM) || diameterM <= 0) {
+          throw new Error("Enter the physical diameter of the moving sphere in metres.");
+        }
+        formData.append("dynamicSpherePrompts", sceneObjectPrompt.trim());
+        formData.append("dynamicSphereDiameterM", String(diameterM));
       }
 
       // Delete segments are cut out of the video (timeline compresses);
@@ -192,6 +203,8 @@ export function RunStep() {
     detectTrackFile,
     subjectPrompt,
     sceneObjectPrompt,
+    sceneObjectMode,
+    sceneSphereDiameterM,
   ]);
 
   /* ===== Derived ===== */
@@ -355,6 +368,9 @@ export function RunStep() {
               </div>
 
               {selectedJob?.error ? <div className="of-banner">{selectedJob.error}</div> : null}
+              {selectedJob?.warnings?.map((warning) => (
+                <div className="of-banner" key={warning}>{warning}</div>
+              ))}
 
               {/* Full live 3D viewer + kinematics plots for this run. */}
               <div className="of-embedded-viewer">

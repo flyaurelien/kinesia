@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_parser.add_argument("--json", action="store_true")
 
     scene_parser = subparsers.add_parser(
-        "scene", help="Reconstruct named objects and place them in a run's world."
+        "scene", help="Reconstruct static scene objects or track a known-size dynamic sphere."
     )
     scene_parser.add_argument("--run-id", required=True)
     scene_parser.add_argument(
@@ -209,11 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="objects to add, comma separated (for example: chair, table)",
     )
     scene_parser.add_argument(
-        "--stage", default="both", choices=["shape", "place", "both"],
+        "--stage", default="both", choices=["shape", "place", "both", "dynamic"],
         help=(
             "shape: find each object and reconstruct it, which needs nothing "
             "from the subject and so can run first. place: stand the built "
-            "shapes on the floor the subject's feet measured."
+            "shapes on the floor the subject's feet measured. dynamic: track "
+            "known-size spherical objects through the completed run."
         ),
     )
     scene_parser.add_argument(
@@ -223,6 +224,18 @@ def build_parser() -> argparse.ArgumentParser:
     scene_parser.add_argument(
         "--subject-track", type=Path, default=None,
         help="detection-step track, used to avoid the subject before the run has outlines",
+    )
+    scene_parser.add_argument(
+        "--dynamic-sphere-diameter-m",
+        type=float,
+        default=None,
+        help="Known physical diameter in metres, required for --stage dynamic.",
+    )
+    scene_parser.add_argument(
+        "--dynamic-frame-stride",
+        type=int,
+        default=1,
+        help="Track every Nth reconstructed frame for --stage dynamic (default: 1).",
     )
     scene_parser.add_argument("--json", action="store_true")
 
@@ -638,13 +651,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 def cmd_scene(args: argparse.Namespace) -> int:
     """Add the named objects to a finished run's 3D scene.
 
-    Returns 0 even when nothing could be added: the run itself is already
-    complete, and an object that could not be found is a shortfall to report,
-    not a reason to mark the reconstruction failed.
+    A requested scene artifact that could not be produced returns a non-zero
+    status. Callers can then warn about the missing optional artifact while
+    keeping the completed human reconstruction available.
     """
-    from .scene_objects import (
-        build_object_shapes, parse_object_prompts, place_built_shapes,
-    )
+    from .scene_objects import build_object_shapes, parse_object_prompts, place_built_shapes
     from .workspace import run_dir, sanitize_run_id
 
     directory = run_dir(sanitize_run_id(args.run_id))
@@ -654,29 +665,81 @@ def cmd_scene(args: argparse.Namespace) -> int:
         return 2
 
     result: dict = {}
+    prompts = parse_object_prompts(args.prompts)
+    if args.stage == "dynamic":
+        if not prompts:
+            print("no dynamic objects requested")
+            return 0
+        if len(prompts) != 1:
+            print("dynamic sphere tracking accepts exactly one prompt/object per invocation")
+            return 2
+        diameter_m = args.dynamic_sphere_diameter_m
+        if diameter_m is None or diameter_m <= 0:
+            print("--dynamic-sphere-diameter-m must be a positive value for --stage dynamic")
+            return 2
+        if args.dynamic_frame_stride < 1:
+            print("--dynamic-frame-stride must be at least 1")
+            return 2
+        from .dynamic_objects import track_dynamic_spheres
+
+        video = args.video
+        if video is None:
+            video = Path(json.loads(metadata_path.read_text()).get("video_input") or "")
+        result = track_dynamic_spheres(
+            directory,
+            prompts,
+            video,
+            diameter_m=float(diameter_m),
+            frame_stride=int(args.dynamic_frame_stride),
+        )
+        names = ", ".join(obj["name"] for obj in result["objects"]) or "none"
+        print(f"dynamic objects tracked: {names}")
+        if result.get("skipped"):
+            print(f"dynamic tracking skipped: {result['skipped']}")
+        for failure in result.get("failures", []):
+            print(f"dynamic tracking failed for {failure.get('prompt', 'object')}: {failure.get('error', 'unknown error')}")
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        # The completed human run remains valid, but callers must be able to
+        # surface a requested ball that was not actually reconstructed.
+        return 0 if result.get("objects") and not result.get("failures") else 1
+
+    shape_result: dict | None = None
+    static_succeeded = True
     if args.stage in {"shape", "both"}:
-        prompts = parse_object_prompts(args.prompts)
         if not prompts:
             print("no objects requested")
             return 0
         video = args.video
         if video is None:
             video = Path(json.loads(metadata_path.read_text()).get("video_input") or "")
-        result = build_object_shapes(
+        shape_result = build_object_shapes(
             directory, prompts, video, subject_track=args.subject_track,
         )
-        built = ", ".join(shape["name"] for shape in result["shapes"]) or "none"
+        result = shape_result
+        built = ", ".join(shape["name"] for shape in shape_result["shapes"]) or "none"
         print(f"objects reconstructed: {built}")
+        static_succeeded = bool(shape_result["shapes"]) and not (
+            shape_result.get("failures") or shape_result.get("skipped")
+        )
 
     if args.stage in {"place", "both"}:
         placed = place_built_shapes(directory)
-        result = {**result, **placed}
+        result = {
+            **(shape_result or {}),
+            "objects": placed["objects"],
+            "failures": (shape_result or {}).get("failures", []) + placed["failures"],
+            "skipped": (shape_result or {}).get("skipped") or placed.get("skipped"),
+        }
         names = ", ".join(obj["name"] for obj in placed["objects"]) or "none"
         print(f"objects placed: {names}")
+        static_succeeded = static_succeeded and bool(placed["objects"]) and not (
+            placed.get("failures") or placed.get("skipped")
+        )
 
     if args.json:
         print(json.dumps(result, indent=2, default=str))
-    return 0
+    return 0 if static_succeeded else 1
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

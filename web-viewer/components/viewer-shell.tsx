@@ -100,6 +100,7 @@ type GenerationJob = {
   progressPercent: number | null;
   stage?: string | null;
   error: string | null;
+  warnings?: string[];
 };
 type RunLoadState = RunAssetPreloadProgress & {
   runId: string;

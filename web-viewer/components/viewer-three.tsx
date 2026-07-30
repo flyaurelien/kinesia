@@ -7,11 +7,14 @@ import * as THREE from "three";
 
 import { apiFetch } from "../lib/api-client";
 import { filterSeries, smoothingAlpha } from "../lib/one_euro";
-import type { RunDetail, RunFrame, SceneObject } from "../lib/types";
+import type { DynamicSphere, RunDetail, RunFrame, SceneObject, SceneObjectMatrix } from "../lib/types";
 
 type DisplayAnchor = {
   centerX: number;
   centerZ: number;
+  // Camera-space floor height. When present, world Z is translated by this
+  // amount so the measured floor at world Z = -floorY becomes viewer Z = 0.
+  floorY?: number;
 };
 
 // A sibling run of the same multi-subject selection, rendered in the SAME 3D
@@ -41,7 +44,8 @@ type ThreeSpaceViewerProps = {
   // run, so isolating another subject must not stop computing them — only the
   // primary's mesh/joints are withheld.
   showPrimary?: boolean;
-  // Static reconstructed objects (chair, step) placed in the subject's space.
+  // Reconstructed static objects and tracked dynamic spheres placed in the
+  // subject's space.
   showSceneObjects?: boolean;
   sceneObjectOpacity?: number;
   // Hold each subject at a fixed spot on the floor, showing pose only: the
@@ -397,13 +401,18 @@ export async function preloadRunAssets(
 // Neutral body color for the reconstructed mesh.
 const MESH_COLOR = "#9aa7b8";
 
-// Extract the world-space recentering anchor (in camera coords) from the run, or null if not finite.
+// Extract the world-space recentering anchor (in camera coords) from the run,
+// preserving runs written before floor_y was stored.
 function displayAnchor(runDetail: RunDetail): DisplayAnchor | null {
   const anchor = runDetail.spaceView?.world_anchor ?? null;
   if (!anchor || !Number.isFinite(anchor.center_x) || !Number.isFinite(anchor.center_z)) {
     return null;
   }
-  return { centerX: anchor.center_x, centerZ: anchor.center_z };
+  return {
+    centerX: anchor.center_x,
+    centerZ: anchor.center_z,
+    ...(Number.isFinite(anchor.floor_y) ? { floorY: anchor.floor_y } : {}),
+  };
 }
 
 // Shift a world-space point so the capture's anchor sits at the origin (mutates and returns point).
@@ -411,9 +420,11 @@ function centerWorld(point: THREE.Vector3, anchor: DisplayAnchor | null): THREE.
   if (!anchor) {
     return point;
   }
-  // Anchor is stored in camera coordinates. After CAM_TO_WORLD, horizontal center is [-centerZ, centerX].
+  // Anchor is stored in camera coordinates. After CAM_TO_WORLD, horizontal
+  // centre is [-centerZ, centerX] and the floor is world Z = -floorY.
   point.x += anchor.centerZ;
   point.y -= anchor.centerX;
+  point.z += anchor.floorY ?? 0;
   return point;
 }
 
@@ -425,6 +436,33 @@ function camToWorld(point: [number, number, number], anchor: DisplayAnchor | nul
 // Convert an already-world-space point into viewer space (recenter on the anchor, then apply display yaw).
 function worldToViewer(point: THREE.Vector3, anchor: DisplayAnchor | null): THREE.Vector3 {
   return centerWorld(point.clone(), anchor).applyMatrix4(DISPLAY_YAW_CLOCKWISE_90);
+}
+
+// Matrix4.set takes row-major arguments while Three stores the result internally
+// in column-major order, so this is the direct boundary for the artifact API.
+function matrixFromRowMajor(values: SceneObjectMatrix): THREE.Matrix4 {
+  return new THREE.Matrix4().set(
+    values[0], values[1], values[2], values[3],
+    values[4], values[5], values[6], values[7],
+    values[8], values[9], values[10], values[11],
+    values[12], values[13], values[14], values[15],
+  );
+}
+
+// Convert a raw-mesh -> world artifact transform into the viewer's fixed
+// coordinate system. This mirrors worldToViewer for points: recenter first,
+// then apply the display yaw, giving viewerFromWorld * objectToWorld.
+function sceneObjectToViewerMatrix(
+  objectToWorld: SceneObjectMatrix,
+  anchor: DisplayAnchor | null,
+): THREE.Matrix4 {
+  const viewerFromWorld = DISPLAY_YAW_CLOCKWISE_90.clone();
+  if (anchor) {
+    viewerFromWorld.multiply(
+      new THREE.Matrix4().makeTranslation(anchor.centerZ, -anchor.centerX, anchor.floorY ?? 0),
+    );
+  }
+  return viewerFromWorld.multiply(matrixFromRowMajor(objectToWorld));
 }
 
 // Viewer-space root position for a frame, preferring stabilized/raw world root and falling back to the camera-comp.
@@ -1151,7 +1189,7 @@ function MeshGeometry({
     next.setIndex(new THREE.BufferAttribute(faces, 1));
     next.applyMatrix4(CAM_TO_WORLD);
     if (anchor) {
-      next.translate(anchor.centerZ, -anchor.centerX, 0);
+      next.translate(anchor.centerZ, -anchor.centerX, anchor.floorY ?? 0);
     }
     next.applyMatrix4(DISPLAY_YAW_CLOCKWISE_90);
     next.translate(-pivot.x, -pivot.y, -pivot.z);
@@ -1238,13 +1276,117 @@ function SkeletonBones({ joints }: { joints: THREE.Vector3[] }) {
 // Assembles one subject for a frame: drops it onto the grid, applies the upright rotation, and renders
 // the mesh, bones, and clickable joint markers according to the visibility toggles.
 
+// Resolve a dynamic sphere's world position at a fractional run-frame cursor.
+// Observations can be sparse, but interpolation across an explicitly long
+// occlusion would make a ball appear to pass through space without evidence;
+// in that case this returns null and the sphere is hidden until observed again.
+function dynamicSpherePositionAtCursor(
+  sphere: DynamicSphere,
+  frameCursor: number,
+): [number, number, number] | null {
+  const { poses } = sphere;
+  let lower = 0;
+  let upper = poses.length;
+  while (lower < upper) {
+    const middle = Math.floor((lower + upper) / 2);
+    if (poses[middle].frameIndex < frameCursor) {
+      lower = middle + 1;
+    } else {
+      upper = middle;
+    }
+  }
+
+  const next = poses[lower];
+  if (next && Math.abs(next.frameIndex - frameCursor) < 1e-6) {
+    return next.positionWorld;
+  }
+  const previous = poses[lower - 1];
+  if (!previous || !next) {
+    return null;
+  }
+
+  const frameGap = next.frameIndex - previous.frameIndex;
+  if (frameGap <= 0 || frameGap > sphere.maxInterpolationGapFrames) {
+    return null;
+  }
+  const amount = (frameCursor - previous.frameIndex) / frameGap;
+  return [
+    previous.positionWorld[0] * (1 - amount) + next.positionWorld[0] * amount,
+    previous.positionWorld[1] * (1 - amount) + next.positionWorld[1] * amount,
+    previous.positionWorld[2] * (1 - amount) + next.positionWorld[2] * amount,
+  ];
+}
+
+// A known-size dynamic sphere. It deliberately has no rotation: the schema
+// carries only a metric center trajectory because spin of an unmarked sphere
+// is not observable from one camera.
+function DynamicSphereMesh({
+  sphere,
+  anchor,
+  frameCursor,
+  opacity,
+}: {
+  sphere: DynamicSphere;
+  anchor: DisplayAnchor | null;
+  frameCursor: number;
+  opacity: number;
+}) {
+  const position = useMemo(() => {
+    const worldPosition = dynamicSpherePositionAtCursor(sphere, frameCursor);
+    return worldPosition ? worldToViewer(new THREE.Vector3(...worldPosition), anchor) : null;
+  }, [anchor, frameCursor, sphere]);
+
+  if (!position) return null;
+  return (
+    <mesh position={position} castShadow>
+      <sphereGeometry args={[sphere.radiusM, 28, 20]} />
+      <meshStandardMaterial
+        color="#f97316"
+        roughness={0.48}
+        metalness={0.04}
+        transparent={opacity < 1}
+        opacity={opacity}
+      />
+    </mesh>
+  );
+}
+
+// Set the shared scene-object display state without changing any geometry or
+// transforms. Keeping the loaded GLTF hierarchy intact is important: exports
+// often use several mesh nodes, and the old geometry path displayed only one.
+function applySceneObjectMaterial(root: THREE.Object3D, opacity: number): void {
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) {
+      material.transparent = opacity < 1;
+      material.opacity = opacity;
+      material.side = THREE.DoubleSide;
+      material.needsUpdate = true;
+    }
+  });
+}
+
+// GLTF primitives are not automatically disposed by React Three Fiber. The
+// loader creates a fresh scene for each object, so it is safe to release every
+// mesh resource when that object is replaced or unmounted.
+function disposeSceneObject(root: THREE.Object3D): void {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    geometries.add(mesh.geometry);
+    const meshMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of meshMaterials) materials.add(material);
+  });
+  for (const geometry of geometries) geometry.dispose();
+  for (const material of materials) material.dispose();
+}
+
 // A static object reconstructed once for the clip (a chair, a step) and placed
-// in the SUBJECT's coordinate space, so the two can be read against each other.
-//
-// The object model returns a normalised shape whose own translation and scale
-// are not in the subject's units; `scale` and `centreWorld` here were solved
-// against the subject's floor instead (scripts/place_scene_object.py), which is
-// what puts both bodies in one space.
+// in the subject's coordinate space, so the two can be read against each other.
 function SceneObjectMesh({
   object,
   anchor,
@@ -1254,42 +1396,49 @@ function SceneObjectMesh({
   anchor: DisplayAnchor | null;
   opacity: number;
 }) {
-  const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
+  const [scene, setScene] = useState<THREE.Group | null>(null);
+  const [legacyOffset, setLegacyOffset] = useState(() => new THREE.Vector3());
+  const hasCanonicalTransform = object.objectToWorld !== null;
+  const legacyUpAxis = hasCanonicalTransform ? null : object.upAxis;
 
   useEffect(() => {
     let cancelled = false;
-    let loaded: THREE.BufferGeometry | null = null;
+    let loaded: THREE.Group | null = null;
+    setScene(null);
+    setLegacyOffset(new THREE.Vector3());
     import("three/examples/jsm/loaders/GLTFLoader.js")
       .then(({ GLTFLoader }) => {
+        if (cancelled) return;
         new GLTFLoader().load(object.meshUrl, (gltf) => {
-          if (cancelled) return;
-          const parts: THREE.BufferGeometry[] = [];
-          gltf.scene.updateMatrixWorld(true);
-          gltf.scene.traverse((child) => {
-            const mesh = child as THREE.Mesh;
-            if (mesh.isMesh && mesh.geometry) {
-              const g = mesh.geometry.clone();
-              g.applyMatrix4(mesh.matrixWorld);
-              parts.push(g);
+          const root = gltf.scene;
+          if (cancelled) {
+            disposeSceneObject(root);
+            return;
+          }
+
+          const offset = new THREE.Vector3();
+          if (legacyUpAxis) {
+            // The legacy placement branch needs the same footprint normalization
+            // as before, now calculated across every mesh in the GLTF hierarchy.
+            root.updateMatrixWorld(true);
+            const box = new THREE.Box3().setFromObject(root);
+            if (!box.isEmpty()) {
+              const mid = box.getCenter(new THREE.Vector3());
+              const axis = legacyUpAxis === "X" ? "x" : legacyUpAxis === "Z" ? "z" : "y";
+              const base = box.min[axis];
+              offset.set(
+                axis === "x" ? -base : -mid.x,
+                axis === "y" ? -base : -mid.y,
+                axis === "z" ? -base : -mid.z,
+              );
             }
-          });
-          if (parts.length === 0) return;
-          const merged = parts[0];
-          // Origin at the middle of its FOOTPRINT, on its underside — the
-          // fitted position is a point on the floor, so an origin at the mesh's
-          // centre would bury half the object under it.
-          merged.computeBoundingBox();
-          const box = merged.boundingBox!;
-          const mid = box.getCenter(new THREE.Vector3());
-          const axis = object.upAxis === "X" ? "x" : object.upAxis === "Z" ? "z" : "y";
-          const base = box.min[axis];
-          merged.translate(
-            axis === "x" ? -base : -mid.x,
-            axis === "y" ? -base : -mid.y,
-            axis === "z" ? -base : -mid.z,
-          );
-          loaded = merged;
-          setGeometry(merged);
+          }
+
+          loaded = root;
+          setLegacyOffset(offset);
+          setScene(root);
+        }, undefined, () => {
+          if (!cancelled) setScene(null);
         });
       })
       .catch(() => undefined);
@@ -1297,10 +1446,41 @@ function SceneObjectMesh({
       cancelled = true;
       // Disposal is deferred like the body meshes: the frame loop may still be
       // drawing the previous tree when this runs.
-      if (loaded) setTimeout(() => loaded?.dispose(), 0);
+      if (loaded) setTimeout(() => disposeSceneObject(loaded!), 0);
     };
-  }, [object.meshUrl, object.upAxis]);
+  }, [legacyUpAxis, object.meshUrl]);
 
+  useEffect(() => {
+    if (scene) applySceneObjectMaterial(scene, opacity);
+  }, [opacity, scene]);
+
+  const objectToViewer = useMemo(
+    () => object.objectToWorld ? sceneObjectToViewerMatrix(object.objectToWorld, anchor) : null,
+    [anchor, object.objectToWorld],
+  );
+
+  const legacyPosition = useMemo(() => {
+    const source = object.positionWorld ?? object.centreWorld;
+    const point = worldToViewer(new THREE.Vector3(...source), anchor);
+    // Both the fitted point and the mesh origin now sit on the floor, so the
+    // object rests on the grid the bodies stand on.
+    return new THREE.Vector3(point.x, point.y, 0);
+  }, [anchor, object.centreWorld, object.positionWorld]);
+
+  if (!scene) return null;
+  // New artifacts provide the complete raw-mesh -> world transform. No
+  // up-axis, heading, footprint, or floor heuristic is allowed on this path:
+  // the parent matrix is the single placement transform applied to the GLTF.
+  if (objectToViewer) {
+    return (
+      <group matrix={objectToViewer} matrixAutoUpdate={false}>
+        <primitive object={scene} />
+      </group>
+    );
+  }
+
+  // Legacy artifacts lack a canonical matrix. Retain their historic placement
+  // behavior so already-generated runs remain viewable.
   // Ground it the way bodies are grounded: the viewer draws its grid at z = 0
   // and places each body so its lowest point rests there, so an object placed
   // by raw world height instead lands wherever that height happens to fall —
@@ -1309,15 +1489,6 @@ function SceneObjectMesh({
   // Prefer the silhouette-fitted floor position: it is where the object must
   // stand for its outline to be the one observed, which the mask's bbox centre
   // only approximates. Fall back to that centre when no fit was written.
-  const position = useMemo(() => {
-    const source = object.positionWorld ?? object.centreWorld;
-    const point = worldToViewer(new THREE.Vector3(...source), anchor);
-    // Both the fitted point and the mesh origin now sit on the floor, so the
-    // object rests on the grid the bodies stand on.
-    return new THREE.Vector3(point.x, point.y, 0);
-  }, [anchor, object.centreWorld, object.positionWorld, object.solved.heightM]);
-
-  if (!geometry) return null;
   // The mesh's own up axis is not the viewer's: its solved height runs along
   // upAxis, while the viewer's up is Z.
   const toViewerUp =
@@ -1338,19 +1509,12 @@ function SceneObjectMesh({
   const heading = (object.yawRad ?? 0) - Math.PI / 2 + Math.PI;
 
   return (
-    <group position={position} rotation={[0, 0, heading]}>
-    <group rotation={toViewerUp} scale={object.scale}>
-      <mesh geometry={geometry}>
-        <meshStandardMaterial
-          color="#9aa6bd"
-          roughness={0.85}
-          metalness={0.05}
-          transparent={opacity < 1}
-          opacity={opacity}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
-    </group>
+    <group position={legacyPosition} rotation={[0, 0, heading]}>
+      <group rotation={toViewerUp} scale={object.scale}>
+        <group position={legacyOffset}>
+          <primitive object={scene} />
+        </group>
+      </group>
     </group>
   );
 }
@@ -1794,6 +1958,17 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
               key={object.name}
               object={object}
               anchor={anchor}
+              opacity={props.sceneObjectOpacity ?? 1}
+            />
+          ))
+        : null}
+      {props.showSceneObjects !== false
+        ? (props.runDetail.dynamicObjects ?? []).map((sphere) => (
+            <DynamicSphereMesh
+              key={`dynamic-${sphere.name}`}
+              sphere={sphere}
+              anchor={anchor}
+              frameCursor={displayCursor}
               opacity={props.sceneObjectOpacity ?? 1}
             />
           ))

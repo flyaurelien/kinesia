@@ -15,7 +15,20 @@ import {
   runsRoot,
   usesConfiguredRunsRoot,
 } from "./store";
-import type { GaitCycle, GaitStat, RunDetail, RunFrame, RunGait, RunSignal, RunSubject, RunSummary, SceneObject } from "./types";
+import type {
+  DynamicSceneObject,
+  DynamicSpherePose,
+  GaitCycle,
+  GaitStat,
+  RunDetail,
+  RunFrame,
+  RunGait,
+  RunSignal,
+  RunSubject,
+  RunSummary,
+  SceneObject,
+  SceneObjectMatrix,
+} from "./types";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -79,6 +92,63 @@ function parseTriplet(value: unknown): [number, number, number] | null {
   }
   const out: [number, number, number] = [Number(value[0]), Number(value[1]), Number(value[2])];
   return out.every((axis) => Number.isFinite(axis)) ? out : null;
+}
+
+// Parse a scene transform in either compact row-major form (16 numbers) or
+// nested 4x4 row-major form. Rejecting malformed/non-finite matrices here
+// prevents one bad artifact from poisoning the complete viewer scene.
+function parseSceneObjectMatrix(value: unknown): SceneObjectMatrix | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const rawValues: unknown[] = [];
+  if (value.length === 16 && value.every((item) => !Array.isArray(item))) {
+    rawValues.push(...value);
+  } else if (value.length === 4) {
+    for (const row of value) {
+      if (!Array.isArray(row) || row.length !== 4) {
+        return null;
+      }
+      rawValues.push(...row);
+    }
+  } else {
+    return null;
+  }
+
+  const matrix: number[] = [];
+  for (const rawValue of rawValues) {
+    const numeric = numericOrNull(rawValue);
+    if (numeric === null) {
+      return null;
+    }
+    matrix.push(numeric);
+  }
+  return matrix as SceneObjectMatrix;
+}
+
+// Parse one dynamic-sphere observation. Frame indices are run-frame indices,
+// not source-video timestamps, because the viewer's playhead advances through
+// the reconstructed run frames.
+function parseDynamicSpherePose(value: unknown): DynamicSpherePose | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const raw = value as JsonRecord;
+  const frameIndex = numericOrNull(raw.frame_index);
+  const positionWorld = parseTriplet(raw.position_world);
+  if (frameIndex === null || !Number.isInteger(frameIndex) || frameIndex < 0 || !positionWorld) {
+    return null;
+  }
+  const videoFrame = numericOrNull(raw.video_frame);
+  const timeS = numericOrNull(raw.time_s);
+  return {
+    frameIndex,
+    videoFrame: videoFrame !== null && Number.isInteger(videoFrame) && videoFrame >= 0 ? videoFrame : null,
+    timeS: timeS !== null && timeS >= 0 ? timeS : null,
+    positionWorld,
+    confidence: numericOrNull(raw.confidence),
+  };
 }
 
 // Parse an array of joint positions; returns null if any joint is malformed (all-or-nothing).
@@ -957,6 +1027,10 @@ export async function getRunDetail(runIdRaw: string, analysisId?: string | null)
   const inputVideo = await findVideoPath(baseDir, manifest, metadata, "input");
   const previewVideo = await findVideoPath(baseDir, manifest, metadata, "preview");
   const previewVideoTimebase = previewVideo && inputVideo && previewVideo === inputVideo ? "source" : "processed";
+  const [sceneObjects, dynamicObjects] = await Promise.all([
+    loadSceneObjects(runId),
+    loadDynamicSceneObjects(runId),
+  ]);
   const detail: RunDetail = {
     id: runId,
     analysisId: analysis.id,
@@ -976,7 +1050,8 @@ export async function getRunDetail(runIdRaw: string, analysisId?: string | null)
     subject: subjectFromRecord(metadata?.subject ?? manifest?.subject),
     signals,
     gait,
-    sceneObjects: await loadSceneObjects(runId),
+    sceneObjects,
+    dynamicObjects,
     frames: displayFrames,
     analyses: analysesFromManifest(manifest),
     qa,
@@ -1041,22 +1116,33 @@ async function loadSceneObjects(runId: string): Promise<SceneObject[]> {
   const sceneDir = path.join(await runBaseDir(runId), "scene");
   const entries = await fs.readdir(sceneDir).catch(() => [] as string[]);
   const out: SceneObject[] = [];
-  for (const entry of entries.filter((n) => n.toLowerCase().endsWith(".json")).sort()) {
+  for (const entry of entries.filter((name) => {
+    const lowerName = name.toLowerCase();
+    return lowerName.endsWith(".json") && !lowerName.endsWith("_dynamic.json");
+  }).sort()) {
     const raw = await readJsonIfExists<JsonRecord>(path.join(sceneDir, entry));
     const mesh = typeof raw?.mesh === "string" ? raw.mesh : null;
+    const hasObjectToWorld = raw?.object_to_world != null;
+    const objectToWorld = parseSceneObjectMatrix(raw?.object_to_world);
     const scale = numericOrNull(raw?.scale);
-    const centre = Array.isArray(raw?.centre_world) ? raw!.centre_world : null;
-    if (!mesh || scale === null || !centre || centre.length < 3) continue;
+    const centre = parseTriplet(raw?.centre_world);
+    // Matrix-based artifacts need no legacy placement fields. Treat a malformed
+    // canonical field as invalid rather than silently rendering stale legacy
+    // placement; older artifacts without the field still use the fallback.
+    if (
+      !mesh ||
+      (hasObjectToWorld && !objectToWorld) ||
+      (!hasObjectToWorld && (scale === null || !centre))
+    ) continue;
     const solved = (raw?.solved ?? {}) as JsonRecord;
     out.push({
       name: String(raw?.name ?? entry.replace(/\.json$/, "")),
       meshUrl: `/api/runs/${encodeURIComponent(runId)}/scene/${encodeURIComponent(mesh)}`,
-      scale,
+      objectToWorld,
+      scale: scale ?? 1,
       upAxis: (["X", "Y", "Z"].includes(String(raw?.up_axis)) ? String(raw?.up_axis) : "Y") as "X" | "Y" | "Z",
-      centreWorld: [Number(centre[0]), Number(centre[1]), Number(centre[2])],
-      positionWorld: Array.isArray(raw?.position_world) && raw!.position_world.length >= 3
-        ? [Number(raw!.position_world[0]), Number(raw!.position_world[1]), Number(raw!.position_world[2])]
-        : null,
+      centreWorld: centre ?? [0, 0, 0],
+      positionWorld: parseTriplet(raw?.position_world),
       yawRad: numericOrNull(raw?.yaw_rad),
       fitIou: numericOrNull(raw?.fit_iou),
       solved: {
@@ -1065,6 +1151,58 @@ async function loadSceneObjects(runId: string): Promise<SceneObject[]> {
         widthM: numericOrNull(solved.width_m) ?? 0,
         floorZ: numericOrNull(solved.floor_z) ?? 0,
       },
+    });
+  }
+  return out;
+}
+
+const DYNAMIC_SPHERE_SCHEMA = "kinesia.dynamic_sphere.v1";
+const DEFAULT_DYNAMIC_SPHERE_MAX_INTERPOLATION_GAP_FRAMES = 12;
+
+// Dynamic scene records do not have a mesh and must be kept separate from the
+// static-object loader. The schema is deliberately strict: a future dynamic
+// type should get its own explicit viewer contract instead of being guessed as
+// a sphere.
+async function loadDynamicSceneObjects(runId: string): Promise<DynamicSceneObject[]> {
+  const sceneDir = path.join(await runBaseDir(runId), "scene");
+  const entries = await fs.readdir(sceneDir).catch(() => [] as string[]);
+  const out: DynamicSceneObject[] = [];
+  for (const entry of entries.filter((name) => name.toLowerCase().endsWith("_dynamic.json")).sort()) {
+    const raw = await readJsonIfExists<JsonRecord>(path.join(sceneDir, entry));
+    if (!raw || raw.schema !== DYNAMIC_SPHERE_SCHEMA || raw.kind !== "sphere") {
+      continue;
+    }
+
+    const diameterM = numericOrNull(raw.diameter_m);
+    const radiusM = numericOrNull(raw.radius_m) ?? (diameterM === null ? null : diameterM / 2);
+    if (radiusM === null || radiusM <= 0) {
+      continue;
+    }
+
+    const posesByFrame = new Map<number, DynamicSpherePose>();
+    if (Array.isArray(raw.poses)) {
+      for (const rawPose of raw.poses) {
+        const pose = parseDynamicSpherePose(rawPose);
+        if (pose) posesByFrame.set(pose.frameIndex, pose);
+      }
+    }
+    const poses = [...posesByFrame.values()].sort((left, right) => left.frameIndex - right.frameIndex);
+    if (poses.length === 0) {
+      continue;
+    }
+
+    const quality = raw.quality && typeof raw.quality === "object" ? raw.quality as JsonRecord : null;
+    const configuredGap = numericOrNull(quality?.max_interpolation_gap_frames);
+    const maxInterpolationGapFrames = configuredGap !== null && configuredGap >= 0
+      ? Math.trunc(configuredGap)
+      : DEFAULT_DYNAMIC_SPHERE_MAX_INTERPOLATION_GAP_FRAMES;
+    out.push({
+      kind: "sphere",
+      name: typeof raw.name === "string" && raw.name.trim() ? raw.name : entry.replace(/\.json$/, ""),
+      prompt: typeof raw.prompt === "string" && raw.prompt.trim() ? raw.prompt : null,
+      radiusM,
+      poses,
+      maxInterpolationGapFrames,
     });
   }
   return out;

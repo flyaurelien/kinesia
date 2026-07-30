@@ -25,6 +25,7 @@ dependencies = [
     "rich>=14.3.3",
     "roma>=1.5.6",
     "scikit-image>=0.26.0",
+    "scipy>=1.11.0",
     "timm>=1.0.24",
     "torch>=2.7.0",
     "torchvision>=0.22.0",

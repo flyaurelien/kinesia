@@ -37,11 +37,14 @@ the 3D reconstruction.*
 - **Export** — per-joint kinematics as CSV/JSON, the clinical gait report as
   JSON, and a tracking-box MP4.
 - **Fully local** — after the one-time model download, nothing leaves your machine.
+- **Experimental scene objects** — optionally reconstruct static objects that
+  rest on the ground, or track a known-size spherical object's trajectory; see
+  the [capture constraints](#capture-constraints-and-experimental-scene-objects).
 
 ## How it works
 
 Kinesia is a single Next.js app (UI + API in one process) that drives a Python
-pipeline (`uv run sam3d …`):
+pipeline (`uv run --no-sync sam3d …`):
 
 ```mermaid
 flowchart LR
@@ -61,6 +64,37 @@ flowchart LR
 3. **View** — the browser viewer reunites all the runs of one selection in a
    single 3D scene. Runs share the source camera space, so the subjects'
    relative positions are real. Kinematic signals are computed per subject.
+
+## Capture constraints and experimental scene objects
+
+Kinesia is designed for a **fixed-camera** recording. Mount the camera on a
+tripod and avoid panning, zooming, or translating it during a take. A moving
+camera invalidates the shared world frame, so metric placement and the spatial
+relationship between subjects and scene objects are not reliable.
+
+Human reconstruction is the supported workflow. Scene-object reconstruction is
+an experimental opt-in feature with a deliberately narrower contract:
+
+- It creates one mesh and one fixed pose from a reference frame for an object
+  that is static, upright, and touching the ground.
+- A visible, approximately circular sphere such as a ball can be tracked over
+  time when its physical diameter is supplied. It exports 3D position and
+  velocity in the shared world frame, but not orientation or spin.
+- Other moving, held, thrown, airborne, rolling, deforming, or generic objects
+  are unsupported.
+- Monocular depth, orientation, scale, and ground-contact inference are
+  uncertain. Inspect every object placement before using it in analysis or
+  presentation material.
+
+Before metric sphere tracking, Kinesia estimates global feature motion. It
+rejects a clip when it detects a pan, translation, rotation, or zoom that would
+invalidate the shared camera/world frame. A textureless clip can remain
+unverified, so a fixed tripod is still a capture requirement rather than a
+guarantee inferred from the video.
+
+The app continues a human-reconstruction run when the optional static-object
+runtime is absent; it skips static mesh reconstruction and records the reason
+in the run log. The dynamic-sphere tracker remains available.
 
 ### Identity tracking
 
@@ -153,10 +187,49 @@ copy under its own upstream license.
 | **DINOv3** backbone | image encoder inside SAM 3D Body | [arXiv:2508.10104](https://arxiv.org/abs/2508.10104) | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
 | **SAM 3** | open-vocabulary person detection + segmentation (PyTorch, all platforms) | [arXiv:2511.16719](https://arxiv.org/abs/2511.16719) | [facebook/sam3](https://huggingface.co/facebook/sam3) · [facebookresearch/sam3](https://github.com/facebookresearch/sam3) | SAM License (gated) |
 | **SAM 3 (MLX)** | fast in-viewer detection preview on Apple Silicon | — | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image) · [Deekshith-Dade/mlx-sam3](https://github.com/Deekshith-Dade/mlx-sam3) | Apache 2.0 (code) / SAM License (weights) |
+| **SAM 3D Objects (optional)** | experimental static scene-object mesh reconstruction | [arXiv:2511.16624](https://arxiv.org/abs/2511.16624) | [facebook/sam-3d-objects](https://huggingface.co/facebook/sam-3d-objects) · [Sam3D-Objects-MLX port](https://github.com/ZimengXiong/Sam3D-Objects-MLX) | SAM License (gated) |
 
 > The in-viewer streaming detector uses the MLX build of SAM 3 (Apple Silicon
 > only). On Linux/Windows the reconstruction pipeline performs detection itself
 > with PyTorch SAM 3 (CUDA/CPU). SAM 3D Body runs everywhere (CUDA → MPS → CPU).
+
+### Optional experimental scene-object runtime
+
+Static scene-object mesh reconstruction is disabled by default and requires a
+separate runtime. The current integration targets **macOS on Apple Silicon** through the
+[Sam3D-Objects-MLX port](https://github.com/ZimengXiong/Sam3D-Objects-MLX).
+Its code and all SAM 3D Objects checkpoints stay outside this repository; no
+object-model code or weights are redistributed by Kinesia.
+
+The known-diameter dynamic-sphere tracker does not need this optional runtime:
+it uses the main Kinesia SAM 3 installation. It still requires a fixed camera,
+a visible roughly circular sphere, and a supplied real-world diameter. Spin is
+not inferred for an unmarked sphere.
+
+Install the known-compatible external runtime at the path Kinesia checks by
+default:
+
+```bash
+git clone https://github.com/ZimengXiong/Sam3D-Objects-MLX.git vendor/sam3d-objects-mlx
+git -C vendor/sam3d-objects-mlx checkout c6f3701e4c9d45281afe0f022d2ba499cd60b39d
+cd vendor/sam3d-objects-mlx && uv sync && cd ../..
+```
+
+Request access to [the gated SAM 3D Objects model](https://huggingface.co/facebook/sam-3d-objects), then install its checkpoints into the external runtime:
+
+```bash
+cd vendor/sam3d-objects-mlx
+uv run hf auth login
+uv run hf download --repo-type model --local-dir checkpoints/hf-download --max-workers 1 facebook/sam-3d-objects
+mv checkpoints/hf-download/checkpoints checkpoints/hf
+cd ../..
+```
+
+The final file `vendor/sam3d-objects-mlx/checkpoints/hf/pipeline.yaml` must
+exist before object reconstruction can start. To keep the runtime elsewhere,
+set `SAM3D_OBJECTS_ROOT` to its absolute path before launching Kinesia. Review
+the external runtime and model terms before use: SAM 3D Objects code and
+checkpoints are subject to the upstream SAM License, not Kinesia's CC0 license.
 
 ## Requirements
 
@@ -181,8 +254,17 @@ winget install --id Gyan.FFmpeg     # Windows — ensure ffmpeg/ffprobe are on P
 ## Install
 
 ```bash
-uv sync                                  # creates .venv and installs the backend
-cd web-viewer && npm install && cd ..    # installs the web viewer
+uv sync --frozen --no-editable             # creates .venv from the locked backend dependencies
+cd web-viewer && npm ci && cd ..          # installs the locked web viewer dependencies
+```
+
+Kinesia uses a `src/` package layout. The commands below include `--no-sync` so
+`uv` keeps that known-good non-editable installation and avoids
+platform-specific ambiguity around editable `.pth` resolution. After changing
+backend source locally, rebuild that local package before running the commands:
+
+```bash
+uv sync --frozen --no-editable --reinstall-package sam-3d-pose-estimation
 ```
 
 ### Download the models
@@ -191,12 +273,12 @@ Request access on each gated Hugging Face page (one click), log in with a
 token, then download (~6 GB total):
 
 ```bash
-uv run hf auth login    # token from https://huggingface.co/settings/tokens
+uv run --no-sync hf auth login    # token from https://huggingface.co/settings/tokens
 
 # SAM 3D Body — 3D mesh recovery (~2.7 GB)
-uv run hf download facebook/sam-3d-body-dinov3 --local-dir models/sam-3d-body-dinov3
+uv run --no-sync hf download facebook/sam-3d-body-dinov3 --local-dir models/sam-3d-body-dinov3
 # SAM 3 — open-vocabulary subject detector (~3.2 GB, into the HF cache)
-uv run hf download facebook/sam3 sam3.pt config.json
+uv run --no-sync hf download facebook/sam3 sam3.pt config.json
 ```
 
 On Apple Silicon, the in-viewer detect preview auto-downloads the MLX SAM 3
@@ -204,7 +286,7 @@ weights (`mlx-community/sam3-image`) on first use. After the one-time download
 the app runs offline. Verify the setup with:
 
 ```bash
-uv run sam3d doctor --json
+uv run --no-sync sam3d doctor --json
 ```
 
 ## Run
@@ -215,7 +297,7 @@ uv run sam3d doctor --json
 
 Open <http://127.0.0.1:4001/>. Run it **from the repository root** — the app
 locates `input/`, `output/`, and the Python environment relative to it.
-(Manual equivalent: `cd web-viewer && npm run dev -- --hostname 127.0.0.1 --port 4001`.)
+(Manual equivalent: `cd web-viewer && UV_NO_SYNC=1 npm run dev -- --hostname 127.0.0.1 --port 4001`.)
 
 ### Using the app
 
@@ -231,15 +313,19 @@ locates `input/`, `output/`, and the Python environment relative to it.
 
 ```bash
 # reconstruct one video (automatic subject detection)
-uv run sam3d run --video-input input/example.mp4 --run-id example_processed \
+uv run --no-sync sam3d run --video-input input/example.mp4 --run-id example_processed \
   --inference-target body --precision float32 --no-preview --output-codec h264
 
 # reconstruct subject k of a saved multi-subject selection
-uv run sam3d run --video-input input/example.mp4 --run-id example_p2 \
+uv run --no-sync sam3d run --video-input input/example.mp4 --run-id example_p2 \
   --subject-track-file input/.detect/<id>/chosen_subject_track.json --subject-index 1
 
 # derive kinematics for a run
-uv run sam3d analyze --run-id example_processed
+uv run --no-sync sam3d analyze --run-id example_processed
+
+# experimentally track a 22 cm ball through a fixed-camera completed run
+uv run --no-sync sam3d scene --run-id example_processed --stage dynamic --prompts ball \
+  --dynamic-sphere-diameter-m 0.22
 ```
 
 Artifacts land under `output/<run_id>/` (meshes, metadata, previews, kinematics).
@@ -253,13 +339,14 @@ Copy `web-viewer/.env.example` to `web-viewer/.env.local` to override defaults.
 | `KINESIA_RUNS_ROOT` | `output` | where processed runs are stored |
 | `KINESIA_UPLOADS_ROOT` | `input` | where uploaded videos are stored |
 | `NEXT_PUBLIC_KINESIA_BACKEND_URL` | empty | set only to split the frontend onto another host |
-| `KINESIA_ALLOWED_ORIGINS` | `127.0.0.1:4001` | browser origins allowed to call the API |
+| `NEXT_PUBLIC_KINESIA_BASIC_UI` | `0` | set to `1` for the reduced single-video workflow |
+| `KINESIA_ALLOWED_ORIGINS` | `http://127.0.0.1:4001` | browser origins allowed to call the API |
 
 ## Development
 
 ```bash
-uv run sam3d doctor --json                       # environment + model files
-uv run python -m unittest discover -s tests      # backend tests
+uv run --no-sync sam3d doctor --json             # environment + model files
+uv run --no-sync python -m unittest discover -s tests  # backend tests
 cd web-viewer && npx tsc --noEmit && npm run build
 ```
 
@@ -321,6 +408,8 @@ Kinesia's own code is dedicated to the **public domain** under
 
 The vendored third-party code keeps its upstream licenses: `vendor/sam3-main`
 and `vendor/sam-3d-body-main` are under Meta's SAM License (included in each
-directory), `vendor/mlx_sam3` is Apache 2.0. Model weights are downloaded from
-their original gated sources and remain subject to their own license terms —
-CC0 applies only to Kinesia's own code.
+directory), `vendor/mlx_sam3` is Apache 2.0. The optional
+`vendor/sam3d-objects-mlx` runtime is deliberately not vendored and its SAM 3D
+Objects components are subject to their upstream SAM License. Model weights are
+downloaded from their original gated sources and remain subject to their own
+license terms — CC0 applies only to Kinesia's own code.

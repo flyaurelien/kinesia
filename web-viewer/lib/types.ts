@@ -133,13 +133,26 @@ export type RunGait = {
   };
 };
 
+// An affine transform serialized in row-major order. It maps the GLB's raw
+// coordinates directly into the run's metric world coordinates.
+export type SceneObjectMatrix = [
+  number, number, number, number,
+  number, number, number, number,
+  number, number, number, number,
+  number, number, number, number,
+];
+
 // A static object reconstructed once for the whole clip and placed in the same
 // metric world as the subject (see scripts/place_scene_object.py).
 export type SceneObject = {
   name: string;
   meshUrl: string;
+  // Canonical placement. New artifacts should provide this instead of relying
+  // on the legacy scale/up-axis/heading fields below.
+  objectToWorld: SceneObjectMatrix | null;
   // Metres per mesh unit — the object model outputs a normalised shape, so this
-  // is solved against the subject's floor rather than taken from it.
+  // is solved against the subject's floor rather than taken from it. These
+  // legacy fields remain populated for pre-matrix artifacts.
   scale: number;
   upAxis: "X" | "Y" | "Z";
   centreWorld: [number, number, number];
@@ -151,6 +164,29 @@ export type SceneObject = {
   fitIou: number | null;
   solved: { depthM: number; heightM: number; widthM: number; floorZ: number };
 };
+
+// One observed pose of a known-size sphere. Positions share the same metric
+// world frame as static scene objects and reconstructed subjects.
+export type DynamicSpherePose = {
+  frameIndex: number;
+  videoFrame: number | null;
+  timeS: number | null;
+  positionWorld: [number, number, number];
+  confidence: number | null;
+};
+
+// The first dynamic scene-object contract. A sphere has no orientation because
+// spin cannot be inferred reliably from a single unmarked camera view.
+export type DynamicSphere = {
+  kind: "sphere";
+  name: string;
+  prompt: string | null;
+  radiusM: number;
+  poses: DynamicSpherePose[];
+  maxInterpolationGapFrames: number;
+};
+
+export type DynamicSceneObject = DynamicSphere;
 
 // Full payload for a single run, including every frame and signal (viewer page).
 export type RunDetail = {
@@ -171,6 +207,7 @@ export type RunDetail = {
   gait?: RunGait | null;
   frames: RunFrame[];
   sceneObjects: SceneObject[];
+  dynamicObjects: DynamicSceneObject[];
   analyses?: Array<{
     analysisId: string;
     preset: string;

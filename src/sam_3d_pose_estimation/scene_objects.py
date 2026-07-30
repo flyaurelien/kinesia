@@ -36,6 +36,7 @@ FOOT_JOINTS = [13, 15, 16, 17, 14, 18, 19, 20]
 FLOOR_QUANTILE = 0.10
 
 SCHEMA = "kinesia.scene_object.v1"
+TRANSFORM_SCHEMA = "kinesia.scene_object_transform.v1"
 
 # How many frames to try the prompt on before knowing where the object is. The
 # object is static, so one good look is enough — but the first frame tried may
@@ -66,6 +67,270 @@ def cam_to_world(point: np.ndarray) -> np.ndarray:
     return np.array([-point[2], point[0], -point[1]], dtype=np.float64)
 
 
+def upright_rotation(up_axis: int) -> np.ndarray:
+    """Return the proper rotation that sends a mesh axis to world-up.
+
+    The result maps a column vector in the mesh's current coordinate system to
+    the canonical object frame: Z is up, and X/Y span the object's footprint.
+    It is deliberately a rotation rather than an axis permutation so that
+    choosing X or Y as up cannot mirror an asymmetric object.
+
+    Args:
+        up_axis: Index of the mesh axis that is vertical (0=X, 1=Y, 2=Z).
+
+    Returns:
+        A 3x3, right-handed rotation matrix.
+    """
+    if up_axis not in (0, 1, 2):
+        raise ValueError(f"up_axis must be 0, 1, or 2; got {up_axis!r}")
+    horizontal = [axis for axis in range(3) if axis != up_axis]
+    permutation = (*horizontal, up_axis)
+    inversions = sum(
+        permutation[left] > permutation[right]
+        for left in range(3)
+        for right in range(left + 1, 3)
+    )
+    rotation = np.zeros((3, 3), dtype=np.float64)
+    rotation[0, horizontal[0]] = -1.0 if inversions % 2 else 1.0
+    rotation[1, horizontal[1]] = 1.0
+    rotation[2, up_axis] = 1.0
+    return rotation
+
+
+def upright_flip_matrix(up_axis: int, flipped: bool) -> np.ndarray:
+    """Return the proper rotation used when a candidate must be upside down.
+
+    A vertical flip alone is a reflection. Negating the vertical axis and one
+    horizontal axis instead is a 180-degree rotation, which preserves the
+    shape's handedness. The returned matrix maps the original reconstructed
+    mesh to the mesh written to the scene GLB.
+    """
+    if up_axis not in (0, 1, 2):
+        raise ValueError(f"up_axis must be 0, 1, or 2; got {up_axis!r}")
+    matrix = np.eye(3, dtype=np.float64)
+    if not flipped:
+        return matrix
+    other_axis = next(axis for axis in range(3) if axis != up_axis)
+    matrix[up_axis, up_axis] = -1.0
+    matrix[other_axis, other_axis] = -1.0
+    return matrix
+
+
+def canonical_mesh_frame(
+    mesh_vertices: np.ndarray,
+    up_axis: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the canonical rotation and exact floor-contact pivot of a mesh.
+
+    The pivot is expressed in the supplied mesh coordinate system. Applying
+    the returned rotation to ``vertices - pivot`` produces a frame whose
+    footprint is centred at its vertex mean and whose lowest vertex has Z=0.
+    This is the one definition used for fitting, serialising and rendering;
+    consumers must not replace it with a bounding-box centre.
+
+    Args:
+        mesh_vertices: Mesh vertices in the coordinate system to transform.
+        up_axis: Index of the mesh axis that is vertical (0=X, 1=Y, 2=Z).
+
+    Returns:
+        ``(rotation_to_canonical, pivot_local)``.
+    """
+    vertices = np.asarray(mesh_vertices, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
+        raise ValueError("mesh_vertices must be a non-empty Nx3 array")
+    if not np.all(np.isfinite(vertices)):
+        raise ValueError("mesh_vertices must contain only finite values")
+    rotation = upright_rotation(up_axis)
+    canonical = vertices @ rotation.T
+    offset = np.array(
+        [canonical[:, 0].mean(), canonical[:, 1].mean(), canonical[:, 2].min()],
+        dtype=np.float64,
+    )
+    return rotation, rotation.T @ offset
+
+
+def world_from_mesh_matrix(
+    mesh_vertices: np.ndarray,
+    up_axis: int,
+    scale: float,
+    position_world: np.ndarray | list[float] | tuple[float, float, float],
+    yaw_rad: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build the canonical metric world transform for a scene mesh.
+
+    The 4x4 matrix is row-major when serialised and acts on a column vector:
+    ``world_h = matrix @ [mesh_x, mesh_y, mesh_z, 1]``. ``position_world`` is
+    the floor-contact pivot, not a bounding-box centre. The supplied mesh is
+    expected to be the one written to the GLB; use :func:`upright_flip_matrix`
+    to compose a transform from the pre-flip reconstruction mesh.
+
+    Args:
+        mesh_vertices: Vertices in the source mesh coordinate system.
+        up_axis: Index of the source mesh's vertical axis.
+        scale: Metres per mesh unit.
+        position_world: World position of the exact floor-contact pivot.
+        yaw_rad: Heading about the world's positive Z axis.
+
+    Returns:
+        ``(world_from_mesh, mesh_pivot_local)``.
+    """
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError(f"scale must be finite and positive; got {scale!r}")
+    position = np.asarray(position_world, dtype=np.float64)
+    if position.shape != (3,) or not np.all(np.isfinite(position)):
+        raise ValueError("position_world must contain three finite values")
+    if not np.isfinite(yaw_rad):
+        raise ValueError(f"yaw_rad must be finite; got {yaw_rad!r}")
+
+    canonical_rotation, pivot_local = canonical_mesh_frame(mesh_vertices, up_axis)
+    cosine, sine = np.cos(yaw_rad), np.sin(yaw_rad)
+    heading_rotation = np.array(
+        [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    linear = heading_rotation @ canonical_rotation * float(scale)
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = linear
+    matrix[:3, 3] = position - linear @ pivot_local
+    return matrix, pivot_local
+
+
+def transform_points(matrix: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """Apply a homogeneous 4x4 transform to an Nx3 point array.
+
+    This small public helper keeps tests and any future validation on the same
+    column-vector convention as the serialised scene-object contract.
+    """
+    transform = np.asarray(matrix, dtype=np.float64)
+    vertices = np.asarray(points, dtype=np.float64)
+    if transform.shape != (4, 4):
+        raise ValueError("matrix must be 4x4")
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError("points must be an Nx3 array")
+    homogeneous = np.column_stack((vertices, np.ones(len(vertices), dtype=np.float64)))
+    transformed = (transform @ homogeneous.T).T
+    return transformed[:, :3] / transformed[:, 3:4]
+
+
+def _homogeneous_rotation(rotation: np.ndarray) -> np.ndarray:
+    """Embed a 3x3 rotation in a homogeneous transform."""
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = rotation
+    return matrix
+
+
+def _transform_validation(
+    mesh_vertices: np.ndarray,
+    world_from_mesh: np.ndarray,
+    mesh_pivot_local: np.ndarray,
+    position_world: np.ndarray,
+) -> dict[str, Any]:
+    """Report algebraic transform checks without imposing a fit-quality cutoff."""
+    transformed = transform_points(world_from_mesh, mesh_vertices)
+    pivot_world = transform_points(world_from_mesh, mesh_pivot_local.reshape(1, 3))[0]
+    scale = max(
+        1.0,
+        float(np.abs(transformed).max(initial=0.0)),
+        float(np.abs(position_world).max(initial=0.0)),
+    )
+    tolerance = float(np.finfo(np.float64).eps * 128.0 * scale)
+    floor_z = float(position_world[2])
+    floor_residual = float(pivot_world[2] - floor_z)
+    lowest_vertex_z = float(transformed[:, 2].min())
+    checks = {
+        "finite_matrix": bool(np.all(np.isfinite(world_from_mesh))),
+        "positive_determinant": bool(np.linalg.det(world_from_mesh[:3, :3]) > 0.0),
+        "pivot_maps_to_position": bool(np.all(np.abs(pivot_world - position_world) <= tolerance)),
+        "mesh_is_on_or_above_floor": bool(lowest_vertex_z >= floor_z - tolerance),
+    }
+    issues = [name for name, passed in checks.items() if not passed]
+    return {
+        "status": "valid" if not issues else "invalid",
+        "checks": checks,
+        "issues": issues,
+        "numerical_tolerance_m": tolerance,
+        "floor_residual_m": floor_residual,
+        "lowest_vertex_z_m": lowest_vertex_z,
+        "world_pivot": [float(value) for value in pivot_world],
+    }
+
+
+def _rasterize_canonical_silhouette(
+    canonical_vertices: np.ndarray,
+    position_world: np.ndarray,
+    yaw_rad: float,
+    focal: float,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Project Z-up metric vertices to the sparse silhouette used by the fit."""
+    import cv2
+
+    cx, cy = width / 2.0, height / 2.0
+    cosine, sine = np.cos(yaw_rad), np.sin(yaw_rad)
+    rotated = np.stack(
+        [
+            canonical_vertices[:, 0] * cosine - canonical_vertices[:, 1] * sine,
+            canonical_vertices[:, 0] * sine + canonical_vertices[:, 1] * cosine,
+            canonical_vertices[:, 2],
+        ],
+        axis=1,
+    )
+    world = rotated + position_world
+    # world -> camera is the inverse of cam_to_world = (-z, x, -y).
+    camera = np.stack([world[:, 1], -world[:, 2], -world[:, 0]], axis=1)
+    keep = camera[:, 2] > 1e-3
+    canvas = np.zeros((height, width), dtype=np.uint8)
+    if keep.sum() < 10:
+        return canvas
+    u = focal * camera[keep, 0] / camera[keep, 2] + cx
+    v = focal * camera[keep, 1] / camera[keep, 2] + cy
+    ui = np.clip(np.round(u).astype(np.int32), 0, width - 1)
+    vi = np.clip(np.round(v).astype(np.int32), 0, height - 1)
+    canvas[vi, ui] = 1
+    # Splat the projected vertices rather than filling their convex hull: a
+    # chair is mostly holes, and a hull would score those openings as solid.
+    # A small dilation joins adjacent samples without swallowing the openings.
+    return cv2.dilate(canvas, np.ones((3, 3), np.uint8), iterations=2)
+
+
+def rasterize_mesh_silhouette(
+    mesh_vertices: np.ndarray,
+    up_axis: int,
+    scale: float,
+    position_world: np.ndarray | list[float] | tuple[float, float, float],
+    yaw_rad: float,
+    focal: float,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Project a mesh using the same geometry contract as pose fitting.
+
+    This is intentionally the fit's sparse vertex rasterisation, not a
+    photorealistic renderer. It is useful for deterministic regression tests
+    and for a future QA overlay because it reuses the exact pivot, up-axis and
+    yaw conventions represented by :func:`world_from_mesh_matrix`.
+    """
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError(f"scale must be finite and positive; got {scale!r}")
+    if not np.isfinite(focal) or focal <= 0:
+        raise ValueError(f"focal must be finite and positive; got {focal!r}")
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+    position = np.asarray(position_world, dtype=np.float64)
+    if position.shape != (3,) or not np.all(np.isfinite(position)):
+        raise ValueError("position_world must contain three finite values")
+    if not np.isfinite(yaw_rad):
+        raise ValueError(f"yaw_rad must be finite; got {yaw_rad!r}")
+
+    rotation, pivot_local = canonical_mesh_frame(mesh_vertices, up_axis)
+    canonical_vertices = (np.asarray(mesh_vertices, dtype=np.float64) - pivot_local) @ rotation.T
+    canonical_vertices *= float(scale)
+    return _rasterize_canonical_silhouette(
+        canonical_vertices, position, float(yaw_rad), float(focal), width, height
+    )
+
+
 def floor_height(records: list[dict]) -> float | None:
     """World height of the floor, from the lowest foot seen in each frame."""
     lows: list[float] = []
@@ -84,6 +349,30 @@ def floor_height(records: list[dict]) -> float | None:
         return None
     lows.sort()
     return lows[min(len(lows) - 1, int(len(lows) * FLOOR_QUANTILE))]
+
+
+def floor_height_for_run(metadata: dict[str, Any], records: list[dict]) -> tuple[float | None, str]:
+    """Return the single floor reference shared by placement and the viewer.
+
+    Current runs persist ``space_view.world_anchor.floor_y`` in camera space.
+    It is the floor the viewer translates to Z=0, so a static object's metric
+    floor must use its exact world equivalent (``-floor_y``). Older artifacts
+    did not save an anchor; for those only, retain the robust foot estimate.
+
+    Args:
+        metadata: Parsed ``run_metadata.json`` payload.
+        records: Valid per-frame reconstruction records.
+
+    Returns:
+        ``(floor_z_world, reference_name)``. The height is ``None`` when no
+        reliable floor is available.
+    """
+    space_view = metadata.get("space_view")
+    anchor = space_view.get("world_anchor") if isinstance(space_view, dict) else None
+    floor_y = anchor.get("floor_y") if isinstance(anchor, dict) else None
+    if isinstance(floor_y, (int, float)) and np.isfinite(float(floor_y)):
+        return -float(floor_y), "world_anchor"
+    return floor_height(records), "feet_quantile"
 
 
 def median_focal(records: list[dict]) -> float | None:
@@ -178,6 +467,40 @@ def solve_placement(
     }
 
 
+def _placement_quality(
+    mask: np.ndarray,
+    occluded: np.ndarray | None,
+    fit: dict,
+    placement: dict,
+) -> dict[str, Any]:
+    """Describe observable support for a placement without gating on a cutoff."""
+    target = np.asarray(mask, dtype=bool)
+    hidden = np.zeros_like(target, dtype=bool) if occluded is None else np.asarray(occluded, dtype=bool)
+    if hidden.shape != target.shape:
+        raise ValueError("occluded mask must have the same shape as mask")
+    mask_pixels = int(target.sum())
+    occluded_mask_pixels = int(np.logical_and(target, hidden).sum())
+    judged_mask_pixels = mask_pixels - occluded_mask_pixels
+    result: dict[str, Any] = {
+        # These values are descriptive evidence, not a binary acceptance rule:
+        # image quality, occlusion and object class decide what is sufficient.
+        "reprojection_iou": float(fit["iou"]),
+        "seed_reprojection_iou": float(fit["seed_iou"]),
+        "reprojection_iou_gain": float(fit["iou"] - fit["seed_iou"]),
+        "mask_pixels": mask_pixels,
+        "occluded_mask_pixels": occluded_mask_pixels,
+        "judged_mask_pixels": judged_mask_pixels,
+        "occluded_mask_fraction": (
+            float(occluded_mask_pixels / mask_pixels) if mask_pixels else None
+        ),
+        "floor_calibration": "feet" if placement.get("calibrated") else "recorded_focal",
+        "floor_reference": str(placement.get("floor_reference") or "feet_quantile"),
+    }
+    if placement.get("calibration_spread") is not None:
+        result["floor_calibration_spread"] = float(placement["calibration_spread"])
+    return result
+
+
 def fit_pose_to_silhouette(
     mesh_vertices: np.ndarray,
     up_axis: int,
@@ -212,25 +535,19 @@ def fit_pose_to_silhouette(
     position, so narrowing both together walks into a local best. The caller
     scans sizes from outside instead, running this fit whole at each one.
     """
-    import cv2
-
     cx, cy = width / 2.0, height / 2.0
-    verts = mesh_vertices * scale
-    # Work in a frame where Z is up and the object's underside is at zero.
-    #
-    # Reordering axes to put `up` last is a PERMUTATION, and an odd one mirrors
-    # the object rather than rotating it. A mirrored chair is indistinguishable
-    # from one turned 180 degrees, so the fit would land on the right spot at
-    # the right size facing exactly backwards — which is what it did. Negating
-    # one axis when the permutation is odd keeps the handedness.
-    order = [i for i in range(3) if i != up_axis]
-    parity = 1.0 if (order[0], order[1], up_axis) in {(0, 1, 2), (1, 2, 0), (2, 0, 1)} else -1.0
-    local = np.stack(
-        [parity * verts[:, order[0]], verts[:, order[1]], verts[:, up_axis]], axis=1
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError(f"scale must be finite and positive; got {scale!r}")
+    # Work in the exact same frame the serialised transform uses: Z is up,
+    # the footprint's vertex mean is centred, and the lowest vertex is at the
+    # origin plane. A viewer must consume that transform rather than deriving a
+    # different pivot from its bounding box.
+    canonical_rotation, mesh_pivot_local = canonical_mesh_frame(mesh_vertices, up_axis)
+    local = (
+        (np.asarray(mesh_vertices, dtype=np.float64) - mesh_pivot_local)
+        @ canonical_rotation.T
+        * float(scale)
     )
-    local[:, 2] -= local[:, 2].min()
-    local[:, 0] -= local[:, 0].mean()
-    local[:, 1] -= local[:, 1].mean()
 
     target = (mask > 0).astype(np.uint8)
     ys, xs = np.nonzero(target)
@@ -238,37 +555,14 @@ def fit_pose_to_silhouette(
         raise ValueError("empty mask")
 
     def silhouette(x_world: float, y_world: float, yaw: float) -> np.ndarray:
-        c, s = np.cos(yaw), np.sin(yaw)
-        rotated = np.stack(
-            [local[:, 0] * c - local[:, 1] * s, local[:, 0] * s + local[:, 1] * c, local[:, 2]],
-            axis=1,
+        return _rasterize_canonical_silhouette(
+            local,
+            np.array([x_world, y_world, floor_z], dtype=np.float64),
+            yaw,
+            focal,
+            width,
+            height,
         )
-        # world -> camera is the inverse of cam_to_world = (-z, x, -y).
-        world = rotated + np.array([x_world, y_world, floor_z])
-        cam = np.stack([world[:, 1], -world[:, 2], -world[:, 0]], axis=1)
-        keep = cam[:, 2] > 1e-3
-        if keep.sum() < 10:
-            return np.zeros_like(target)
-        u = focal * cam[keep, 0] / cam[keep, 2] + cx
-        v = focal * cam[keep, 1] / cam[keep, 2] + cy
-        # Splat the projected vertices rather than filling their convex hull:
-        # a chair is mostly holes — between the legs, under the seat — and a
-        # hull fills every one of them, so it would be scored against a shape
-        # the object does not have.
-        #
-        # Sharper silhouettes were tried and measured: sampling the surface
-        # densely, and rasterising the triangles outright. Both raise the
-        # overlap score and both move the object about 22 cm in depth, away
-        # from where it visibly stands. The mask is truncated where the subject
-        # occludes the object, and the floor contact only pins depth to within
-        # 14 cm at this distance, so a higher score does not mean a better
-        # placement. Left as is deliberately.
-        canvas = np.zeros_like(target)
-        ui = np.clip(np.round(u).astype(np.int32), 0, width - 1)
-        vi = np.clip(np.round(v).astype(np.int32), 0, height - 1)
-        canvas[vi, ui] = 1
-        # Close the gaps between samples without swallowing the real openings.
-        return cv2.dilate(canvas, np.ones((3, 3), np.uint8), iterations=2)
 
     # Pixels the subject covers say nothing about the object either way.
     judged = np.ones_like(target, bool) if occluded is None else ~occluded.astype(bool)
@@ -304,6 +598,7 @@ def fit_pose_to_silhouette(
         "position_world": [float(x_world), float(y_world), float(floor_z)],
         "yaw_rad": float(np.arctan2(np.sin(yaw), np.cos(yaw))),
         "seed_iou": float(iou(x0, y0, 0.0)),
+        "mesh_pivot_local": [float(value) for value in mesh_pivot_local],
     }
 
 
@@ -325,7 +620,7 @@ def place_object(
     records = [r for r in (metadata.get("records") or []) if isinstance(r, dict)]
 
     focal = median_focal(records)
-    floor_z = floor_height(records)
+    floor_z, floor_reference = floor_height_for_run(metadata, records)
     if focal is None or floor_z is None:
         raise ValueError("the run has no focal length or no visible feet")
 
@@ -347,6 +642,7 @@ def place_object(
 
     placement = solve_placement(mask > 0, focal, floor_z, width_px, height_px, v_times_z)
     placement["calibrated"] = v_times_z is not None
+    placement["floor_reference"] = floor_reference
     if residual is not None:
         placement["calibration_spread"] = residual
 
@@ -358,7 +654,7 @@ def place_object(
     scene_dir.mkdir(parents=True, exist_ok=True)
     mesh_name = f"{name}.glb"
 
-    fit, up_axis, scale, upright = _fit_upright(
+    fit, up_axis, scale, upright, flipped = _fit_upright(
         vertices, extent, placement, mask > 0, floor_z, width_px, height_px, log,
         occluded,
     )
@@ -372,10 +668,22 @@ def place_object(
         placement["height_m"] = measured_height
         if abs(ratio - 1.0) > 0.03:
             placement["measured_beyond_mask"] = ratio
-    # Write the mesh the way up the fit settled on, so the viewer draws the
-    # same object that was measured rather than the raw one.
+    # Write the mesh the way up the fit settled on. The canonical transform
+    # below starts from these exact GLB coordinates, so the renderer does not
+    # have to repeat the flip, axis conversion or pivot calculation.
     mesh.vertices = upright
     mesh.export(scene_dir / mesh_name)
+    position_world = np.asarray(fit["position_world"], dtype=np.float64)
+    object_to_world, mesh_pivot_local = world_from_mesh_matrix(
+        upright, up_axis, scale, position_world, float(fit["yaw_rad"])
+    )
+    flip_matrix = upright_flip_matrix(up_axis, flipped)
+    raw_mesh_to_world = object_to_world @ _homogeneous_rotation(flip_matrix)
+    raw_mesh_pivot_local = flip_matrix.T @ mesh_pivot_local
+    transform_validation = _transform_validation(
+        upright, object_to_world, mesh_pivot_local, position_world
+    )
+    quality = _placement_quality(mask > 0, occluded, fit, placement)
     log(f"silhouette: IoU {fit['seed_iou']:.3f} (naive centring) -> {fit['iou']:.3f} (fitted)")
     log(f"  floor position: {[round(v, 3) for v in fit['position_world']]}  "
         f"heading {np.degrees(fit['yaw_rad']):.0f} deg")
@@ -390,6 +698,29 @@ def place_object(
         "position_world": fit["position_world"],
         "yaw_rad": fit["yaw_rad"],
         "fit_iou": fit["iou"],
+        # Canonical contract for a renderer. The matrix is row-major and acts
+        # on a column vector [mesh_x, mesh_y, mesh_z, 1]. Its source is the
+        # exported GLB named above; it already includes every axis, flip,
+        # scale, floor pivot and yaw decision made by the fit.
+        "object_to_world": object_to_world.tolist(),
+        "mesh_pivot_local": [float(value) for value in mesh_pivot_local],
+        "world_pivot": [float(value) for value in position_world],
+        "transform_contract": {
+            "schema": TRANSFORM_SCHEMA,
+            "matrix_layout": "row_major",
+            "vector_convention": "column_vector",
+            "source_mesh": "mesh",
+        },
+        # Retained for traceability: this matrix starts from the model's input
+        # mesh before the proper flip baked into the exported GLB.
+        "raw_mesh_to_world": raw_mesh_to_world.tolist(),
+        "raw_mesh_pivot_local": [float(value) for value in raw_mesh_pivot_local],
+        "orientation": {
+            "up_axis": "XYZ"[up_axis],
+            "flipped": flipped,
+        },
+        "quality": quality,
+        "transform_validation": transform_validation,
         "solved": placement,
         "note": (
             "Scale and position are solved against the SUBJECT's floor and the "
@@ -418,7 +749,7 @@ def _fit_upright(
     height_px: int,
     log: Callable[[str], None],
     occluded: np.ndarray | None = None,
-) -> tuple[dict, int, float, np.ndarray]:
+) -> tuple[dict, int, float, np.ndarray, bool]:
     """Work out which way up the object goes, by trying and measuring.
 
     The obvious guess — the longest dimension points up — holds for a chair and
@@ -431,23 +762,20 @@ def _fit_upright(
     the object instead of turning it over, and a mirrored object can match the
     outline while facing the wrong way.
     """
-    best: tuple[dict, int, float, np.ndarray] | None = None
+    best: tuple[dict, int, float, np.ndarray, bool] | None = None
     for axis in range(3):
         if extent[axis] <= 1e-9:
             continue
         scale = placement["height_m"] / float(extent[axis])
-        other = next(i for i in range(3) if i != axis)
         for flipped in (False, True):
-            oriented = vertices.copy()
-            if flipped:
-                oriented[:, axis] *= -1.0
-                oriented[:, other] *= -1.0
+            flip_matrix = upright_flip_matrix(axis, flipped)
+            oriented = np.asarray(vertices, dtype=np.float64) @ flip_matrix.T
             fit = fit_pose_to_silhouette(
                 oriented, axis, scale, mask, placement["focal_px"], floor_z,
                 width_px, height_px, occluded,
             )
             if best is None or fit["iou"] > best[0]["iou"]:
-                best = (fit, axis, scale, oriented)
+                best = (fit, axis, scale, oriented, flipped)
     if best is None:
         raise ValueError("the mesh has no extent to stand on")
 
@@ -455,7 +783,7 @@ def _fit_upright(
     # to be its mask's height assumes the whole of it showed. A seated person
     # hides a chair's back entirely, leaving floor-to-seat — barely half — so
     # the size has to be found rather than read off.
-    fit, axis, scale, oriented = best
+    fit, axis, scale, oriented, flipped = best
     grown = 1.0
     coarse = np.exp(np.linspace(np.log(0.6), np.log(2.2), 7))
     for stage, candidates in ((0, coarse), (1, None)):
@@ -475,7 +803,7 @@ def _fit_upright(
     log(f"upright axis {'XYZ'[axis]} "
         f"({extent[axis] * scale * 100:.0f} cm tall), IoU {fit['iou']:.3f}"
         + (f", {grown:.2f}x what the mask alone showed" if abs(grown - 1) > 0.03 else ""))
-    return fit, axis, scale, oriented
+    return fit, axis, scale, oriented, flipped
 
 
 def parse_object_prompts(text: str | None) -> tuple[str, ...]:
