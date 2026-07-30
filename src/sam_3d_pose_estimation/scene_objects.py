@@ -62,6 +62,8 @@ CAMERA_TO_WORLD = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]]
 # with +X right and +Y down. The runtime also exports its Z-up decoded mesh as
 # a Y-up GLB using ``[x, z, -y]``. Applying both declared conversions is what
 # preserves the orientation represented by the model quaternion in our world.
+# PyTorch3D applies its pose matrices to row vectors. Our artifact contract uses
+# column vectors, so the decoded quaternion matrix is transposed at this boundary.
 MODEL_CAMERA_TO_WORLD = CAMERA_TO_WORLD @ np.diag([-1.0, -1.0, 1.0])
 MODEL_LOCAL_TO_GLB = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])
 GLB_TO_MODEL_LOCAL = MODEL_LOCAL_TO_GLB.T
@@ -102,7 +104,9 @@ def model_pose_to_world_matrix(pose: dict[str, Any]) -> np.ndarray:
     """
     translation, rotation, scale = _model_pose_components(pose)
     matrix = np.eye(4)
-    matrix[:3, :3] = MODEL_CAMERA_TO_WORLD @ rotation @ np.diag(scale) @ GLB_TO_MODEL_LOCAL
+    matrix[:3, :3] = (
+        MODEL_CAMERA_TO_WORLD @ rotation.T @ np.diag(scale) @ GLB_TO_MODEL_LOCAL
+    )
     matrix[:3, 3] = MODEL_CAMERA_TO_WORLD @ translation
     return matrix
 
@@ -116,7 +120,7 @@ def _model_pose_camera_vertices(pose: dict[str, Any], mesh_vertices: np.ndarray)
         raise ValueError("mesh_vertices must contain only finite values")
     translation, rotation, scale = _model_pose_components(pose)
     local = (GLB_TO_MODEL_LOCAL @ vertices.T).T
-    return (rotation @ (local * scale).T).T + translation
+    return (rotation.T @ (local * scale).T).T + translation
 
 
 def calibrate_model_pose_to_subject_frame(

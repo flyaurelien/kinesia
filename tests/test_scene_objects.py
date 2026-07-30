@@ -101,6 +101,23 @@ class TestSceneObjectTransforms(unittest.TestCase):
             [0.0, -4.0, 0.0], [-2.0, 0.0, 0.0], [0.0, 0.0, -3.0],
         ]))
 
+    def test_model_pose_transposes_the_runtime_row_vector_rotation(self):
+        half_sqrt = float(np.sqrt(0.5))
+        matrix = model_pose_to_world_matrix({
+            "translation_l2c": [0.0, 0.0, 0.0],
+            "rotation_quaternion_wxyz_l2c": [half_sqrt, 0.0, 0.0, half_sqrt],
+            "scale_l2c": [1.0, 1.0, 1.0],
+        })
+
+        # SAM 3D Objects uses PyTorch3D's row-vector convention. Its +90°
+        # local Z rotation sends raw [1, 0, 0] to camera [0, -1, 0]. The GLB
+        # conversion leaves this particular basis vector unchanged.
+        np.testing.assert_allclose(
+            transform_points(matrix, np.array([[1.0, 0.0, 0.0]])),
+            [[0.0, 0.0, -1.0]],
+            atol=1e-12,
+        )
+
     def test_model_pose_metric_alignment_preserves_orientation_and_shared_floor(self):
         pose = {
             "translation_l2c": [0.0, -0.5, 2.0],
