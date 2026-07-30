@@ -70,6 +70,7 @@ def reconstruct_mesh(
     image_path: Path,
     mask_path: Path,
     output_glb: Path,
+    output_pose: Path,
     cache_dir: Path,
     root: Path | None = None,
     log: Callable[[str], None] = print,
@@ -93,20 +94,18 @@ def reconstruct_mesh(
 
     command = [
         str(base / ".venv" / "bin" / "python"),
-        "main.py",
+        str(project_root_from() / "scripts" / "run_sam3d_objects_pose.py"),
         "--image", str(image_path.resolve()),
         "--mask", str(mask_path.resolve()),
-        # Without this only a voxel dump is written, and the process still
-        # reports success.
-        "--mesh",
         "--output", str(output_glb.resolve()),
+        "--pose-output", str(output_pose.resolve()),
         # Per run: the cache keys on a weak hash of the input and is written
         # non-atomically, so a shared directory lets one object read another's
         # geometry.
         "--cache-dir", str(cache_dir.resolve()),
         "--simplify", str(SIMPLIFY_RATIO),
     ]
-    environment = dict(os.environ)
+    environment = _runtime_environment(base)
     # The object model prefers its own hand-written Metal shaders for sparse
     # convolution. They segfault partway through generation when another
     # process is already working the GPU hard — a local model server is enough
@@ -114,15 +113,6 @@ def reconstruct_mesh(
     # recover from. The portable path costs about the same (measured: four
     # minutes against the four the shaders take) and does not crash, so it is
     # what an unattended step uses. Override to compare.
-    environment.setdefault("SPARSE_BACKEND", "mps")
-    environment.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
-    libraries = _dynamic_library_path(base)
-    if libraries:
-        existing = environment.get("DYLD_LIBRARY_PATH")
-        environment["DYLD_LIBRARY_PATH"] = (
-            f"{libraries}:{existing}" if existing else libraries
-        )
-
     log(f"reconstructing shape from {image_path.name} + {mask_path.name}")
     try:
         completed = subprocess.run(
@@ -150,8 +140,71 @@ def reconstruct_mesh(
         raise RuntimeError(
             f"no mesh produced ({_failure_detail(completed)})"
         )
+    if not output_pose.exists():
+        raise RuntimeError("the object runtime produced no pose output")
     log(f"shape written: {output_glb.name} ({output_glb.stat().st_size // 1024} kB)")
     return output_glb
+
+
+def reconstruct_pose(
+    image_path: Path,
+    mask_path: Path,
+    output_pose: Path,
+    cache_dir: Path,
+    root: Path | None = None,
+    log: Callable[[str], None] = print,
+) -> Path:
+    """Run SAM 3D Objects for one image/mask pose without exporting a mesh."""
+    base = root or objects_root()
+    reason = unavailable_reason(base)
+    if reason:
+        raise RuntimeError(reason)
+
+    output_pose.parent.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if output_pose.exists():
+        output_pose.unlink()
+    output_placeholder = cache_dir / f"{output_pose.stem}.stl"
+    command = [
+        str(base / ".venv" / "bin" / "python"),
+        str(project_root_from() / "scripts" / "run_sam3d_objects_pose.py"),
+        "--image", str(image_path.resolve()),
+        "--mask", str(mask_path.resolve()),
+        "--output", str(output_placeholder.resolve()),
+        "--pose-output", str(output_pose.resolve()),
+        "--cache-dir", str(cache_dir.resolve()),
+        "--pose-only",
+    ]
+    environment = _runtime_environment(base)
+    log(f"reconstructing pose from {image_path.name} + {mask_path.name}")
+    try:
+        completed = subprocess.run(
+            command, env=environment, cwd=str(base), capture_output=True,
+            text=True, timeout=RECONSTRUCTION_TIMEOUT_S, check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"object pose reconstruction timed out after {RECONSTRUCTION_TIMEOUT_S}s"
+        ) from error
+    for line in (completed.stdout or "").splitlines()[-12:]:
+        log(f"  {line}")
+    if not output_pose.exists():
+        raise RuntimeError(f"no pose produced ({_failure_detail(completed)})")
+    return output_pose
+
+
+def _runtime_environment(base: Path) -> dict[str, str]:
+    """Build the external runtime environment shared by mesh and pose calls."""
+    environment = dict(os.environ)
+    environment.setdefault("SPARSE_BACKEND", "mps")
+    environment.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
+    libraries = _dynamic_library_path(base)
+    if libraries:
+        existing = environment.get("DYLD_LIBRARY_PATH")
+        environment["DYLD_LIBRARY_PATH"] = (
+            f"{libraries}:{existing}" if existing else libraries
+        )
+    return environment
 
 
 def _failure_detail(completed: subprocess.CompletedProcess) -> str:

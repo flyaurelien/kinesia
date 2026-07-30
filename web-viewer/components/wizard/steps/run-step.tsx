@@ -52,7 +52,6 @@ export function RunStep() {
     subjectPrompt,
     sceneObjectPrompt,
     sceneObjectMode,
-    sceneSphereDiameterM,
     segments,
     stagedUpload,
     detect,
@@ -130,13 +129,8 @@ export function RunStep() {
       if (sceneObjectPrompt.trim() && sceneObjectMode === "static") {
         formData.append("sceneObjectPrompts", sceneObjectPrompt.trim());
       }
-      if (sceneObjectPrompt.trim() && sceneObjectMode === "dynamic_sphere") {
-        const diameterM = Number(sceneSphereDiameterM);
-        if (!Number.isFinite(diameterM) || diameterM <= 0) {
-          throw new Error("Enter the physical diameter of the moving sphere in metres.");
-        }
-        formData.append("dynamicSpherePrompts", sceneObjectPrompt.trim());
-        formData.append("dynamicSphereDiameterM", String(diameterM));
+      if (sceneObjectPrompt.trim() && sceneObjectMode === "dynamic") {
+        formData.append("dynamicObjectPrompts", sceneObjectPrompt.trim());
       }
 
       // Delete segments are cut out of the video (timeline compresses);
@@ -204,7 +198,6 @@ export function RunStep() {
     subjectPrompt,
     sceneObjectPrompt,
     sceneObjectMode,
-    sceneSphereDiameterM,
   ]);
 
   /* ===== Derived ===== */

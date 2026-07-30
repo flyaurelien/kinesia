@@ -67,6 +67,42 @@ def cam_to_world(point: np.ndarray) -> np.ndarray:
     return np.array([-point[2], point[0], -point[1]], dtype=np.float64)
 
 
+CAMERA_TO_WORLD = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+
+
+def model_pose_to_world_matrix(pose: dict[str, Any]) -> np.ndarray:
+    """Convert SAM 3D Objects local-to-camera pose fields into object-to-world.
+
+    This consumes the model output directly: no object-class, floor, upright
+    axis, silhouette or size heuristic is involved.
+    """
+    def vector(name: str, length: int) -> np.ndarray:
+        value = np.asarray(pose.get(name), dtype=np.float64).reshape(-1)
+        if value.shape != (length,) or not np.all(np.isfinite(value)):
+            raise ValueError(f"invalid model pose field {name}")
+        return value
+
+    translation = vector("translation_l2c", 3)
+    quaternion = vector("rotation_quaternion_wxyz_l2c", 4)
+    scale = vector("scale_l2c", 3)
+    if np.any(scale <= 0):
+        raise ValueError("model pose scale must be positive")
+    quaternion_norm = float(np.linalg.norm(quaternion))
+    if not np.isfinite(quaternion_norm) or quaternion_norm <= 1e-12:
+        raise ValueError("model pose rotation quaternion must be non-zero")
+    quaternion /= quaternion_norm
+    w, x, y, z = quaternion
+    rotation = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+    matrix = np.eye(4)
+    matrix[:3, :3] = CAMERA_TO_WORLD @ rotation @ np.diag(scale)
+    matrix[:3, 3] = CAMERA_TO_WORLD @ translation
+    return matrix
+
+
 def upright_rotation(up_axis: int) -> np.ndarray:
     """Return the proper rotation that sends a mesh axis to world-up.
 
@@ -961,11 +997,30 @@ def place_built_shapes(
         log(f"{STAGE_MARKER} placing {target['prompt']} ({position}/{len(waiting)})")
         name = target["name"]
         try:
-            record = place_object(
-                run_dir, scene_dir / f"{name}.glb", scene_dir / f"{name}_mask.png",
-                name, log,
-                occluded=_subject_on_frame(run_dir, target.get("source_frame")),
-            )
+            pose_file = scene_dir / str(target.get("model_pose") or "")
+            if pose_file.is_file():
+                model_pose = json.loads(pose_file.read_text())
+                object_to_world = model_pose_to_world_matrix(model_pose)
+                record = {
+                    "schema": SCHEMA,
+                    "name": name,
+                    "mesh": f"{name}.glb",
+                    "object_to_world": object_to_world.tolist(),
+                    "transform_contract": {
+                        "schema": TRANSFORM_SCHEMA,
+                        "matrix_layout": "row_major",
+                        "vector_convention": "column_vector",
+                        "source_mesh": "mesh",
+                    },
+                    "model_pose": model_pose,
+                    "quality": {"source": "sam3d_objects_model_pose"},
+                }
+            else:
+                record = place_object(
+                    run_dir, scene_dir / f"{name}.glb", scene_dir / f"{name}_mask.png",
+                    name, log,
+                    occluded=_subject_on_frame(run_dir, target.get("source_frame")),
+                )
         except (RuntimeError, ValueError, OSError, KeyError) as error:
             log(f"could not place '{target['prompt']}': {error}")
             failures.append({"prompt": target["prompt"], "error": str(error)})
@@ -1194,6 +1249,7 @@ def _shape_object(
         image_path=target["image_path"],
         mask_path=target["mask_path"],
         output_glb=scene_dir / f"{name}.glb",
+        output_pose=scene_dir / f"{name}_model_pose.json",
         cache_dir=scene_dir / ".cache" / name,
         root=object_shapes.objects_root(project_root),
         log=log,
@@ -1207,6 +1263,7 @@ def _shape_object(
         "name": name,
         "source_frame": target["source_frame"],
         "detection_score": target["detection_score"],
+        "model_pose": f"{name}_model_pose.json",
     }
     (pending_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
     return record

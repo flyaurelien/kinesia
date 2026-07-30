@@ -17,7 +17,7 @@ import {
 } from "./store";
 import type {
   DynamicSceneObject,
-  DynamicSpherePose,
+  DynamicObjectPose,
   GaitCycle,
   GaitStat,
   RunDetail,
@@ -127,17 +127,17 @@ function parseSceneObjectMatrix(value: unknown): SceneObjectMatrix | null {
   return matrix as SceneObjectMatrix;
 }
 
-// Parse one dynamic-sphere observation. Frame indices are run-frame indices,
+// Parse one dynamic-object transform. Frame indices are run-frame indices,
 // not source-video timestamps, because the viewer's playhead advances through
 // the reconstructed run frames.
-function parseDynamicSpherePose(value: unknown): DynamicSpherePose | null {
+function parseDynamicObjectPose(value: unknown): DynamicObjectPose | null {
   if (!value || typeof value !== "object") {
     return null;
   }
   const raw = value as JsonRecord;
   const frameIndex = numericOrNull(raw.frame_index);
-  const positionWorld = parseTriplet(raw.position_world);
-  if (frameIndex === null || !Number.isInteger(frameIndex) || frameIndex < 0 || !positionWorld) {
+  const objectToWorld = parseSceneObjectMatrix(raw.object_to_world);
+  if (frameIndex === null || !Number.isInteger(frameIndex) || frameIndex < 0 || !objectToWorld) {
     return null;
   }
   const videoFrame = numericOrNull(raw.video_frame);
@@ -146,8 +146,8 @@ function parseDynamicSpherePose(value: unknown): DynamicSpherePose | null {
     frameIndex,
     videoFrame: videoFrame !== null && Number.isInteger(videoFrame) && videoFrame >= 0 ? videoFrame : null,
     timeS: timeS !== null && timeS >= 0 ? timeS : null,
-    positionWorld,
-    confidence: numericOrNull(raw.confidence),
+    objectToWorld,
+    detectorScore: numericOrNull(raw.detector_score),
   };
 }
 
@@ -1156,33 +1156,28 @@ async function loadSceneObjects(runId: string): Promise<SceneObject[]> {
   return out;
 }
 
-const DYNAMIC_SPHERE_SCHEMA = "kinesia.dynamic_sphere.v1";
-const DEFAULT_DYNAMIC_SPHERE_MAX_INTERPOLATION_GAP_FRAMES = 12;
+const DYNAMIC_OBJECT_SCHEMA = "kinesia.dynamic_object.v1";
+const DEFAULT_DYNAMIC_OBJECT_MAX_INTERPOLATION_GAP_FRAMES = 12;
 
-// Dynamic scene records do not have a mesh and must be kept separate from the
-// static-object loader. The schema is deliberately strict: a future dynamic
-// type should get its own explicit viewer contract instead of being guessed as
-// a sphere.
+// Dynamic scene records carry a reference mesh and model-derived transforms.
 async function loadDynamicSceneObjects(runId: string): Promise<DynamicSceneObject[]> {
   const sceneDir = path.join(await runBaseDir(runId), "scene");
   const entries = await fs.readdir(sceneDir).catch(() => [] as string[]);
   const out: DynamicSceneObject[] = [];
   for (const entry of entries.filter((name) => name.toLowerCase().endsWith("_dynamic.json")).sort()) {
     const raw = await readJsonIfExists<JsonRecord>(path.join(sceneDir, entry));
-    if (!raw || raw.schema !== DYNAMIC_SPHERE_SCHEMA || raw.kind !== "sphere") {
+    if (!raw || raw.schema !== DYNAMIC_OBJECT_SCHEMA || raw.kind !== "mesh") {
+      continue;
+    }
+    const mesh = typeof raw.mesh === "string" ? raw.mesh : null;
+    if (!mesh) {
       continue;
     }
 
-    const diameterM = numericOrNull(raw.diameter_m);
-    const radiusM = numericOrNull(raw.radius_m) ?? (diameterM === null ? null : diameterM / 2);
-    if (radiusM === null || radiusM <= 0) {
-      continue;
-    }
-
-    const posesByFrame = new Map<number, DynamicSpherePose>();
+    const posesByFrame = new Map<number, DynamicObjectPose>();
     if (Array.isArray(raw.poses)) {
       for (const rawPose of raw.poses) {
-        const pose = parseDynamicSpherePose(rawPose);
+        const pose = parseDynamicObjectPose(rawPose);
         if (pose) posesByFrame.set(pose.frameIndex, pose);
       }
     }
@@ -1195,12 +1190,12 @@ async function loadDynamicSceneObjects(runId: string): Promise<DynamicSceneObjec
     const configuredGap = numericOrNull(quality?.max_interpolation_gap_frames);
     const maxInterpolationGapFrames = configuredGap !== null && configuredGap >= 0
       ? Math.trunc(configuredGap)
-      : DEFAULT_DYNAMIC_SPHERE_MAX_INTERPOLATION_GAP_FRAMES;
+      : DEFAULT_DYNAMIC_OBJECT_MAX_INTERPOLATION_GAP_FRAMES;
     out.push({
-      kind: "sphere",
+      kind: "mesh",
       name: typeof raw.name === "string" && raw.name.trim() ? raw.name : entry.replace(/\.json$/, ""),
       prompt: typeof raw.prompt === "string" && raw.prompt.trim() ? raw.prompt : null,
-      radiusM,
+      meshUrl: `/api/runs/${encodeURIComponent(runId)}/scene/${encodeURIComponent(mesh)}`,
       poses,
       maxInterpolationGapFrames,
     });

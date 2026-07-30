@@ -17,6 +17,7 @@ from sam_3d_pose_estimation.scene_objects import (
     canonical_mesh_frame,
     fit_pose_to_silhouette,
     floor_height_for_run,
+    model_pose_to_world_matrix,
     place_object,
     rasterize_mesh_silhouette,
     transform_points,
@@ -87,6 +88,25 @@ def _angle_error(left: float, right: float) -> float:
 
 
 class TestSceneObjectTransforms(unittest.TestCase):
+    def test_model_pose_maps_directly_from_camera_to_world(self):
+        matrix = model_pose_to_world_matrix({
+            "translation_l2c": [[1.0, 2.0, 3.0]],
+            "rotation_quaternion_wxyz_l2c": [[1.0, 0.0, 0.0, 0.0]],
+            "scale_l2c": [[2.0, 3.0, 4.0]],
+        })
+        np.testing.assert_allclose(matrix[:3, 3], [-3.0, 1.0, -2.0])
+        np.testing.assert_allclose(matrix[:3, :3], np.array([
+            [0.0, 0.0, -4.0], [2.0, 0.0, 0.0], [0.0, -3.0, 0.0],
+        ]))
+
+    def test_model_pose_rejects_an_invalid_rotation(self):
+        with self.assertRaisesRegex(ValueError, "rotation quaternion"):
+            model_pose_to_world_matrix({
+                "translation_l2c": [0.0, 0.0, 0.0],
+                "rotation_quaternion_wxyz_l2c": [0.0, 0.0, 0.0, 0.0],
+                "scale_l2c": [1.0, 1.0, 1.0],
+            })
+
     def test_run_anchor_is_the_floor_reference_for_new_object_placements(self):
         joints = [None] * 21
         for index in FOOT_JOINTS:

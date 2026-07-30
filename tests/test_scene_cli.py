@@ -21,8 +21,7 @@ def scene_args(**overrides: object) -> Namespace:
         "stage": "shape",
         "video": None,
         "subject_track": None,
-        "dynamic_sphere_diameter_m": 0.22,
-        "dynamic_frame_stride": 1,
+        "dynamic_frame_stride": 5,
         "json": False,
     }
     values.update(overrides)
@@ -48,19 +47,6 @@ class SceneCommandTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
 
-    def test_dynamic_mode_rejects_multiple_ambiguous_objects(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            run_dir = Path(temporary)
-            (run_dir / "run_metadata.json").write_text("{}")
-            with mock.patch("sam_3d_pose_estimation.workspace.run_dir", return_value=run_dir):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    result = cmd_scene(scene_args(
-                        stage="dynamic",
-                        prompts="ball, balloon",
-                    ))
-
-        self.assertEqual(result, 2)
-
     def test_dynamic_mode_rejects_a_non_positive_frame_stride(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -69,7 +55,6 @@ class SceneCommandTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()):
                     result = cmd_scene(scene_args(
                         stage="dynamic",
-                        prompts="ball",
                         dynamic_frame_stride=0,
                     ))
 

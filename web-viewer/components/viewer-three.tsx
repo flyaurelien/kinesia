@@ -7,7 +7,7 @@ import * as THREE from "three";
 
 import { apiFetch } from "../lib/api-client";
 import { filterSeries, smoothingAlpha } from "../lib/one_euro";
-import type { DynamicSphere, RunDetail, RunFrame, SceneObject, SceneObjectMatrix } from "../lib/types";
+import type { DynamicObject, RunDetail, RunFrame, SceneObject, SceneObjectMatrix } from "../lib/types";
 
 type DisplayAnchor = {
   centerX: number;
@@ -44,7 +44,7 @@ type ThreeSpaceViewerProps = {
   // run, so isolating another subject must not stop computing them — only the
   // primary's mesh/joints are withheld.
   showPrimary?: boolean;
-  // Reconstructed static objects and tracked dynamic spheres placed in the
+  // Reconstructed static and dynamic objects placed in the
   // subject's space.
   showSceneObjects?: boolean;
   sceneObjectOpacity?: number;
@@ -447,6 +447,16 @@ function matrixFromRowMajor(values: SceneObjectMatrix): THREE.Matrix4 {
     values[8], values[9], values[10], values[11],
     values[12], values[13], values[14], values[15],
   );
+}
+
+function matrixToRowMajor(matrix: THREE.Matrix4): SceneObjectMatrix {
+  const values = matrix.elements;
+  return [
+    values[0], values[4], values[8], values[12],
+    values[1], values[5], values[9], values[13],
+    values[2], values[6], values[10], values[14],
+    values[3], values[7], values[11], values[15],
+  ];
 }
 
 // Convert a raw-mesh -> world artifact transform into the viewer's fixed
@@ -1276,15 +1286,14 @@ function SkeletonBones({ joints }: { joints: THREE.Vector3[] }) {
 // Assembles one subject for a frame: drops it onto the grid, applies the upright rotation, and renders
 // the mesh, bones, and clickable joint markers according to the visibility toggles.
 
-// Resolve a dynamic sphere's world position at a fractional run-frame cursor.
-// Observations can be sparse, but interpolation across an explicitly long
-// occlusion would make a ball appear to pass through space without evidence;
-// in that case this returns null and the sphere is hidden until observed again.
-function dynamicSpherePositionAtCursor(
-  sphere: DynamicSphere,
+// Resolve a generic model transform at a fractional run-frame cursor. Poses
+// are decomposed to preserve rotation and scale while interpolating; directly
+// blending matrix coefficients would introduce shear.
+function dynamicObjectMatrixAtCursor(
+  object: DynamicObject,
   frameCursor: number,
-): [number, number, number] | null {
-  const { poses } = sphere;
+): SceneObjectMatrix | null {
+  const { poses } = object;
   let lower = 0;
   let upper = poses.length;
   while (lower < upper) {
@@ -1298,7 +1307,7 @@ function dynamicSpherePositionAtCursor(
 
   const next = poses[lower];
   if (next && Math.abs(next.frameIndex - frameCursor) < 1e-6) {
-    return next.positionWorld;
+    return next.objectToWorld;
   }
   const previous = poses[lower - 1];
   if (!previous || !next) {
@@ -1306,48 +1315,76 @@ function dynamicSpherePositionAtCursor(
   }
 
   const frameGap = next.frameIndex - previous.frameIndex;
-  if (frameGap <= 0 || frameGap > sphere.maxInterpolationGapFrames) {
+  if (frameGap <= 0 || frameGap > object.maxInterpolationGapFrames) {
     return null;
   }
   const amount = (frameCursor - previous.frameIndex) / frameGap;
-  return [
-    previous.positionWorld[0] * (1 - amount) + next.positionWorld[0] * amount,
-    previous.positionWorld[1] * (1 - amount) + next.positionWorld[1] * amount,
-    previous.positionWorld[2] * (1 - amount) + next.positionWorld[2] * amount,
-  ];
+  const start = matrixFromRowMajor(previous.objectToWorld);
+  const end = matrixFromRowMajor(next.objectToWorld);
+  const startPosition = new THREE.Vector3();
+  const startRotation = new THREE.Quaternion();
+  const startScale = new THREE.Vector3();
+  const endPosition = new THREE.Vector3();
+  const endRotation = new THREE.Quaternion();
+  const endScale = new THREE.Vector3();
+  start.decompose(startPosition, startRotation, startScale);
+  end.decompose(endPosition, endRotation, endScale);
+  const interpolated = new THREE.Matrix4().compose(
+    startPosition.lerp(endPosition, amount),
+    startRotation.slerp(endRotation, amount),
+    startScale.lerp(endScale, amount),
+  );
+  return matrixToRowMajor(interpolated);
 }
 
-// A known-size dynamic sphere. It deliberately has no rotation: the schema
-// carries only a metric center trajectory because spin of an unmarked sphere
-// is not observable from one camera.
-function DynamicSphereMesh({
-  sphere,
+function DynamicObjectMesh({
+  object,
   anchor,
   frameCursor,
   opacity,
 }: {
-  sphere: DynamicSphere;
+  object: DynamicObject;
   anchor: DisplayAnchor | null;
   frameCursor: number;
   opacity: number;
 }) {
-  const position = useMemo(() => {
-    const worldPosition = dynamicSpherePositionAtCursor(sphere, frameCursor);
-    return worldPosition ? worldToViewer(new THREE.Vector3(...worldPosition), anchor) : null;
-  }, [anchor, frameCursor, sphere]);
-
-  if (!position) return null;
+  const [scene, setScene] = useState<THREE.Group | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let loaded: THREE.Group | null = null;
+    setScene(null);
+    import("three/examples/jsm/loaders/GLTFLoader.js")
+      .then(({ GLTFLoader }) => {
+        if (cancelled) return;
+        new GLTFLoader().load(object.meshUrl, (gltf) => {
+          if (cancelled) {
+            disposeSceneObject(gltf.scene);
+            return;
+          }
+          loaded = gltf.scene;
+          setScene(loaded);
+        }, undefined, () => {
+          if (!cancelled) setScene(null);
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      if (loaded) setTimeout(() => disposeSceneObject(loaded!), 0);
+    };
+  }, [object.meshUrl]);
+  useEffect(() => {
+    if (scene) applySceneObjectMaterial(scene, opacity);
+  }, [opacity, scene]);
+  const matrix = useMemo(() => {
+    const objectToWorld = dynamicObjectMatrixAtCursor(object, frameCursor);
+    return objectToWorld ? sceneObjectToViewerMatrix(objectToWorld, anchor) : null;
+  }, [anchor, frameCursor, object]);
+  if (!scene || !matrix) return null;
   return (
-    <mesh position={position} castShadow>
-      <sphereGeometry args={[sphere.radiusM, 28, 20]} />
-      <meshStandardMaterial
-        color="#f97316"
-        roughness={0.48}
-        metalness={0.04}
-        transparent={opacity < 1}
-        opacity={opacity}
-      />
-    </mesh>
+    <group matrix={matrix} matrixAutoUpdate={false}>
+      <primitive object={scene} />
+    </group>
   );
 }
 
@@ -1963,10 +2000,10 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
           ))
         : null}
       {props.showSceneObjects !== false
-        ? (props.runDetail.dynamicObjects ?? []).map((sphere) => (
-            <DynamicSphereMesh
-              key={`dynamic-${sphere.name}`}
-              sphere={sphere}
+          ? (props.runDetail.dynamicObjects ?? []).map((object) => (
+            <DynamicObjectMesh
+              key={`dynamic-${object.name}`}
+              object={object}
               anchor={anchor}
               frameCursor={displayCursor}
               opacity={props.sceneObjectOpacity ?? 1}

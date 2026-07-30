@@ -12,7 +12,7 @@ import { makeInitialSegments, type Segment } from "../../lib/video-timeline";
 
 // The four ordered stages of the processing wizard.
 export type WizardStep = "upload" | "detect" | "run";
-export type SceneObjectMode = "static" | "dynamic_sphere";
+export type SceneObjectMode = "static" | "dynamic";
 
 // One persistent tracked identity surfaced by the streaming detector.
 export type DetectTrack = {
@@ -73,11 +73,9 @@ export type WizardState = {
   // subject prompt there is no sensible default, and guessing one would spend
   // minutes reconstructing something nobody asked for.
   sceneObjectPrompt: string;
-  // Static objects rest on the reconstructed floor. Dynamic support is
-  // deliberately explicit and currently limited to a known-size sphere, whose
-  // apparent radius can be lifted into a metric monocular trajectory.
+  // Static objects rest on the reconstructed floor. Dynamic objects use a
+  // model pose on sampled frames and keep that pose in the common scene frame.
   sceneObjectMode: SceneObjectMode;
-  sceneSphereDiameterM: string;
   // Staged once here, reused by the run so the video uploads a single time.
   stagedUpload: { stagedUploadId: string; fileName: string } | null;
   detect: DetectSession | null;
@@ -121,7 +119,6 @@ type Action =
   | { type: "set_subject_prompt"; prompt: string }
   | { type: "set_scene_object_prompt"; prompt: string }
   | { type: "set_scene_object_mode"; mode: SceneObjectMode }
-  | { type: "set_scene_sphere_diameter_m"; diameterM: string }
   | { type: "set_staged_upload"; staged: { stagedUploadId: string; fileName: string } | null }
   | { type: "detect_start"; id: string; prompt: string; stride: number }
   | {
@@ -153,7 +150,6 @@ const INITIAL_STATE: WizardState = {
   subjectPrompt: "person",
   sceneObjectPrompt: "",
   sceneObjectMode: "static",
-  sceneSphereDiameterM: "0.22",
   stagedUpload: null,
   detect: null,
   detectTrackFile: null,
@@ -273,8 +269,6 @@ function reducer(state: WizardState, action: Action): WizardState {
       return { ...state, sceneObjectPrompt: action.prompt };
     case "set_scene_object_mode":
       return { ...state, sceneObjectMode: action.mode };
-    case "set_scene_sphere_diameter_m":
-      return { ...state, sceneSphereDiameterM: action.diameterM };
     case "set_staged_upload":
       return { ...state, stagedUpload: action.staged };
     case "detect_start":
