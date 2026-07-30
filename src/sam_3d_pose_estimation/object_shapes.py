@@ -21,9 +21,15 @@ from .workspace import project_root_from
 # wedged subprocess holding a job open forever, not to bound normal work.
 RECONSTRUCTION_TIMEOUT_S = 1800
 
-# The raw output runs to a couple of hundred thousand faces for a single chair,
-# which the viewer has to fetch over HTTP for every object in the scene.
+# The raw output can contain hundreds of thousands of faces per object, which
+# the viewer has to fetch over HTTP for every object in the scene.
 SIMPLIFY_RATIO = 0.9
+
+
+def pointmap_path_for_pose(output_pose: Path) -> Path:
+    """Return the scene-pointmap path paired with a model-pose artifact."""
+    stem = output_pose.stem.removesuffix("_model_pose").removesuffix("_pose")
+    return output_pose.with_name(f"{stem}_pointmap.npz")
 
 
 def objects_root(project_root: Path | None = None) -> Path:
@@ -86,11 +92,13 @@ def reconstruct_mesh(
 
     output_glb.parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    if output_glb.exists():
-        # A stale mesh left by an earlier attempt would otherwise be mistaken
-        # for this run's output, since the process can exit cleanly having
-        # produced nothing.
-        output_glb.unlink()
+    pointmap_output = pointmap_path_for_pose(output_pose)
+    for stale_output in (output_glb, output_pose, pointmap_output):
+        if not stale_output.exists():
+            continue
+        # A stale artifact from an earlier attempt must not be mistaken for
+        # this run's output when the external process exits without writing it.
+        stale_output.unlink()
 
     command = [
         str(base / ".venv" / "bin" / "python"),
@@ -99,6 +107,7 @@ def reconstruct_mesh(
         "--mask", str(mask_path.resolve()),
         "--output", str(output_glb.resolve()),
         "--pose-output", str(output_pose.resolve()),
+        "--pointmap-output", str(pointmap_output.resolve()),
         # Per run: the cache keys on a weak hash of the input and is written
         # non-atomically, so a shared directory lets one object read another's
         # geometry.
@@ -162,8 +171,10 @@ def reconstruct_pose(
 
     output_pose.parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    if output_pose.exists():
-        output_pose.unlink()
+    pointmap_output = pointmap_path_for_pose(output_pose)
+    for stale_output in (output_pose, pointmap_output):
+        if stale_output.exists():
+            stale_output.unlink()
     output_placeholder = cache_dir / f"{output_pose.stem}.stl"
     command = [
         str(base / ".venv" / "bin" / "python"),
@@ -172,6 +183,7 @@ def reconstruct_pose(
         "--mask", str(mask_path.resolve()),
         "--output", str(output_placeholder.resolve()),
         "--pose-output", str(output_pose.resolve()),
+        "--pointmap-output", str(pointmap_output.resolve()),
         "--cache-dir", str(cache_dir.resolve()),
         "--pose-only",
     ]

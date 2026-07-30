@@ -161,7 +161,12 @@ def track_dynamic_objects(
         return {"objects": [], "failures": [], "skipped": "no reconstructed frames"}
 
     from .sam3d_runtime import select_device, try_build_human_detector
-    from .scene_objects import model_pose_to_world_matrix, object_name
+    from .scene_objects import (
+        _subject_mesh_world_on_frame,
+        align_object_pointmap_to_subject,
+        apply_scene_alignment_to_model_pose,
+        object_name,
+    )
     from .subject_preview import DEFAULT_SAM3_CODE_ROOT
 
     detector = try_build_human_detector(
@@ -221,13 +226,51 @@ def track_dynamic_objects(
                             root=project_root, log=log,
                         )
                     model_pose = json.loads(pose_path.read_text())
+                    pointmap_name = model_pose.get("scene_pointmap")
+                    if not pointmap_name:
+                        raise ValueError(
+                            f"frame {video_frame} has no shared scene point map"
+                        )
+                    pointmap_path = Path(str(pointmap_name))
+                    if not pointmap_path.is_absolute():
+                        pointmap_path = pose_path.parent / pointmap_path
+                    if not pointmap_path.is_file():
+                        raise ValueError(
+                            f"frame {video_frame} scene point map is missing"
+                        )
+                    subject_mesh_world, focal = _subject_mesh_world_on_frame(
+                        run_dir, video_frame
+                    )
+                    if subject_mesh_world is None or focal is None:
+                        raise ValueError(
+                            f"frame {video_frame} has no metric subject mesh"
+                        )
+                    with np.load(pointmap_path) as pointmap_file:
+                        pointmap = np.asarray(
+                            pointmap_file["pointmap"], dtype=np.float64
+                        )
+                    scene_alignment = align_object_pointmap_to_subject(
+                        pointmap,
+                        subject_mesh_world,
+                        focal,
+                        width,
+                        height,
+                    )
+                    # The fitted similarity is the compact evidence needed by
+                    # the viewer; retaining a dense point map for every frame
+                    # would make a long dynamic sequence unnecessarily large.
+                    pointmap_path.unlink()
+                    model_pose.pop("scene_pointmap", None)
                     poses.append({
                         "frame_index": frame_index,
                         "video_frame": video_frame,
                         "time_s": float(video_frame / fps),
                         "detector_score": score,
                         "model_pose": model_pose,
-                        "object_to_world": model_pose_to_world_matrix(model_pose).tolist(),
+                        "scene_alignment": scene_alignment,
+                        "object_to_world": apply_scene_alignment_to_model_pose(
+                            model_pose, scene_alignment
+                        ).tolist(),
                     })
                     video_frame += 1
             finally:
@@ -251,7 +294,8 @@ def track_dynamic_objects(
                     # With the default stride of one, the viewer never fills a
                     # multi-frame gap with an invented trajectory.
                     "max_interpolation_gap_frames": frame_stride,
-                    "source": "sam3d_objects_model_pose",
+                    "source": "sam3d_objects_model_pose_shared_subject_pointmap",
+                    "metric_alignment": "shared_subject_pointmap_similarity",
                 },
             }
             (scene_dir / f"{name}.json").write_text(json.dumps(record, indent=1))

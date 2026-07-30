@@ -76,17 +76,19 @@ Human reconstruction is the supported workflow. Scene-object reconstruction is
 an experimental opt-in feature with a deliberately narrower contract:
 
 - A static object creates one mesh, retains SAM 3D Objects' quaternion-derived
-  orientation, and aligns its globally ambiguous model scale to the subject's
-  metric floor from the source mask. A category-independent interaction pass
-  can jointly refine that scale uniformly around the floor contact and adjust
-  its floor-parallel position, limiting mesh penetration while preserving
-  nearby contact. This keeps the object and subject in one measured reference
-  frame without any class-specific pose rule.
+  orientation and internal proportions. The object runtime's full-scene point
+  map and the SAM 3D Body mesh observe the same subject pixels, which determine
+  one robust similarity between their camera spaces. That shared transform
+  fixes object scale and position, while the subject's measured floor supplies
+  the static object's vertical contact without changing its scale. No
+  class-specific rule is used. Subject/object overlap is reported as quality
+  evidence and never used to resize or move the object.
 - A moving object is reconstructed once, then SAM 3D Objects estimates its
   local-to-camera translation, rotation, and scale on every reconstructed
-  frame. A missing pose is hidden rather than extrapolated across a gap. Its
-  per-frame model scale remains relative unless the sequence supplies a shared
-  metric anchor.
+  frame. Each pose is mapped into the metric body space from that frame's
+  shared subject point map; it is never floor-snapped. A missing pose is hidden
+  rather than extrapolated across a gap. The default stride is `1`, so every
+  reconstructed video frame is analysed.
 - Monocular depth, orientation, scale, and ground-contact inference are
   uncertain. Inspect every object placement before using it in analysis or
   presentation material.

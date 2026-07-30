@@ -83,17 +83,34 @@ class DynamicObjectArtifactTests(unittest.TestCase):
             "translation_l2c": [1.0, 2.0, 3.0],
             "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
             "scale_l2c": [2.0, 3.0, 4.0],
+            "scene_pointmap": "frame_pointmap.npz",
         }
+
+        alignment = {
+            "method": "shared_subject_pointmap_similarity",
+            "scale": 1.0,
+            "translation_camera": [0.0, 0.0, 0.0],
+            "sample_count": 400,
+            "inlier_count": 360,
+            "rms_m": 0.02,
+        }
+
+        def write_artifacts(output_pose: Path) -> None:
+            output_pose.write_text(json.dumps(pose))
+            np.savez_compressed(
+                output_pose.parent / "frame_pointmap.npz",
+                pointmap=np.zeros((80, 100, 3), dtype=np.float32),
+            )
 
         def write_first_mesh(
             _image: Path, _mask: Path, output_glb: Path, output_pose: Path, _cache: Path, **_kwargs: object,
         ) -> Path:
             output_glb.write_bytes(b"glb")
-            output_pose.write_text(json.dumps(pose))
+            write_artifacts(output_pose)
             return output_glb
 
         def write_pose(_image: Path, _mask: Path, output_pose: Path, _cache: Path, **_kwargs: object) -> Path:
-            output_pose.write_text(json.dumps(pose))
+            write_artifacts(output_pose)
             return output_pose
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -113,13 +130,25 @@ class DynamicObjectArtifactTests(unittest.TestCase):
                 mock.patch("sam_3d_pose_estimation.dynamic_objects.reconstruct_mesh", side_effect=write_first_mesh),
                 mock.patch("sam_3d_pose_estimation.dynamic_objects.reconstruct_pose", side_effect=write_pose),
                 mock.patch("sam_3d_pose_estimation.sam3d_runtime.try_build_human_detector", return_value=object()),
+                mock.patch(
+                    "sam_3d_pose_estimation.scene_objects._subject_mesh_world_on_frame",
+                    return_value=(mock.sentinel.subject_mesh, 200.0),
+                ),
+                mock.patch(
+                    "sam_3d_pose_estimation.scene_objects.align_object_pointmap_to_subject",
+                    return_value=alignment,
+                ),
             ):
                 result = track_dynamic_objects(run_dir, ("toy",), video, frame_stride=1, log=lambda _line: None)
 
         self.assertEqual(result["failures"], [])
         poses = result["objects"][0]["poses"]
         self.assertEqual(len(poses), 2)
-        self.assertEqual(poses[0]["model_pose"], pose)
+        expected_pose = {
+            key: value for key, value in pose.items() if key != "scene_pointmap"
+        }
+        self.assertEqual(poses[0]["model_pose"], expected_pose)
+        self.assertEqual(poses[0]["scene_alignment"], alignment)
         self.assertEqual(poses[0]["object_to_world"][0], [0.0, -4.0, 0.0, -3.0])
         self.assertEqual(result["objects"][0]["quality"]["max_interpolation_gap_frames"], 1)
 
