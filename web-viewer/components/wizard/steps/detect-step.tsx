@@ -371,7 +371,7 @@ export function DetectStep() {
           </div>
           <span className="of-prompt-hint">
             {sceneObjectMode === "dynamic"
-              ? "Reconstructs one mesh, then asks the model for its pose every five reconstructed frames. Position, orientation and scale come from those model poses."
+              ? "Reconstructs one mesh, then asks the model for its pose on every reconstructed frame. Position, orientation and scale come from those model poses."
               : "Reconstructed after the person and placed in the same space, so distances between them are comparable. Static objects only, up to four — each adds a few minutes."}
           </span>
         </div>

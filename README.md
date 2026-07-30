@@ -78,8 +78,8 @@ an experimental opt-in feature with a deliberately narrower contract:
 - A static object creates one mesh and uses SAM 3D Objects' local-to-camera
   translation, rotation, and scale directly for its fixed pose.
 - A moving object is reconstructed once, then SAM 3D Objects estimates its
-  local-to-camera translation, rotation, and scale every five reconstructed
-  frames. The viewer interpolates those model poses in the shared world frame.
+  local-to-camera translation, rotation, and scale on every reconstructed
+  frame. A missing pose is hidden rather than extrapolated across a gap.
 - Monocular depth, orientation, scale, and ground-contact inference are
   uncertain. Inspect every object placement before using it in analysis or
   presentation material.
@@ -310,7 +310,7 @@ uv run --no-sync sam3d run --video-input input/example.mp4 --run-id example_p2 \
 # derive kinematics for a run
 uv run --no-sync sam3d analyze --run-id example_processed
 
-# reconstruct a generic moving object using SAM 3D model poses every 5 frames
+# reconstruct a generic moving object using SAM 3D model poses on every frame
 uv run --no-sync sam3d scene --run-id example_processed --stage dynamic --prompts object
 ```
 

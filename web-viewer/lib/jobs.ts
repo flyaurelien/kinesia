@@ -719,7 +719,7 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
     // placement happens further down, once the run has feet to offer.
     const sceneObjectPrompts = (options.sceneObjectPromptsRaw ?? "").trim();
     const dynamicObjectPrompts = (options.dynamicObjectPromptsRaw ?? "").trim();
-    const dynamicFrameStride = parseInteger(options.dynamicFrameStrideRaw, 5, 1) ?? 5;
+    const dynamicFrameStride = parseInteger(options.dynamicFrameStrideRaw, 1, 1) ?? 1;
     if (sceneObjectPrompts && !isCanceled(job)) {
       job.stage = `preparing scene objects: ${sceneObjectPrompts}`;
       try {

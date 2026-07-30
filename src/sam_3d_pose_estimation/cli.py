@@ -228,8 +228,8 @@ def build_parser() -> argparse.ArgumentParser:
     scene_parser.add_argument(
         "--dynamic-frame-stride",
         type=int,
-        default=5,
-        help="Run the object pose model every Nth reconstructed frame (default: 5).",
+        default=1,
+        help="Run the object pose model every reconstructed frame (default: 1).",
     )
     scene_parser.add_argument("--json", action="store_true")
 
