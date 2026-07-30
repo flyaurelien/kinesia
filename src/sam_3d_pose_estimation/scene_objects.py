@@ -6,9 +6,9 @@ initially aligned to the human reconstruction through geometric evidence shared
 by both: the source mask's floor-contact ray and the floor reconstructed from
 the subject's feet. That provides one global similarity scale and a floor
 translation without changing the model's quaternion-derived orientation or the
-mesh's internal proportions. A final generic interaction pass refines that
-global scale around the floor contact when needed, preventing body penetration
-while retaining near-surface contact and the visible object-mask evidence.
+mesh's internal proportions. A final generic interaction pass jointly refines
+that global scale and floor-parallel position when needed, limiting body
+penetration while retaining near-surface contact and visible mask evidence.
 """
 
 from __future__ import annotations
@@ -33,11 +33,11 @@ BODY_OCCUPANCY_PITCH_M = 0.02
 MAX_BODY_OCCUPANCY_CELLS = 1_500_000
 MAX_INTERACTION_SURFACE_SAMPLES = 16_000
 INTERACTION_TRIGGER_FRACTION = 0.01
-INTERACTION_ACCEPTED_FRACTION = 0.003
+INTERACTION_ACCEPTED_FRACTION = 0.03
 INTERACTION_DIRECTION_SAMPLES = 32
 INTERACTION_RADIAL_SAMPLES = 28
-INTERACTION_SCALE_SAMPLES = 14
-INTERACTION_MIN_SCALE = 0.35
+INTERACTION_SCALE_SAMPLES = 10
+INTERACTION_MIN_SCALE = 0.55
 INTERACTION_CONTACT_QUANTILE = 0.05
 INTERACTION_CONTACT_MAX_DISTANCE_M = 0.12
 MAX_INTERACTION_CONTACT_SAMPLES = 2_000
@@ -552,8 +552,9 @@ def resolve_floor_object_body_penetration(
     The object retains its model-predicted orientation, proportions, and floor
     height. When it intersects the source-frame body, the solver first resolves
     the model's global scene-scale ambiguity around the floor contact while
-    preserving near-surface contact. A floor-parallel translation is only used
-    when no contact-preserving scale exists. No prompt text or object category
+    preserving near-surface contact. Scale and floor-parallel translation are
+    solved together against the visible source mask, rather than shrinking the
+    object until all contact disappears. No prompt text or object category
     participates in this decision.
     """
     matrix = np.asarray(object_to_world, dtype=np.float64)
@@ -622,54 +623,50 @@ def resolve_floor_object_body_penetration(
             "scale_factor": 1.0,
         }
 
-    accepted_hits = max(1, int(np.ceil(sample_count * INTERACTION_ACCEPTED_FRACTION)))
-    scale_candidates: list[tuple[float, float, float, np.ndarray, int]] = []
-    for factor in np.linspace(INTERACTION_MIN_SCALE, 1.0, INTERACTION_SCALE_SAMPLES):
-        candidate_matrix = _scale_about_world_pivot(matrix, floor_pivot, float(factor))
-        candidate_surface = transform_points(candidate_matrix, surface_local)
-        hits = int(np.asarray(occupancy.is_filled(candidate_surface), dtype=bool).sum())
-        if hits > accepted_hits:
-            continue
-        contact = _surface_contact_distance(candidate_surface, subject_tree)
-        if contact > INTERACTION_CONTACT_MAX_DISTANCE_M:
-            continue
-        candidate_vertices = transform_points(
-            candidate_matrix, np.asarray(mesh.vertices, dtype=np.float64)
-        )
-        iou = _visible_mask_iou(candidate_vertices, mask, focal, occluded)
-        scale_candidates.append((contact, -iou, -float(factor), candidate_matrix, hits))
-    if scale_candidates:
-        contact_after, negative_iou, negative_factor, adjusted, hits_after = min(
-            scale_candidates,
-            key=lambda candidate: (candidate[0], candidate[1], candidate[2]),
-        )
-        return adjusted, {
-            **shared,
-            "status": "corrected",
-            "penetrating_surface_samples_after": hits_after,
-            "penetrating_surface_fraction_after": float(hits_after / sample_count),
-            "visible_mask_iou_after": -negative_iou,
-            "contact_distance_after_m": contact_after,
-            "translation_world_m": [0.0, 0.0, 0.0],
-            "scale_factor": -negative_factor,
-        }
-
     object_extent = float(np.ptp(surface_world[:, :2], axis=0).max(initial=0.0))
     subject_extent = float(np.ptp(subject_mesh_world.vertices[:, :2], axis=0).max(initial=0.0))
     max_distance = min(2.0, max(0.25, 1.25 * max(object_extent, subject_extent)))
-    candidates: list[tuple[float, float, np.ndarray, int, float, float]] = []
-    for translation in _floor_translation_candidates(max_distance, pitch):
-        candidate_surface = surface_world + translation
-        hits = int(np.asarray(occupancy.is_filled(candidate_surface), dtype=bool).sum())
-        if hits > accepted_hits:
-            continue
-        contact = _surface_contact_distance(candidate_surface, subject_tree)
-        iou = _visible_mask_iou(vertices_world + translation, mask, focal, occluded)
-        distance = float(np.linalg.norm(translation[:2]))
-        # Image evidence stays primary; the tiny distance term settles otherwise
-        # identical projections without inventing a semantic direction.
-        score = iou - 0.015 * distance / max(max_distance, 1e-9)
-        candidates.append((score, iou, translation, hits, distance, contact))
+    accepted_hits = max(1, int(np.ceil(sample_count * INTERACTION_ACCEPTED_FRACTION)))
+    mesh_vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    translations = _floor_translation_candidates(max_distance, pitch)
+    clear_candidates: list[
+        tuple[float, float, float, np.ndarray, int, float, float]
+    ] = []
+    contact_candidates: list[
+        tuple[float, float, float, np.ndarray, int, float, float]
+    ] = []
+    scale_denominator = max(1.0 - INTERACTION_MIN_SCALE, 1e-9)
+    for factor in np.linspace(INTERACTION_MIN_SCALE, 1.0, INTERACTION_SCALE_SAMPLES):
+        scaled_matrix = _scale_about_world_pivot(matrix, floor_pivot, float(factor))
+        scaled_surface = transform_points(scaled_matrix, surface_local)
+        scaled_vertices = transform_points(scaled_matrix, mesh_vertices)
+        for translation in translations:
+            candidate_surface = scaled_surface + translation
+            hits = int(np.asarray(occupancy.is_filled(candidate_surface), dtype=bool).sum())
+            if hits > accepted_hits:
+                continue
+            contact = _surface_contact_distance(candidate_surface, subject_tree)
+            iou = _visible_mask_iou(scaled_vertices + translation, mask, focal, occluded)
+            distance = float(np.linalg.norm(translation[:2]))
+            scale_change = (1.0 - float(factor)) / scale_denominator
+            score = (
+                iou
+                - 0.015 * distance / max(max_distance, 1e-9)
+                - 0.02 * scale_change
+            )
+            candidate = (
+                score,
+                iou,
+                float(factor),
+                translation,
+                hits,
+                distance,
+                contact,
+            )
+            clear_candidates.append(candidate)
+            if contact <= INTERACTION_CONTACT_MAX_DISTANCE_M:
+                contact_candidates.append(candidate)
+    candidates = contact_candidates or clear_candidates
     if not candidates:
         return matrix.copy(), {
             **shared,
@@ -683,11 +680,13 @@ def resolve_floor_object_body_penetration(
             "scale_factor": 1.0,
             "candidate_search_radius_m": max_distance,
         }
-    _, iou_after, translation, hits_after, _, contact_after = max(
+    _, iou_after, factor, translation, hits_after, _, contact_after = max(
         candidates,
-        key=lambda candidate: (candidate[0], candidate[1], -candidate[4]),
+        key=lambda candidate: (
+            candidate[0], candidate[1], candidate[2], -candidate[5]
+        ),
     )
-    adjusted = matrix.copy()
+    adjusted = _scale_about_world_pivot(matrix, floor_pivot, factor)
     adjusted[:3, 3] += translation
     return adjusted, {
         **shared,
@@ -696,8 +695,9 @@ def resolve_floor_object_body_penetration(
         "penetrating_surface_fraction_after": float(hits_after / sample_count),
         "visible_mask_iou_after": iou_after,
         "contact_distance_after_m": contact_after,
+        "contact_preserved": bool(contact_candidates),
         "translation_world_m": [float(value) for value in translation],
-        "scale_factor": 1.0,
+        "scale_factor": factor,
         "candidate_search_radius_m": max_distance,
     }
 

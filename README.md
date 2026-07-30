@@ -78,10 +78,10 @@ an experimental opt-in feature with a deliberately narrower contract:
 - A static object creates one mesh, retains SAM 3D Objects' quaternion-derived
   orientation, and aligns its globally ambiguous model scale to the subject's
   metric floor from the source mask. A category-independent interaction pass
-  can refine that scale uniformly around the floor contact to prevent the mesh
-  from crossing the reconstructed subject while preserving nearby contact.
-  This keeps the object and subject in one measured reference frame without any
-  class-specific pose rule.
+  can jointly refine that scale uniformly around the floor contact and adjust
+  its floor-parallel position, limiting mesh penetration while preserving
+  nearby contact. This keeps the object and subject in one measured reference
+  frame without any class-specific pose rule.
 - A moving object is reconstructed once, then SAM 3D Objects estimates its
   local-to-camera translation, rotation, and scale on every reconstructed
   frame. A missing pose is hidden rather than extrapolated across a gap. Its
