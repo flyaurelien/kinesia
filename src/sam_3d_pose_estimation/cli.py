@@ -7,6 +7,8 @@ import re
 import sys
 from pathlib import Path
 
+from huggingface_hub.constants import HF_HUB_CACHE
+
 # The SAM3 detector uses an op (aten::_assert_async) with no MPS kernel; without
 # the per-op CPU fallback it raises and detection silently finds NOBODY on Apple
 # Silicon. Default it ON — harmless on CUDA/CPU. (An explicit env value still wins.)
@@ -21,18 +23,59 @@ from .workspace import DEFAULT_ANALYSIS_PRESET, DEFAULT_CONFIG_PROFILE, project_
 
 DEFAULT_PROJECT_ROOT = project_root_from(Path(__file__))
 DEFAULT_MODELS_ROOT = Path(os.environ.get("SAM3D_MODELS_ROOT", DEFAULT_PROJECT_ROOT / "models"))
+
+
+def resolve_body_model_root(
+    preferred_root: Path,
+    cache_root: Path | None = None,
+) -> Path:
+    """Resolve a complete local SAM 3D Body model directory.
+
+    A Hugging Face download may already exist in the machine cache even when
+    the optional project-local copy is absent. Reusing that complete snapshot
+    keeps the pipeline offline and avoids duplicating several gigabytes.
+    """
+    required = ("model_config.yaml", "model.ckpt", "assets/mhr_model.pt")
+
+    def is_complete(root: Path) -> bool:
+        return all((root / relative_path).exists() for relative_path in required)
+
+    if is_complete(preferred_root):
+        return preferred_root
+
+    hub_root = cache_root or Path(HF_HUB_CACHE)
+    snapshots_root = (
+        hub_root / "models--facebook--sam-3d-body-dinov3" / "snapshots"
+    )
+    if snapshots_root.is_dir():
+        candidates = sorted(
+            (entry for entry in snapshots_root.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.stat().st_mtime,
+            reverse=True,
+        )
+        for candidate in candidates:
+            if is_complete(candidate):
+                return candidate
+    return preferred_root
+
+
+DEFAULT_BODY_MODEL_ROOT = (
+    DEFAULT_MODELS_ROOT / "sam-3d-body-dinov3"
+    if "SAM3D_MODELS_ROOT" in os.environ
+    else resolve_body_model_root(DEFAULT_MODELS_ROOT / "sam-3d-body-dinov3")
+)
 DEFAULT_SAM3D_CODE_ROOT = Path(os.environ.get("SAM3D_CODE_ROOT", DEFAULT_PROJECT_ROOT / "vendor" / "sam-3d-body-main"))
 DEFAULT_SAM3_CODE_ROOT = Path(os.environ.get("SAM3_CODE_ROOT", DEFAULT_PROJECT_ROOT / "vendor" / "sam3-main"))
 DEFAULT_CHECKPOINT_PATH = Path(
     os.environ.get(
         "SAM3D_CHECKPOINT_PATH",
-        DEFAULT_MODELS_ROOT / "sam-3d-body-dinov3" / "model.ckpt",
+        DEFAULT_BODY_MODEL_ROOT / "model.ckpt",
     )
 )
 DEFAULT_MHR_PATH = Path(
     os.environ.get(
         "SAM3D_MHR_PATH",
-        DEFAULT_MODELS_ROOT / "sam-3d-body-dinov3" / "assets" / "mhr_model.pt",
+        DEFAULT_BODY_MODEL_ROOT / "assets" / "mhr_model.pt",
     )
 )
 SUBCOMMANDS = {"run", "analyze", "scene", "doctor"}
