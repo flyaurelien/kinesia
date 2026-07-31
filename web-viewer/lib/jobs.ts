@@ -714,49 +714,9 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
   }, 1000);
 
   try {
-    // Scene object shapes, before the person rather than after. Reconstructing
-    // a chair needs nothing from the subject — one frame and one outline — so
-    // there is no reason to make it wait behind the run. Where the object
-    // STANDS is a different matter: the floor is measured from the subject's
-    // feet, and that shared floor is what puts both in one space, so the
-    // placement happens further down, once the run has feet to offer.
     const sceneObjectPrompts = (options.sceneObjectPromptsRaw ?? "").trim();
     const dynamicObjectPrompts = (options.dynamicObjectPromptsRaw ?? "").trim();
     const dynamicFrameStride = parseInteger(options.dynamicFrameStrideRaw, 1, 1) ?? 1;
-    if (sceneObjectPrompts && !isCanceled(job)) {
-      job.stage = `preparing scene objects: ${sceneObjectPrompts}`;
-      try {
-        const shapeArgs = [
-          "run",
-          "sam3d",
-          "scene",
-          "--run-id",
-          job.runId,
-          "--prompts",
-          sceneObjectPrompts,
-          "--stage",
-          "shape",
-          "--video",
-          runVideoInputPath,
-        ];
-        if (options.subjectTrackFile) {
-          shapeArgs.push("--subject-track", options.subjectTrackFile);
-        }
-        const shapeCode = await runCommand(job, shapeArgs);
-        if (shapeCode !== 0) {
-          await appendRunLog(job, `scene object shapes exited with code ${shapeCode}`);
-          addWarning(job, "One or more static scene objects could not be reconstructed. See the job log.");
-        }
-      } catch (error) {
-        await appendRunLog(job, `scene object shapes failed: ${String(error)}`);
-        addWarning(job, "One or more static scene objects could not be reconstructed. See the job log.");
-      }
-      // Back to the frame count, which speaks for the run itself.
-      job.stage = null;
-    }
-    if (isCanceled(job)) {
-      return;
-    }
 
     const runArgs = [
       "run",
@@ -816,10 +776,45 @@ async function startJob(jobId: string, options: CreateOptions): Promise<void> {
       return;
     }
 
-    // Now that the run has measured the floor from the subject's feet, the
-    // shapes built at the start can be stood on it. Seconds of work, and put
-    // before the analysis so the objects show up in the viewer as early as
-    // they possibly can.
+    // Reconstruct the body first. It is the long per-frame path, it gives the
+    // viewer useful output immediately, and running it before the heavier
+    // object decoder avoids starting it after sustained GPU heat. Object shape
+    // reconstruction is independent, but placement still uses the floor and
+    // metric scale measured from the completed subject.
+    if (sceneObjectPrompts && !isCanceled(job)) {
+      job.stage = `preparing scene objects: ${sceneObjectPrompts}`;
+      try {
+        const shapeArgs = [
+          "run",
+          "sam3d",
+          "scene",
+          "--run-id",
+          job.runId,
+          "--prompts",
+          sceneObjectPrompts,
+          "--stage",
+          "shape",
+          "--video",
+          runVideoInputPath,
+        ];
+        if (options.subjectTrackFile) {
+          shapeArgs.push("--subject-track", options.subjectTrackFile);
+        }
+        const shapeCode = await runCommand(job, shapeArgs);
+        if (shapeCode !== 0) {
+          await appendRunLog(job, `scene object shapes exited with code ${shapeCode}`);
+          addWarning(job, "One or more static scene objects could not be reconstructed. See the job log.");
+        }
+      } catch (error) {
+        await appendRunLog(job, `scene object shapes failed: ${String(error)}`);
+        addWarning(job, "One or more static scene objects could not be reconstructed. See the job log.");
+      }
+      job.stage = null;
+    }
+    if (isCanceled(job)) {
+      return;
+    }
+
     if (sceneObjectPrompts && !isCanceled(job)) {
       job.stage = "placing scene objects";
       try {

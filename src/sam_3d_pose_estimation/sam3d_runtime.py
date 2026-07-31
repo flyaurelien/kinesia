@@ -307,9 +307,10 @@ def try_build_human_detector(
 ) -> Any | None:
     """Build the SAM3 human detector, or None when detection is disabled.
 
-    Requires the checkpoint to already be in the local HF cache (unless
-    SAM3_AUTO_DETECTOR_ALLOW_DOWNLOAD=1) so runs stay offline. Detection is
-    strictly SAM3 with no fallback; any load failure is re-raised.
+    Prefers the stable project-local checkpoint, then the local Hugging Face
+    cache for backwards compatibility. Network access remains opt-in through
+    SAM3_AUTO_DETECTOR_ALLOW_DOWNLOAD=1. Detection is strictly SAM3 with no
+    fallback; any load failure is re-raised.
     """
     detector_name = detector_name.strip().lower()
     if detector_name in {"", "none", "off"}:
@@ -319,7 +320,16 @@ def try_build_human_detector(
             add_optional_repo_to_path(sam3_code_root)
             _ensure_pkg_resources_shim()
             allow_download = os.environ.get("SAM3_AUTO_DETECTOR_ALLOW_DOWNLOAD", "0") == "1"
-            if not allow_download:
+            project_checkpoint = Path(
+                os.environ.get(
+                    "SAM3_CHECKPOINT_PATH",
+                    project_root_from(Path(__file__)) / "models" / "sam3" / "sam3.pt",
+                )
+            ).expanduser()
+            ckpt_path: str | Path | None = (
+                project_checkpoint if project_checkpoint.is_file() else None
+            )
+            if ckpt_path is None and not allow_download:
                 try:
                     from huggingface_hub import try_to_load_from_cache
 
@@ -328,9 +338,10 @@ def try_build_human_detector(
                     ckpt_path = None
                 if ckpt_path is None:
                     raise RuntimeError(
-                        "SAM3 detector checkpoint not found in the local HF cache "
-                        "(facebook/sam3 / sam3.pt). Pre-download it once; runs are then "
-                        "fully offline. Subject detection is strictly SAM3 — no fallback."
+                        "SAM3 detector checkpoint not found under models/sam3 or in "
+                        "the local HF cache (facebook/sam3 / sam3.pt). Run "
+                        "scripts/install_models.py once. Subject detection is strictly "
+                        "SAM3 — no fallback."
                     )
             # Make CUDA-hardcoded SAM3 run on the local device (MPS/CPU) when
             # this host has no CUDA.
@@ -348,7 +359,12 @@ def try_build_human_detector(
         # Auto device: CUDA on a GPU box, MPS on Apple Silicon, else CPU. The
         # compat shim above redirects SAM3's cuda-hardcoded paths onto it when
         # CUDA is absent.
-        return HumanDetector(name=detector_name, device=str(device))
+        detector_options = (
+            {"checkpoint_path": str(ckpt_path)}
+            if detector_name == "sam3" and ckpt_path is not None
+            else {}
+        )
+        return HumanDetector(name=detector_name, device=str(device), **detector_options)
     except Exception as exc:
         raise RuntimeError(
             f"SAM3 auto detector failed to load ({exc.__class__.__name__}: {exc}). "

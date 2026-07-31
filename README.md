@@ -268,24 +268,18 @@ uv sync --frozen --no-editable --reinstall-package sam-3d-pose-estimation
 ### Download the models
 
 Request access on each gated Hugging Face page (one click), log in with a
-token, then download (~6 GB total):
+token, then materialize every runtime weight under the project's gitignored
+`models/` directory:
 
 ```bash
 uv run --no-sync hf auth login    # token from https://huggingface.co/settings/tokens
-
-# SAM 3D Body — 3D mesh recovery (~2.7 GB)
-uv run --no-sync hf download facebook/sam-3d-body-dinov3 --local-dir models/sam-3d-body-dinov3
-# SAM 3 — open-vocabulary subject detector (~3.2 GB, into the HF cache)
-uv run --no-sync hf download facebook/sam3 sam3.pt config.json
+uv run --no-sync python scripts/install_models.py
 ```
 
-If SAM 3D Body is already present as a complete snapshot in the standard
-Hugging Face cache, Kinesia reuses it automatically when the project-local
-`models/sam-3d-body-dinov3` directory is absent.
-
-On Apple Silicon, the in-viewer detect preview auto-downloads the MLX SAM 3
-weights (`mlx-community/sam3-image`) on first use. After the one-time download
-the app runs offline. Verify the setup with:
+This installs SAM 3D Body, PyTorch SAM 3, and MLX SAM 3 at stable local paths;
+later runs are fully offline and do not resolve the global Hugging Face cache.
+The optional SAM 3D Objects weights already live in its separate vendored
+runtime as described above. Verify the setup with:
 
 ```bash
 uv run --no-sync sam3d doctor --json

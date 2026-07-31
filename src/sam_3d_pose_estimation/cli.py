@@ -23,6 +23,10 @@ from .workspace import DEFAULT_ANALYSIS_PRESET, DEFAULT_CONFIG_PROFILE, project_
 
 DEFAULT_PROJECT_ROOT = project_root_from(Path(__file__))
 DEFAULT_MODELS_ROOT = Path(os.environ.get("SAM3D_MODELS_ROOT", DEFAULT_PROJECT_ROOT / "models"))
+# DINOv3 is loaded through Torch Hub by the upstream body model. Keep its small
+# source checkout beside the other local models instead of consulting the
+# user's global cache on every new process.
+os.environ.setdefault("TORCH_HOME", str(DEFAULT_MODELS_ROOT / "torch"))
 
 
 def resolve_body_model_root(

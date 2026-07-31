@@ -843,7 +843,15 @@ def _build_processor(confidence: float):
     from sam3 import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor
 
-    model = build_sam3_image_model()
+    checkpoint = Path(
+        os.environ.get(
+            "KINESIA_MLX_SAM3_CHECKPOINT",
+            Path(__file__).resolve().parents[2] / "models" / "sam3-mlx" / "model.safetensors",
+        )
+    ).expanduser()
+    model = build_sam3_image_model(
+        checkpoint_path=str(checkpoint) if checkpoint.is_file() else None,
+    )
     return Sam3Processor(model, confidence_threshold=confidence)
 
 
