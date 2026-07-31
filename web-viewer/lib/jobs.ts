@@ -623,6 +623,9 @@ function runCommand(job: GenerationJob, args: string[]): Promise<number> {
     env: {
       ...process.env,
       PYTHONPATH: path.join(projectRoot(), "src"),
+      // Python otherwise block-buffers stdout when it is piped into this job
+      // runner, hiding multi-minute model progress until each command exits.
+      PYTHONUNBUFFERED: "1",
       SAM3D_MHR_MODE: process.env.SAM3D_MHR_MODE || "native",
       // The SAM3 detector uses an op (aten::_assert_async) with no MPS kernel;
       // without the per-op CPU fallback it raises and detection silently finds

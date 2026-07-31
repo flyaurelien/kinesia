@@ -279,6 +279,10 @@ uv run --no-sync hf download facebook/sam-3d-body-dinov3 --local-dir models/sam-
 uv run --no-sync hf download facebook/sam3 sam3.pt config.json
 ```
 
+If SAM 3D Body is already present as a complete snapshot in the standard
+Hugging Face cache, Kinesia reuses it automatically when the project-local
+`models/sam-3d-body-dinov3` directory is absent.
+
 On Apple Silicon, the in-viewer detect preview auto-downloads the MLX SAM 3
 weights (`mlx-community/sam3-image`) on first use. After the one-time download
 the app runs offline. Verify the setup with:

@@ -10,8 +10,11 @@ missing extra must never cost a finished human reconstruction.
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -20,6 +23,7 @@ from .workspace import project_root_from
 # Roughly four minutes are normal for one object; the ceiling is there to stop a
 # wedged subprocess holding a job open forever, not to bound normal work.
 RECONSTRUCTION_TIMEOUT_S = 1800
+RUNTIME_HEARTBEAT_S = 15
 
 # The raw output can contain hundreds of thousands of faces per object, which
 # the viewer has to fetch over HTTP for every object in the scene.
@@ -123,25 +127,14 @@ def reconstruct_mesh(
     # minutes against the four the shaders take) and does not crash, so it is
     # what an unattended step uses. Override to compare.
     log(f"reconstructing shape from {image_path.name} + {mask_path.name}")
-    try:
-        completed = subprocess.run(
-            command,
-            env=environment,
-            # The entry point resolves its configuration relative to the working
-            # directory, and its package is only importable from there.
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            timeout=RECONSTRUCTION_TIMEOUT_S,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError(
-            f"object reconstruction timed out after {RECONSTRUCTION_TIMEOUT_S}s"
-        ) from error
-
-    for line in (completed.stdout or "").splitlines()[-12:]:
-        log(f"  {line}")
+    completed = _run_runtime(
+        command,
+        environment=environment,
+        cwd=base,
+        timeout_s=RECONSTRUCTION_TIMEOUT_S,
+        activity=f"reconstructing {image_path.stem.removesuffix('_frame')}",
+        log=log,
+    )
 
     # The exit code cannot be trusted: a failed decode prints an error and still
     # returns zero. The mesh on disk is the only proof.
@@ -189,17 +182,14 @@ def reconstruct_pose(
     ]
     environment = _runtime_environment(base)
     log(f"reconstructing pose from {image_path.name} + {mask_path.name}")
-    try:
-        completed = subprocess.run(
-            command, env=environment, cwd=str(base), capture_output=True,
-            text=True, timeout=RECONSTRUCTION_TIMEOUT_S, check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError(
-            f"object pose reconstruction timed out after {RECONSTRUCTION_TIMEOUT_S}s"
-        ) from error
-    for line in (completed.stdout or "").splitlines()[-12:]:
-        log(f"  {line}")
+    completed = _run_runtime(
+        command,
+        environment=environment,
+        cwd=base,
+        timeout_s=RECONSTRUCTION_TIMEOUT_S,
+        activity=f"reconstructing {image_path.stem.removesuffix('_frame')} pose",
+        log=log,
+    )
     if not output_pose.exists():
         raise RuntimeError(f"no pose produced ({_failure_detail(completed)})")
     return output_pose
@@ -208,6 +198,9 @@ def reconstruct_pose(
 def _runtime_environment(base: Path) -> dict[str, str]:
     """Build the external runtime environment shared by mesh and pose calls."""
     environment = dict(os.environ)
+    # The runtime is piped into the web job logger. Without unbuffered Python,
+    # its progress remains invisible until a several-minute reconstruction ends.
+    environment["PYTHONUNBUFFERED"] = "1"
     environment.setdefault("SPARSE_BACKEND", "mps")
     environment.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
     libraries = _dynamic_library_path(base)
@@ -219,6 +212,91 @@ def _runtime_environment(base: Path) -> dict[str, str]:
     return environment
 
 
+def _run_runtime(
+    command: list[str],
+    *,
+    environment: dict[str, str],
+    cwd: Path,
+    timeout_s: float,
+    activity: str,
+    log: Callable[[str], None],
+) -> subprocess.CompletedProcess[str]:
+    """Run an object-model command while forwarding output and liveness.
+
+    The reader thread prevents a quiet child or a full output pipe from hiding
+    progress, while the main thread retains an enforceable wall-clock timeout.
+    """
+    process = subprocess.Popen(
+        command,
+        env=environment,
+        # The entry point resolves configuration relative to this directory.
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if process.stdout is None:  # pragma: no cover - guaranteed by stdout=PIPE
+        raise RuntimeError("object runtime output pipe was not created")
+
+    output_queue: queue.Queue[str | None] = queue.Queue()
+
+    def read_output() -> None:
+        try:
+            for raw_line in process.stdout:
+                output_queue.put(raw_line)
+        finally:
+            output_queue.put(None)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    started_at = time.monotonic()
+    next_heartbeat_at = started_at + RUNTIME_HEARTBEAT_S
+    output_lines: list[str] = []
+
+    while True:
+        elapsed_s = time.monotonic() - started_at
+        if elapsed_s >= timeout_s:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            reader.join(timeout=1)
+            process.stdout.close()
+            raise RuntimeError(
+                f"object reconstruction timed out after {timeout_s:g}s"
+            )
+
+        try:
+            raw_line = output_queue.get(timeout=min(0.5, timeout_s - elapsed_s))
+        except queue.Empty:
+            raw_line = ""
+
+        if raw_line is None:
+            break
+        line = raw_line.rstrip()
+        if line:
+            output_lines.append(line)
+            log(f"  {line}")
+
+        now = time.monotonic()
+        if now >= next_heartbeat_at:
+            log(f"[scene] {activity} ({int(now - started_at)}s elapsed)")
+            next_heartbeat_at = now + RUNTIME_HEARTBEAT_S
+
+    return_code = process.wait()
+    reader.join(timeout=1)
+    process.stdout.close()
+    return subprocess.CompletedProcess(
+        command,
+        return_code,
+        stdout="\n".join(output_lines),
+        stderr="",
+    )
+
+
 def _failure_detail(completed: subprocess.CompletedProcess) -> str:
     """The most useful line about why a reconstruction produced nothing.
 
@@ -227,9 +305,12 @@ def _failure_detail(completed: subprocess.CompletedProcess) -> str:
     reported instead of it.
     """
     noise = ("warnings.warn", "UserWarning", "FutureWarning", "DeprecationWarning")
+    combined_output = "\n".join(
+        part for part in (completed.stderr or "", completed.stdout or "") if part
+    )
     lines = [
         line.strip()
-        for line in (completed.stderr or "").splitlines()
+        for line in combined_output.splitlines()
         if line.strip() and not any(marker in line for marker in noise)
     ]
     if completed.returncode < 0:
