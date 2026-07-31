@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sam_3d_pose_estimation.cli import resolve_body_model_root
+from sam_3d_pose_estimation.cli import absolute_model_path, resolve_body_model_root
 
 
 def create_complete_model(root: Path) -> None:
@@ -72,6 +72,22 @@ class BodyModelPathTests(unittest.TestCase):
             resolved = resolve_body_model_root(preferred, root / "hub")
 
         self.assertEqual(resolved, preferred)
+
+    def test_absolute_model_path_preserves_snapshot_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "snapshot"
+            blob = root / "blobs" / "checkpoint"
+            snapshot.mkdir()
+            blob.parent.mkdir()
+            blob.touch()
+            checkpoint = snapshot / "model.ckpt"
+            checkpoint.symlink_to(blob)
+
+            absolute = absolute_model_path(checkpoint)
+
+        self.assertEqual(absolute, checkpoint)
+        self.assertNotEqual(absolute, blob)
 
 
 if __name__ == "__main__":
