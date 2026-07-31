@@ -1701,10 +1701,15 @@ export function ViewerShell({ embeddedRunId }: { embeddedRunId?: string } = {}) 
       nextCursor = clamp(nextCursor, 0, frameCount - 1);
       const nextIndex = clamp(Math.round(nextCursor), 0, frameCount - 1);
       latestFrameCursorRef.current = nextCursor;
-      setFrameCursor((current) => (Math.abs(current - nextCursor) < 0.001 ? current : nextCursor));
       if (nextIndex !== lastRenderedIndex) {
         lastRenderedIndex = nextIndex;
         latestFrameIndexRef.current = nextIndex;
+        // The source contains one distinct pose per video frame. Updating the
+        // entire React/Three tree at display refresh rate rebuilt the same
+        // 18k-vertex geometry twice for every 30 fps source frame. Publish the
+        // cursor only when the source frame changes; timing remains driven by
+        // the fractional ref above and playback stays frame-accurate.
+        setFrameCursor(nextCursor);
         setFrameIndex((current) => (current === nextIndex ? current : nextIndex));
       }
 

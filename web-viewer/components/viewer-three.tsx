@@ -62,10 +62,14 @@ const CAM_TO_WORLD = new THREE.Matrix4().set(
   0, 0, 0, 1,
 );
 const DISPLAY_YAW_CLOCKWISE_90 = new THREE.Matrix4().makeRotationZ(-Math.PI / 2);
-const MAX_VERTEX_CACHE_ENTRIES = 1080; // per run — every subject of a multi-subject scene keeps its own budget
-const INITIAL_RUN_PRELOAD_FRAMES = 360;
-const PLAYBACK_PRELOAD_RADIUS = 360;
-const RUN_PRELOAD_CONCURRENCY = 8;
+// A frame is about 220 kB for the current body topology. The old 1080/360
+// budgets created hundreds of requests and hundreds of MB of short-lived typed
+// arrays per subject before the first frame appeared. Keep a short rolling
+// window instead; local HTTP is much faster than browser GC and geometry churn.
+const MAX_VERTEX_CACHE_ENTRIES = 240;
+const INITIAL_RUN_PRELOAD_FRAMES = 30;
+const PLAYBACK_PRELOAD_RADIUS = 90;
+const RUN_PRELOAD_CONCURRENCY = 4;
 // Pose fallback stays LOCAL: beyond this, showing a distant frame's pose is a
 // visible "pop", so the mesh holds its last shown geometry instead (sticky).
 const MESH_FALLBACK_RADIUS = 12;
@@ -345,11 +349,18 @@ function preloadMeshFiles(
 ): Promise<void> {
   const total = meshFiles.length + 1;
   let loaded = 0;
-  onProgress({ loaded, total, label: "Mesh topology" });
+  let lastReported = -1;
+  const report = (label: string, force = false): void => {
+    if (force || loaded === total || loaded - lastReported >= 4) {
+      lastReported = loaded;
+      onProgress({ loaded, total, label });
+    }
+  };
+  report("Mesh topology", true);
   return loadMeshFaces(runId)
     .then(async () => {
       loaded += 1;
-      onProgress({ loaded, total, label: "3D frames" });
+      report("3D frames", true);
       let nextIndex = 0;
       async function worker(): Promise<void> {
         while (nextIndex < meshFiles.length) {
@@ -359,12 +370,13 @@ function preloadMeshFiles(
             await loadMeshVertices(runId, meshFile);
           }
           loaded += 1;
-          onProgress({ loaded, total, label: "3D frames" });
+          report("3D frames");
         }
       }
       await Promise.all(
         Array.from({ length: Math.min(RUN_PRELOAD_CONCURRENCY, meshFiles.length) }, () => worker()),
       );
+      report("3D frames", true);
     });
 }
 

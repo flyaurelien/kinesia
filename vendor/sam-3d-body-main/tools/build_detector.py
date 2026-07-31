@@ -22,10 +22,13 @@ class HumanDetector:
         elif name == "sam3":
             from sam3.model_builder import build_sam3_image_model
             from sam3.model.sam3_image_processor import Sam3Processor
-            
+
             # build_sam3_image_model only .cuda()s for device=="cuda"; move the
             # model onto the actual device (mps/cpu) so weights match the inputs.
-            self.detector = build_sam3_image_model(device=device).to(device)
+            self.detector = build_sam3_image_model(
+                device=device,
+                checkpoint_path=kwargs.get("checkpoint_path"),
+            ).to(device)
             self.processor = Sam3Processor(self.detector, device=device)
             self.detector_func = lambda detector, img, **kwargs: self.sam3_run(
                 img, **kwargs
