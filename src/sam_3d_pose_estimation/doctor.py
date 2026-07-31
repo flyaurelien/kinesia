@@ -34,6 +34,25 @@ def run_doctor(
     except Exception:
         sam3_cache_path = None
     local_sam3_path = project_root_resolved / "models" / "sam3" / "sam3.pt"
+    local_mlx_sam3_path = (
+        project_root_resolved / "models" / "sam3-mlx" / "model.safetensors"
+    )
+    local_dinov2_path = (
+        project_root_resolved
+        / "models"
+        / "torch"
+        / "hub"
+        / "checkpoints"
+        / "dinov2_vitl14_reg4_pretrain.pth"
+    )
+    local_objects_path = (
+        project_root_resolved
+        / "vendor"
+        / "sam3d-objects-mlx"
+        / "checkpoints"
+        / "hf"
+        / "pipeline.yaml"
+    )
     return {
         "project_root": str(project_root_resolved),
         "python": sys.version.split()[0],
@@ -56,6 +75,12 @@ def run_doctor(
             "sam3_checkpoint_cached": sam3_cache_path is not None,
             "sam3_local_path": str(local_sam3_path),
             "sam3_local_exists": local_sam3_path.exists(),
+            "sam3_mlx_local_path": str(local_mlx_sam3_path),
+            "sam3_mlx_local_exists": local_mlx_sam3_path.exists(),
+            "dinov2_local_path": str(local_dinov2_path),
+            "dinov2_local_exists": local_dinov2_path.exists(),
+            "sam3d_objects_local_path": str(local_objects_path),
+            "sam3d_objects_local_exists": local_objects_path.exists(),
         },
         "code_roots": {
             "sam3d_code_root": str(sam3d_code_root) if sam3d_code_root else None,

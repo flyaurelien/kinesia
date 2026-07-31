@@ -1580,6 +1580,7 @@ function MeshBody({
   feetTrusted,
   frameCursor,
   fps,
+  preserveSceneCoordinates = false,
 }: {
   runId: string;
   frame: RunFrame;
@@ -1602,9 +1603,13 @@ function MeshBody({
   feetTrusted?: boolean;
   frameCursor: number;
   fps: number;
+  preserveSceneCoordinates?: boolean;
 }) {
   const subjectVisible = frame.subjectPresent !== false;
-  const jointOffset = useMemo(() => bodyGroundOffset(frame, quaternion, anchor, pivot), [anchor, frame, pivot, quaternion]);
+  const jointOffset = useMemo(
+    () => preserveSceneCoordinates ? null : bodyGroundOffset(frame, quaternion, anchor, pivot),
+    [anchor, frame, pivot, preserveSceneCoordinates, quaternion],
+  );
   // When joints briefly drop out, HOLD the last known offset instead of
   // coalescing to 0 — 0 put the PELVIS on the floor and the body visibly sank
   // for the gap, then popped back. While the lower body is cut off by the
@@ -1625,10 +1630,13 @@ function MeshBody({
   // actually leave the floor. XY comes from ViewerScene's filtered root.
   const groundedPosition = useMemo(() => {
     const p = position.clone();
+    if (preserveSceneCoordinates) {
+      return p;
+    }
     p.z = -(lastOffsetRef.current ?? jointOffset ?? 0) + lift;
     return p;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jointOffset, lift, position, feetTrusted]);
+  }, [jointOffset, lift, position, feetTrusted, preserveSceneCoordinates]);
 
   // The skeleton must describe the SAME instant and the SAME smoothing as the
   // mesh it is drawn inside. When the current frame's vertices are missing the
@@ -1861,6 +1869,17 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
     [frameBase, frameNext, interpolation],
   );
   const anchor = useMemo(() => displayAnchor(props.runDetail), [props.runDetail]);
+  // A canonical Body/Object scene is already expressed in one metric world.
+  // Viewer-only body corrections (trajectory filtering, upright rotation and
+  // grounding) would move only the person and destroy that model alignment.
+  // Keep the raw body and object transforms together whenever such a scene is
+  // present; the common world-to-viewer transform still recentres both.
+  const preserveSceneCoordinates = useMemo(
+    () =>
+      (props.runDetail.sceneObjects ?? []).some((object) => object.objectToWorld !== null) ||
+      (props.runDetail.dynamicObjects ?? []).length > 0,
+    [props.runDetail.dynamicObjects, props.runDetail.sceneObjects],
+  );
   const rawRootPositions = useMemo(
     () => props.runDetail.frames.map((item) => framePosition(item, "raw", anchor)),
     [anchor, props.runDetail.frames],
@@ -1872,6 +1891,9 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
   // disappears), near-zero lag during fast motion (steps and jumps track
   // truthfully).
   const smoothPositions = useMemo(() => {
+    if (preserveSceneCoordinates) {
+      return rawRootPositions;
+    }
     const trajectory = filteredDisplayTrajectory(
       props.runDetail.frames,
       rawRootPositions,
@@ -1886,19 +1908,22 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
     props.runDetail.fps,
     props.runDetail.frames,
     props.runDetail.videoHeight,
+    preserveSceneCoordinates,
     rawRootPositions,
   ]);
   // Vertical placement: per-subject lift above the run's fixed ground plane —
   // zero in contact (feet snap to the grid), free during flight (jumps rise).
   const liftSeries = useMemo(
     () =>
-      computeLiftSeries(
-        props.runDetail.frames,
-        anchor,
-        Math.max(1, props.runDetail.fps || 30),
-        props.runDetail.videoHeight,
-      ),
-    [anchor, props.runDetail.frames, props.runDetail.fps, props.runDetail.videoHeight],
+      preserveSceneCoordinates
+        ? props.runDetail.frames.map(() => 0)
+        : computeLiftSeries(
+            props.runDetail.frames,
+            anchor,
+            Math.max(1, props.runDetail.fps || 30),
+            props.runDetail.videoHeight,
+          ),
+    [anchor, preserveSceneCoordinates, props.runDetail.frames, props.runDetail.fps, props.runDetail.videoHeight],
   );
   // Each sibling subject gets its own anchored+filtered trajectory and its own
   // raw-root pivot: the runs' depth noise is independent (separate per-frame
@@ -1915,15 +1940,21 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
       const sFrames = sibling.runDetail.frames;
       const sHeight = sibling.runDetail.videoHeight;
       const rawRoots = sFrames.map((item) => framePosition(item, "raw", anchor));
-      const positions = filteredDisplayTrajectory(sFrames, rawRoots, anchor, fps, sHeight);
+      const positions = preserveSceneCoordinates
+        ? rawRoots
+        : filteredDisplayTrajectory(sFrames, rawRoots, anchor, fps, sHeight);
       map.set(sibling.runDetail.id, {
-        lifts: computeLiftSeries(sFrames, anchor, fps, sHeight),
-        positions: props.lockInPlace ? pinnedInPlace(positions) : positions,
+        lifts: preserveSceneCoordinates
+          ? sFrames.map(() => 0)
+          : computeLiftSeries(sFrames, anchor, fps, sHeight),
+        positions: props.lockInPlace && !preserveSceneCoordinates
+          ? pinnedInPlace(positions)
+          : positions,
         rawRoots,
       });
     }
     return map;
-  }, [anchor, props.lockInPlace, props.runDetail.fps, props.siblings]);
+  }, [anchor, preserveSceneCoordinates, props.lockInPlace, props.runDetail.fps, props.siblings]);
   const displayPosition = smoothPositions[nextIndex]
     ? lerpVector(smoothPositions[baseIndex], smoothPositions[nextIndex], interpolation)
     : smoothPositions[baseIndex] ?? new THREE.Vector3();
@@ -1951,21 +1982,21 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
     : pivot;
   const uprightQuaternions = useMemo(
     () =>
-      props.uprightMode
+      props.uprightMode && !preserveSceneCoordinates
         ? stableUprightQuaternions(
             props.runDetail.frames,
             anchor,
             Math.max(1, props.runDetail.fps || 30),
           )
         : [],
-    [anchor, props.runDetail.fps, props.runDetail.frames, props.uprightMode],
+    [anchor, preserveSceneCoordinates, props.runDetail.fps, props.runDetail.frames, props.uprightMode],
   );
   // Per-run sole-pitch calibration: a constant counter-rotation about the hip
   // axis so planted feet sit FLAT instead of "on their heels" (systematic
   // monocular backward-lean bias that the trunk correction cannot fix).
   const soleFixAngle = useMemo(
     () =>
-      props.uprightMode
+      props.uprightMode && !preserveSceneCoordinates
         ? computeSolePitchFix(
             props.runDetail.frames,
             anchor,
@@ -1973,9 +2004,9 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
             props.runDetail.videoHeight,
           )
         : 0,
-    [anchor, props.runDetail.frames, props.runDetail.videoHeight, props.uprightMode, uprightQuaternions],
+    [anchor, preserveSceneCoordinates, props.runDetail.frames, props.runDetail.videoHeight, props.uprightMode, uprightQuaternions],
   );
-  const uprightBase = props.uprightMode
+  const uprightBase = props.uprightMode && !preserveSceneCoordinates
     ? (uprightQuaternions[baseIndex] ?? new THREE.Quaternion())
         .clone()
         .slerp(uprightQuaternions[nextIndex] ?? uprightQuaternions[baseIndex] ?? new THREE.Quaternion(), interpolation)
@@ -2038,6 +2069,7 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
         feetTrusted={feetVisible(frameBase, props.runDetail.videoHeight)}
         frameCursor={displayCursor}
         fps={Math.max(1, props.runDetail.fps || 30)}
+        preserveSceneCoordinates={preserveSceneCoordinates}
       />
       )}
       {(props.siblings ?? []).map((sibling) => {
@@ -2108,6 +2140,7 @@ function ViewerScene(props: ThreeSpaceViewerProps) {
               feetTrusted={feetVisible(sFrameBase, sibling.runDetail.videoHeight)}
               frameCursor={displayCursor}
               fps={Math.max(1, props.runDetail.fps || 30)}
+              preserveSceneCoordinates={preserveSceneCoordinates}
             />
           </group>
         );

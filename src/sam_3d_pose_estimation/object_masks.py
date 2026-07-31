@@ -1,21 +1,14 @@
-"""Segment an object named in plain text, and pick the frame worth segmenting.
+"""Category-agnostic scene segmentation with the local MLX SAM 3 model.
 
-The detection model the pipeline already loads is open-vocabulary: it locates
-"chair" as readily as "person". Only the layers above it are person-only, and
-they throw the masks away — the pipeline needs boxes, not outlines. An object
-needs the outline, so this talks to the processor directly.
-
-Which frame to segment matters more than it looks. The object's depth is read
-from the BOTTOM row of its mask, so a subject standing in front of the object's
-feet does not merely dent the outline: it moves the object. Frames are therefore
-ranked by how much of the object the subject covers, and any frame where the
-subject touches the object's ground contact is refused outright.
+Subject and object prompts go through the same processor and can share one
+image-backbone pass. Masks preserve the exact source-image coordinate system
+used by SAM 3D Body, SAM 3D Objects, and the shared MoGe scene point map.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -28,6 +21,53 @@ CONTACT_TOLERANCE_PX = 3
 # Two candidate frames closer together than this show the same instant, so
 # keeping both would waste the expensive re-segmentation passes on a duplicate.
 MIN_CANDIDATE_GAP_FRAMES = 30
+
+
+def build_sam3_processor(confidence: float = 0.5) -> Any:
+    """Build the project-local MLX SAM 3 processor used for every 2D mask."""
+    from .detect_stream import _build_processor
+
+    return _build_processor(confidence)
+
+
+def segment_prompt_instances(
+    image_bgr: np.ndarray,
+    prompts: Sequence[str],
+    processor: Any,
+    confidence: float = 0.5,
+) -> dict[str, list[tuple[np.ndarray, float]]]:
+    """Segment several open-vocabulary prompts after one MLX image encoding.
+
+    SAM 3's image backbone dominates mask latency. Reusing the same image state
+    also guarantees that subject and object masks refer to the exact same input
+    pixels. The function is category-agnostic: prompts are passed to SAM 3
+    unchanged and only confidence ordering is applied here.
+    """
+    import cv2
+    from PIL import Image
+
+    processor.confidence_threshold = float(confidence)
+    image = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+    state = processor.set_image(image)
+    results: dict[str, list[tuple[np.ndarray, float]]] = {}
+    for prompt in prompts:
+        cleaned = " ".join(str(prompt).split())
+        if not cleaned or cleaned in results:
+            continue
+        state = processor.set_text_prompt(cleaned, state)
+        scores = np.asarray(state.get("scores"), dtype=np.float32).reshape(-1)
+        masks = np.asarray(state.get("masks"))
+        if masks.ndim == 4 and masks.shape[1] == 1:
+            masks = masks[:, 0]
+        if masks.ndim != 3 or masks.shape[0] != scores.shape[0]:
+            results[cleaned] = []
+            continue
+        order = np.argsort(scores)[::-1]
+        results[cleaned] = [
+            (np.ascontiguousarray(masks[index]).astype(bool), float(scores[index]))
+            for index in order
+        ]
+    return results
 
 
 def segment_object(
@@ -67,27 +107,38 @@ def segment_object_instances(
     Returns:
         Boolean masks paired with detector confidence, sorted descending.
     """
-    import cv2
-    from PIL import Image
+    processor = getattr(detector, "processor", detector)
+    cleaned = " ".join(prompt.split())
+    return segment_prompt_instances(
+        image_bgr,
+        (cleaned,),
+        processor,
+        confidence,
+    ).get(cleaned, [])
 
-    processor = detector.processor
-    processor.confidence_threshold = float(confidence)
-    image = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-    state = processor.set_image(image)
-    state = processor.set_text_prompt(prompt=prompt.strip(), state=state)
 
-    scores = state["scores"]
-    if scores.numel() == 0:
-        return []
-    order = scores.argsort(descending=True).detach().cpu().tolist()
-    masks = state["masks"]
-    return [
-        (
-            np.ascontiguousarray(masks[int(index), 0].detach().cpu().numpy()).astype(bool),
-            float(scores[int(index)]),
+def select_mask_for_reference(
+    instances: Iterable[tuple[np.ndarray, float]],
+    reference_mask: np.ndarray,
+) -> tuple[np.ndarray, float] | None:
+    """Select the instance with the greatest overlap with a known silhouette."""
+    reference = np.asarray(reference_mask, dtype=bool)
+    best: tuple[np.ndarray, float] | None = None
+    best_overlap = -1.0
+    for mask, score in instances:
+        candidate = np.asarray(mask, dtype=bool)
+        if candidate.shape != reference.shape:
+            continue
+        union = int(np.logical_or(candidate, reference).sum())
+        overlap = (
+            float(np.logical_and(candidate, reference).sum() / union)
+            if union
+            else 0.0
         )
-        for index in order
-    ]
+        if overlap > best_overlap:
+            best = candidate, float(score)
+            best_overlap = overlap
+    return best
 
 
 def subject_silhouette(
