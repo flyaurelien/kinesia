@@ -14,7 +14,7 @@ import trimesh
 
 from sam_3d_pose_estimation.scene_objects import (
     FOOT_JOINTS,
-    align_object_pointmap_to_subject,
+    align_body_to_scene_pointmap,
     apply_scene_alignment_to_model_pose,
     cam_to_world,
     calibrate_model_pose_to_subject_frame,
@@ -122,39 +122,14 @@ class TestSceneObjectTransforms(unittest.TestCase):
             atol=1e-12,
         )
 
-    def test_model_pose_metric_alignment_preserves_orientation_and_shared_floor(self):
+    def test_model_pose_requires_the_shared_scene_alignment(self):
         pose = {
             "translation_l2c": [0.0, -0.5, 2.0],
             "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
             "scale_l2c": [1.0, 1.0, 1.0],
         }
-        vertices = np.array([
-            [-0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5],
-            [-0.5, 0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [-0.5, 0.5, 0.5],
-            [0.5, 0.5, 0.5],
-        ], dtype=np.float64)
-        direct = model_pose_to_world_matrix(pose)
-        matrix, calibration = calibrate_model_pose_to_subject_frame(
-            pose,
-            vertices,
-            {"depth_m": 4.0, "floor_z": -1.25},
-        )
-
-        self.assertGreater(calibration["model_to_subject_scale"], 0.0)
-        self.assertAlmostEqual(calibration["floor_residual_m"], 0.0, places=12)
-        np.testing.assert_allclose(
-            matrix[:3, :3] / calibration["model_to_subject_scale"],
-            direct[:3, :3],
-            atol=1e-12,
-        )
-        world_vertices = transform_points(matrix, vertices)
-        self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
-        self.assertGreater(float(np.linalg.det(matrix[:3, :3])), 0.0)
+        with self.assertRaisesRegex(ValueError, "shared Body/Object"):
+            calibrate_model_pose_to_subject_frame(pose, None)  # type: ignore[arg-type]
 
     def test_shared_scene_alignment_sets_scale_without_changing_proportions(self):
         pose = {
@@ -162,33 +137,25 @@ class TestSceneObjectTransforms(unittest.TestCase):
             "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
             "scale_l2c": [0.5, 0.5, 0.5],
         }
-        vertices = np.asarray(trimesh.creation.box().vertices)
         direct = model_pose_to_world_matrix(pose)
         alignment = {
-            "method": "shared_subject_pointmap_similarity",
+            "method": "official_body_to_moge_height_center",
             "scale": 2.4,
             "translation_camera": [0.1, -0.2, 0.7],
-            "sample_count": 400,
-            "inlier_count": 360,
-            "rms_m": 0.02,
         }
 
         matrix, calibration = calibrate_model_pose_to_subject_frame(
-            pose,
-            vertices,
-            {"depth_m": 4.0, "floor_z": -1.25},
-            alignment,
+            pose, alignment
         )
 
-        self.assertEqual(calibration["method"], "shared_subject_pointmap_similarity")
+        self.assertEqual(calibration["method"], "shared_body_object_scene")
         self.assertEqual(calibration["scene_alignment"], alignment)
         np.testing.assert_allclose(
             matrix[:3, :3] / alignment["scale"],
             direct[:3, :3],
             atol=1e-12,
         )
-        world_vertices = transform_points(matrix, vertices)
-        self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
+        self.assertEqual(calibration["floor_offset_m"], 0.0)
 
     def test_model_pose_rejects_an_invalid_rotation(self):
         with self.assertRaisesRegex(ValueError, "rotation quaternion"):
@@ -395,123 +362,112 @@ class TestSceneObjectTransforms(unittest.TestCase):
             atol=1e-12,
         )
 
-    def test_model_pose_artifact_is_recalibrated_without_reconstructing_its_mesh(self):
-        pose = {
-            "translation_l2c": [0.0, -0.5, 2.0],
-            "rotation_quaternion_wxyz_l2c": [1.0, 0.0, 0.0, 0.0],
-            "scale_l2c": [1.0, 1.0, 1.0],
-            "scene_pointmap": "fixture_pointmap.npz",
-        }
-        alignment = {
-            "method": "shared_subject_pointmap_similarity",
-            "scale": 2.0,
-            "translation_camera": [0.0, 0.0, 0.5],
-            "sample_count": 400,
-            "inlier_count": 350,
+    def test_every_static_object_receives_the_exact_same_scene_alignment(self):
+        alignment = {"scale": 2.0, "translation_camera": [0.0, 0.0, 0.5]}
+        evidence = {
+            "method": "official_body_to_moge_height_center",
+            "source_frame_shared": True,
+            "scene_to_body": alignment,
+            "normalized_rms": 0.01,
             "rms_m": 0.02,
         }
-        placement = {
-            "depth_m": 4.0,
-            "floor_z": -1.25,
-            "floor_reference": "world_anchor",
-            "calibrated": True,
-        }
+        received: list[dict] = []
+
+        def place(*args: object, **_kwargs: object) -> dict:
+            received.append(args[4])
+            return {"schema": "fixture", "name": args[3]}
+
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
             scene_dir = run_dir / "scene"
             scene_dir.mkdir()
-            (run_dir / "run_metadata.json").write_text(json.dumps({
-                "video_width": 320,
-                "video_height": 240,
-                "records": [],
-            }))
-            trimesh.creation.box().export(scene_dir / "fixture.glb")
-            np.savez_compressed(
-                scene_dir / "fixture_pointmap.npz",
-                pointmap=np.zeros((240, 320, 3), dtype=np.float32),
-            )
-            (scene_dir / "fixture_model_pose.json").write_text(json.dumps(pose))
-            (scene_dir / "fixture.json").write_text(json.dumps({
-                "name": "fixture",
-                "prompt": "fixture",
-                "source_frame": 0,
-                "detection_score": 0.9,
-                "model_pose": pose,
-            }))
-            mask = np.ones((240, 320), dtype=bool)
+            pending = scene_dir / ".pending"
+            pending.mkdir()
+            for name in ("first_shape", "second_shape"):
+                (pending / f"{name}.json").write_text(json.dumps({
+                    "name": name,
+                    "prompt": name,
+                    "source_frame": 17,
+                    "model_pose": f"{name}_model_pose.json",
+                }))
+                (scene_dir / f"{name}_model_pose.json").write_text("{}")
             with (
                 mock.patch(
-                    "sam_3d_pose_estimation.scene_objects._solve_static_placement",
-                    return_value=(placement, mask, 320, 240),
+                    "sam_3d_pose_estimation.scene_objects._build_shared_scene_alignment",
+                    return_value=(
+                        alignment,
+                        evidence,
+                        mock.sentinel.subject_mesh,
+                        200.0,
+                        np.zeros((80, 100), dtype=bool),
+                    ),
                 ),
                 mock.patch(
-                    "sam_3d_pose_estimation.scene_objects._subject_mesh_world_on_frame",
-                    return_value=(trimesh.creation.box(), 200.0),
-                ),
-                mock.patch(
-                    "sam_3d_pose_estimation.scene_objects.align_object_pointmap_to_subject",
-                    return_value=alignment,
+                    "sam_3d_pose_estimation.scene_objects.place_model_pose_object",
+                    side_effect=place,
                 ),
             ):
                 result = place_built_shapes(run_dir, log=lambda _: None)
-            record = json.loads((scene_dir / "fixture.json").read_text())
-            mesh_vertices = np.asarray(
-                trimesh.load(scene_dir / "fixture.glb", force="mesh").vertices
-            )
 
         self.assertEqual(result["failures"], [])
-        self.assertEqual(len(result["objects"]), 1)
-        self.assertEqual(
-            record["quality"]["source"],
-            "sam3d_objects_model_pose_subject_calibrated",
-        )
-        matrix = np.asarray(record["object_to_world"], dtype=np.float64)
-        direct = apply_scene_alignment_to_model_pose(pose, alignment)
-        np.testing.assert_allclose(
-            matrix[:3, :3],
-            direct[:3, :3],
-        )
-        world_vertices = transform_points(matrix, mesh_vertices)
-        self.assertAlmostEqual(float(world_vertices[:, 2].min()), -1.25, places=12)
+        self.assertEqual(len(result["objects"]), 2)
+        self.assertEqual(received, [alignment, alignment])
 
 
 class TestSharedSceneAlignment(unittest.TestCase):
-    def test_recovers_one_similarity_from_shared_subject_pixels(self):
+    def test_recovers_official_height_and_center_body_alignment(self):
+        grid_size = 30
         x, y = np.meshgrid(
-            np.linspace(-0.8, 0.8, 20),
-            np.linspace(-0.6, 0.6, 20),
+            np.linspace(-0.8, 0.8, grid_size),
+            np.linspace(-1.0, 1.0, grid_size),
         )
-        z = 4.8 + 0.2 * x + 0.1 * y
-        body_camera = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
+        body_camera = np.column_stack((x.ravel(), y.ravel(), np.full(x.size, 5.0)))
         body_world = np.asarray([cam_to_world(point) for point in body_camera])
+        faces = []
+        for row in range(grid_size - 1):
+            for column in range(grid_size - 1):
+                top_left = row * grid_size + column
+                faces.extend([
+                    [top_left, top_left + 1, top_left + grid_size],
+                    [top_left + 1, top_left + grid_size + 1, top_left + grid_size],
+                ])
         subject = trimesh.Trimesh(
             vertices=body_world,
-            faces=np.empty((0, 3), dtype=np.int64),
+            faces=np.asarray(faces, dtype=np.int64),
             process=False,
         )
-        expected_scale = 2.4
-        expected_translation = np.array([0.1, -0.2, 0.7])
+        body_to_scene_scale = 1.7
+        body_to_scene_translation = np.array([0.2, -0.3, 0.8])
         pointmap = np.full((240, 320, 3), np.nan, dtype=np.float64)
-        u = np.rint(200.0 * body_camera[:, 0] / body_camera[:, 2] + 160).astype(int)
-        v = np.rint(200.0 * body_camera[:, 1] / body_camera[:, 2] + 120).astype(int)
-        source_camera = (body_camera - expected_translation) / expected_scale
-        source_pytorch3d = source_camera * np.array([-1.0, -1.0, 1.0])
-        pointmap[v, u] = source_pytorch3d
+        subject_mask = np.zeros((240, 320), dtype=bool)
+        for pixel_y in range(80, 161):
+            for pixel_x in range(128, 193):
+                body_point = np.array([
+                    (pixel_x - 160.0) * 5.0 / 200.0,
+                    (pixel_y - 120.0) * 5.0 / 200.0,
+                    5.0,
+                ])
+                scene_point = body_to_scene_scale * body_point + body_to_scene_translation
+                pointmap[pixel_y, pixel_x] = scene_point * np.array([-1.0, -1.0, 1.0])
+                subject_mask[pixel_y, pixel_x] = True
 
-        alignment = align_object_pointmap_to_subject(
+        alignment = align_body_to_scene_pointmap(
             pointmap,
             subject,
             focal=200.0,
+            subject_mask=subject_mask,
             image_width=320,
             image_height=240,
         )
 
-        self.assertEqual(alignment["method"], "shared_subject_pointmap_similarity")
-        self.assertAlmostEqual(alignment["scale"], expected_scale, places=10)
+        self.assertEqual(alignment["method"], "official_body_to_moge_height_center")
+        self.assertAlmostEqual(alignment["body_to_scene"]["scale"], body_to_scene_scale, places=2)
         np.testing.assert_allclose(
-            alignment["translation_camera"], expected_translation, atol=1e-10
+            alignment["body_to_scene"]["translation_camera"],
+            body_to_scene_translation,
+            atol=0.08,
         )
-        self.assertLess(alignment["rms_m"], 1e-10)
+        self.assertLess(alignment["normalized_rms"], 0.04)
 
 
 class TestSubjectInteractionResolution(unittest.TestCase):

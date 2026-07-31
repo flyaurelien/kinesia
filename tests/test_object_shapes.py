@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from sam_3d_pose_estimation.object_shapes import (
+    _display_runtime_line,
     _run_runtime,
     _runtime_environment,
 )
@@ -48,6 +49,18 @@ class ObjectRuntimeTests(unittest.TestCase):
             environment = _runtime_environment(Path(temporary))
 
         self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
+
+    def test_model_tensor_debug_is_not_forwarded_to_the_ui(self) -> None:
+        self.assertIsNone(_display_runtime_line(
+            "[DEBUG SLAT] x.feats=tensor([[1, 2, 3]], device='mps:0')",
+            "reconstructing chair",
+        ))
+        self.assertEqual(
+            _display_runtime_line(
+                "2026-01-01 | INFO | stage complete", "reconstructing chair"
+            ),
+            "2026-01-01 | INFO | stage complete",
+        )
 
     def test_runtime_timeout_terminates_quiet_child(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

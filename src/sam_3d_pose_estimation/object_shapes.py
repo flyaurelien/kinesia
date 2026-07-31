@@ -82,6 +82,7 @@ def reconstruct_mesh(
     output_glb: Path,
     output_pose: Path,
     cache_dir: Path,
+    pointmap_path: Path | None = None,
     root: Path | None = None,
     log: Callable[[str], None] = print,
 ) -> Path:
@@ -96,8 +97,11 @@ def reconstruct_mesh(
 
     output_glb.parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    pointmap_output = pointmap_path_for_pose(output_pose)
-    for stale_output in (output_glb, output_pose, pointmap_output):
+    pointmap_output = pointmap_path or pointmap_path_for_pose(output_pose)
+    stale_outputs = [output_glb, output_pose]
+    if pointmap_path is None:
+        stale_outputs.append(pointmap_output)
+    for stale_output in stale_outputs:
         if not stale_output.exists():
             continue
         # A stale artifact from an earlier attempt must not be mistaken for
@@ -118,6 +122,8 @@ def reconstruct_mesh(
         "--cache-dir", str(cache_dir.resolve()),
         "--simplify", str(SIMPLIFY_RATIO),
     ]
+    if pointmap_output.is_file():
+        command.extend(["--pointmap-input", str(pointmap_output.resolve())])
     environment = _runtime_environment(base)
     # The object model prefers its own hand-written Metal shaders for sparse
     # convolution. They segfault partway through generation when another
@@ -153,6 +159,7 @@ def reconstruct_pose(
     mask_path: Path,
     output_pose: Path,
     cache_dir: Path,
+    pointmap_path: Path | None = None,
     root: Path | None = None,
     log: Callable[[str], None] = print,
 ) -> Path:
@@ -164,8 +171,8 @@ def reconstruct_pose(
 
     output_pose.parent.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    pointmap_output = pointmap_path_for_pose(output_pose)
-    for stale_output in (output_pose, pointmap_output):
+    pointmap_output = pointmap_path or pointmap_path_for_pose(output_pose)
+    for stale_output in (output_pose,):
         if stale_output.exists():
             stale_output.unlink()
     output_placeholder = cache_dir / f"{output_pose.stem}.stl"
@@ -180,6 +187,8 @@ def reconstruct_pose(
         "--cache-dir", str(cache_dir.resolve()),
         "--pose-only",
     ]
+    if pointmap_output.is_file():
+        command.extend(["--pointmap-input", str(pointmap_output.resolve())])
     environment = _runtime_environment(base)
     log(f"reconstructing pose from {image_path.name} + {mask_path.name}")
     completed = _run_runtime(
@@ -279,7 +288,9 @@ def _run_runtime(
         line = raw_line.rstrip()
         if line:
             output_lines.append(line)
-            log(f"  {line}")
+            displayed = _display_runtime_line(line, activity)
+            if displayed:
+                log(f"  {displayed}")
 
         now = time.monotonic()
         if now >= next_heartbeat_at:
@@ -295,6 +306,26 @@ def _run_runtime(
         stdout="\n".join(output_lines),
         stderr="",
     )
+
+
+def _display_runtime_line(line: str, activity: str) -> str | None:
+    """Keep model progress actionable without streaming tensor dumps to the UI."""
+    if not activity.startswith("reconstructing"):
+        return line
+    cleaned = line.split("[DEBUG", 1)[0].rstrip()
+    useful = (
+        " | INFO ",
+        " | WARNING ",
+        " | ERROR ",
+        "Diffusion steps:",
+        "Decoding",
+        "Simplif",
+        "Traceback",
+        "Error",
+        "Exception",
+        "segmentation fault",
+    )
+    return cleaned if cleaned and any(marker in cleaned for marker in useful) else None
 
 
 def _failure_detail(completed: subprocess.CompletedProcess) -> str:

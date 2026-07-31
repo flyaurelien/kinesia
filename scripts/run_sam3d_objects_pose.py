@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--pose-output", required=True, type=Path)
     parser.add_argument("--pointmap-output", type=Path)
+    parser.add_argument("--pointmap-input", type=Path)
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--simplify", type=float, default=0.9)
     parser.add_argument("--pose-only", action="store_true")
@@ -47,15 +48,19 @@ def main() -> None:
     }
     if args.pointmap_output is not None:
         pointmap = result.get("pointmap")
-        if pointmap is None:
+        pointmap_input = getattr(args, "pointmap_input", None)
+        if pointmap is None and pointmap_input is None:
             pointmap = compute_pointmap(args)
-        if hasattr(pointmap, "detach"):
-            pointmap = pointmap.detach().cpu().numpy()
-        pointmap = np.asarray(pointmap, dtype=np.float32)
-        if pointmap.ndim != 3 or pointmap.shape[2] != 3:
-            raise RuntimeError("object runtime produced an invalid scene point map")
-        args.pointmap_output.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(args.pointmap_output, pointmap=pointmap)
+        if pointmap is not None:
+            if hasattr(pointmap, "detach"):
+                pointmap = pointmap.detach().cpu().numpy()
+            pointmap = np.asarray(pointmap, dtype=np.float32)
+            if pointmap.ndim != 3 or pointmap.shape[2] != 3:
+                raise RuntimeError("object runtime produced an invalid scene point map")
+            args.pointmap_output.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(args.pointmap_output, pointmap=pointmap)
+        elif pointmap_input.resolve() != args.pointmap_output.resolve():
+            raise RuntimeError("shared scene point map was not returned by the object runtime")
         try:
             pointmap_reference = args.pointmap_output.resolve().relative_to(
                 args.pose_output.resolve().parent
@@ -71,12 +76,41 @@ def build_pipeline(args: argparse.Namespace) -> Any:
     """Create the Apple-Silicon object pipeline for one reconstruction command."""
     from sam3d_objects.pipeline.inference_pipeline_low_memory import InferencePipelineLowMemory
 
-    return InferencePipelineLowMemory(
+    pipeline = InferencePipelineLowMemory(
         config_path="checkpoints/hf/pipeline.yaml",
         device="cpu",
         dtype="float16",
         cache_dir=str(args.cache_dir.resolve()),
     )
+    pointmap_input = getattr(args, "pointmap_input", None)
+    if pointmap_input is not None:
+        install_shared_pointmap(pipeline, pointmap_input)
+    return pipeline
+
+
+def install_shared_pointmap(pipeline: Any, pointmap_path: Path) -> None:
+    """Make the object runtime reuse a point map computed on the scene frame."""
+    import torch
+    import torch.nn.functional as functional
+
+    with np.load(pointmap_path) as pointmap_file:
+        pointmap = np.asarray(pointmap_file["pointmap"], dtype=np.float32)
+    if pointmap.ndim != 3 or pointmap.shape[2] != 3:
+        raise ValueError("shared point map must have shape HxWx3")
+    pointmap_tensor = torch.from_numpy(pointmap).permute(2, 0, 1).contiguous()
+
+    def compute_shared(merged_image: Any) -> dict[str, Any]:
+        loaded = torch.from_numpy(pipeline.image_to_float(merged_image)).permute(2, 0, 1)[:3]
+        if loaded.shape[1:] != pointmap_tensor.shape[1:]:
+            loaded = functional.interpolate(
+                loaded[None],
+                size=pointmap_tensor.shape[1:],
+                mode="bilinear",
+                align_corners=False,
+            )[0]
+        return {"pointmap": pointmap_tensor, "pts_color": loaded.contiguous()}
+
+    pipeline.compute_pointmap = compute_shared
 
 
 def run_full_reconstruction(args: argparse.Namespace) -> dict[str, Any]:

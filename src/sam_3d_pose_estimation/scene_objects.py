@@ -1,12 +1,11 @@
 """Place reconstructed objects in the metric world of the reconstructed person.
 
-SAM 3D Objects predicts an object's shape, pose, and a full-scene point map.
-The point map and SAM 3D Body mesh both observe the subject in the same frame,
-so their shared subject pixels determine one robust similarity between model
-spaces. That scene-level transform fixes object scale and position while
-preserving the quaternion-derived orientation and every mesh proportion. For
-static scene objects, the shared floor provides the final vertical contact. The
-interaction pass then reports overlap without mutating the calibrated pose.
+SAM 3D Objects predicts each object's shape and pose against one full-scene
+point map. All static objects use the same source image and that exact same
+point map. SAM 3D Body is aligned once to the shared scene from the visible
+subject, then the inverse similarity is applied unchanged to every object.
+Nothing in this module invents a category size, orientation, floor offset, or
+per-object correction.
 """
 
 from __future__ import annotations
@@ -34,22 +33,14 @@ INTERACTION_TRIGGER_FRACTION = 0.01
 INTERACTION_CONTACT_QUANTILE = 0.05
 MAX_INTERACTION_CONTACT_SAMPLES = 2_000
 MIN_SCENE_ALIGNMENT_SAMPLES = 100
-SCENE_ALIGNMENT_ITERATIONS = 8
-SCENE_ALIGNMENT_MIN_RESIDUAL_M = 0.01
 
 SCHEMA = "kinesia.scene_object.v1"
 TRANSFORM_SCHEMA = "kinesia.scene_object_transform.v1"
 
-# How many frames to try the prompt on before knowing where the object is. The
-# object is static, so one good look is enough — but the first frame tried may
-# be one where the subject stands right over it, so a few spread across the clip
-# make the search robust without costing much model time.
-SEED_FRAMES = 3
-
-# How many of the best-ranked frames get segmented again for the mask actually
-# used. The ranking works from an approximate outline; these passes produce the
-# real one.
-FINALIST_FRAMES = 3
+# Static reconstruction needs one common scene image, not one image per object.
+# These candidates only select that one anchor image; object motion is handled
+# separately and is inferred on every reconstructed frame by default.
+SCENE_FRAME_CANDIDATES = 9
 
 # At most this many objects per run, whatever the prompt asks for: each one
 # costs minutes and gigabytes, and a comma-separated list is easy to overfill.
@@ -57,6 +48,16 @@ MAX_OBJECTS = 4
 
 # Shapes that are built but not yet standing anywhere.
 PENDING_DIR = ".pending"
+SCENE_FRAME_FILE = "scene_frame.png"
+SCENE_POINTMAP_FILE = "scene_pointmap.npz"
+SCENE_SUBJECT_MASK_FILE = "scene_subject_mask.png"
+SCENE_ALIGNMENT_FILE = "scene_alignment.json"
+
+# Validation only: these values never modify a pose. An alignment whose mean
+# surface error exceeds this fraction of the reconstructed person's height is
+# rejected instead of being displayed as a plausible scene.
+MAX_BODY_SCENE_RMS_FRACTION = 0.20
+MIN_OBJECT_REPROJECTION_IOU = 0.10
 
 # Prefix the job runner recognises on a log line to show what is happening.
 # The object steps have no frame count to drive a progress bar, so without
@@ -125,76 +126,26 @@ def model_pose_to_world_matrix(pose: dict[str, Any]) -> np.ndarray:
     return matrix
 
 
-def _model_pose_camera_vertices(pose: dict[str, Any], mesh_vertices: np.ndarray) -> np.ndarray:
-    """Transform exported GLB vertices into the object runtime's camera frame."""
-    vertices = np.asarray(mesh_vertices, dtype=np.float64)
-    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
-        raise ValueError("mesh_vertices must be a non-empty Nx3 array")
-    if not np.all(np.isfinite(vertices)):
-        raise ValueError("mesh_vertices must contain only finite values")
-    translation, rotation, scale = _model_pose_components(pose)
-    local = (GLB_TO_MODEL_LOCAL @ vertices.T).T
-    return (rotation.T @ (local * scale).T).T + translation
-
-
 def calibrate_model_pose_to_subject_frame(
     pose: dict[str, Any],
-    mesh_vertices: np.ndarray,
-    placement: dict[str, Any],
-    scene_alignment: dict[str, Any] | None = None,
+    scene_alignment: dict[str, Any],
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Align a static model pose with the metric subject frame.
+    """Map a model pose through the one shared scene-to-body transform.
 
-    When available, the similarity fitted between the object runtime's scene
-    point map and the body mesh supplies the scale and translation directly.
-    Older artifacts fall back to the mask's floor-contact ray. Both paths keep
-    one uniform model scale. Static scene objects are translated vertically to
-    the subject's measured floor; this contact constraint never changes scale.
+    No object is independently resized, moved to a mask-derived depth, or
+    snapped to the floor. The model's complete pose remains intact and every
+    object receives the same scene transform.
     """
-    target_depth = float(placement["depth_m"])
-    floor_z = float(placement["floor_z"])
-    if not np.isfinite(target_depth) or target_depth <= 1e-9:
-        raise ValueError("static placement needs a positive metric depth")
-    if not np.isfinite(floor_z):
-        raise ValueError("static placement needs a finite floor height")
-
-    matrix = model_pose_to_world_matrix(pose)
-    if scene_alignment is not None:
-        matrix = apply_scene_alignment_to_model_pose(pose, scene_alignment)
-        model_to_subject_scale = float(scene_alignment["scale"])
-        method = "shared_subject_pointmap_similarity"
-        base_depth = float(-matrix[0, 3])
-    else:
-        camera_vertices = _model_pose_camera_vertices(pose, mesh_vertices)
-        visible = camera_vertices[:, 2] > 1e-9
-        if not np.any(visible):
-            raise ValueError("model pose puts every mesh vertex behind the camera")
-        projected_vertical = -camera_vertices[visible, 1] / camera_vertices[visible, 2]
-        base_depth = float(
-            camera_vertices[visible][int(np.argmax(projected_vertical)), 2]
+    if not isinstance(scene_alignment, dict):
+        raise ValueError(
+            "object pose has no shared Body/Object scene alignment; reconstruct the scene"
         )
-        if not np.isfinite(base_depth) or base_depth <= 1e-9:
-            raise ValueError("model pose has no positive visible base depth")
-        model_to_subject_scale = target_depth / base_depth
-        matrix[:3, :3] *= model_to_subject_scale
-        matrix[:3, 3] *= model_to_subject_scale
-        method = "mask_floor_contact_fallback"
-    transformed = transform_points(
-        matrix, np.asarray(mesh_vertices, dtype=np.float64)
-    )
-    lowest_vertex_z = float(transformed[:, 2].min())
-    floor_offset = floor_z - lowest_vertex_z
-    matrix[2, 3] += floor_offset
-    final_lowest_vertex_z = float(
-        transform_points(matrix, np.asarray(mesh_vertices, dtype=np.float64))[:, 2].min()
-    )
+    matrix = apply_scene_alignment_to_model_pose(pose, scene_alignment)
     return matrix, {
-        "method": method,
-        "model_to_subject_scale": float(model_to_subject_scale),
-        "model_visible_base_depth": base_depth,
-        "subject_visible_base_depth_m": target_depth,
-        "floor_offset_m": float(floor_offset),
-        "floor_residual_m": float(final_lowest_vertex_z - floor_z),
+        "method": "shared_body_object_scene",
+        "model_to_subject_scale": float(scene_alignment["scale"]),
+        "floor_offset_m": 0.0,
+        "pose_preserved": True,
         "scene_alignment": scene_alignment,
     }
 
@@ -219,6 +170,48 @@ def apply_scene_alignment_to_model_pose(
     matrix[:3, :3] *= scale
     matrix[:3, 3] = scale * matrix[:3, 3] + CAMERA_TO_WORLD @ translation_camera
     return matrix
+
+
+def _world_mesh_silhouette(
+    object_to_world: np.ndarray,
+    mesh: trimesh.Trimesh,
+    focal: float,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Rasterize a transformed object in the source camera for pose QA."""
+    import cv2
+
+    world = transform_points(
+        object_to_world, np.asarray(mesh.vertices, dtype=np.float64)
+    )
+    camera = np.column_stack((world[:, 1], -world[:, 2], -world[:, 0]))
+    in_front = np.isfinite(camera).all(axis=1) & (camera[:, 2] > 1e-6)
+    u = np.full(len(camera), -1.0, dtype=np.float64)
+    v = np.full(len(camera), -1.0, dtype=np.float64)
+    u[in_front] = focal * camera[in_front, 0] / camera[in_front, 2] + width / 2.0
+    v[in_front] = focal * camera[in_front, 1] / camera[in_front, 2] + height / 2.0
+    projected = np.column_stack((u, v))
+    canvas = np.zeros((height, width), dtype=np.uint8)
+    for face in np.asarray(mesh.faces, dtype=np.int64):
+        if not np.all(in_front[face]):
+            continue
+        polygon = np.rint(projected[face]).astype(np.int32)
+        if (
+            polygon[:, 0].max() < 0
+            or polygon[:, 0].min() >= width
+            or polygon[:, 1].max() < 0
+            or polygon[:, 1].min() >= height
+        ):
+            continue
+        cv2.fillConvexPoly(canvas, polygon, 1)
+    return canvas.astype(bool)
+
+
+def _mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    """Return the intersection-over-union of two equally-sized masks."""
+    union = int(np.logical_or(left, right).sum())
+    return float(np.logical_and(left, right).sum() / union) if union else 0.0
 
 
 def upright_rotation(up_axis: int) -> np.ndarray:
@@ -432,107 +425,132 @@ def _subject_mesh_world_on_frame(
     return None, None
 
 
-def align_object_pointmap_to_subject(
+def align_body_to_scene_pointmap(
     pointmap: np.ndarray,
     subject_mesh_world: trimesh.Trimesh,
     focal: float,
+    subject_mask: np.ndarray,
     image_width: int,
     image_height: int,
 ) -> dict[str, Any]:
-    """Fit one robust scene similarity from shared subject pixels.
+    """Align SAM 3D Body to the shared MoGe scene using Meta's contract.
 
-    The object runtime's point map and the body mesh observe the same subject
-    in the same frame. Matching their visible 3D surface samples therefore
-    yields one scale and translation between the two camera spaces. The fit is
-    scene-level evidence: it does not inspect the requested object's category,
-    dimensions, or interaction with the subject.
+    Meta's Body/Object notebook uses the visible human height and centre to map
+    the body mesh into the MoGe point cloud. Kinesia keeps its body world as the
+    public coordinate system, so this function also returns the exact inverse
+    transform that maps every SAM 3D Objects pose into that body world. The
+    transform is fitted once per scene frame and contains no object dimensions
+    or category-dependent adjustment.
     """
+    import cv2
+
     points = np.asarray(pointmap, dtype=np.float64)
+    mask = np.asarray(subject_mask, dtype=bool)
     if points.ndim != 3 or points.shape[2] != 3:
         raise ValueError("pointmap must have shape HxWx3")
-    if image_width <= 0 or image_height <= 0:
-        raise ValueError("image dimensions must be positive")
+    if mask.shape != (image_height, image_width):
+        raise ValueError("subject mask must match the scene image")
     if not np.isfinite(focal) or focal <= 0:
-        raise ValueError("focal must be finite and positive")
+        raise ValueError("body focal length must be positive")
 
     world = np.asarray(subject_mesh_world.vertices, dtype=np.float64)
+    faces = np.asarray(subject_mesh_world.faces, dtype=np.int64)
     if world.ndim != 2 or world.shape[1] != 3 or len(world) == 0:
         raise ValueError("subject mesh must contain Nx3 vertices")
     camera = np.column_stack((world[:, 1], -world[:, 2], -world[:, 0]))
-    visible = np.isfinite(camera).all(axis=1) & (camera[:, 2] > 1e-6)
-    u = focal * camera[:, 0] / camera[:, 2] + image_width / 2.0
-    v = focal * camera[:, 1] / camera[:, 2] + image_height / 2.0
-    pointmap_height, pointmap_width = points.shape[:2]
-    pointmap_u = np.rint(
-        (u + 0.5) * pointmap_width / image_width - 0.5
-    ).astype(np.int64)
-    pointmap_v = np.rint(
-        (v + 0.5) * pointmap_height / image_height - 0.5
-    ).astype(np.int64)
-    visible &= (
-        (pointmap_u >= 0)
-        & (pointmap_u < pointmap_width)
-        & (pointmap_v >= 0)
-        & (pointmap_v < pointmap_height)
+    in_front = np.isfinite(camera).all(axis=1) & (camera[:, 2] > 1e-6)
+    u = np.full(len(camera), -1.0, dtype=np.float64)
+    v = np.full(len(camera), -1.0, dtype=np.float64)
+    u[in_front] = focal * camera[in_front, 0] / camera[in_front, 2] + image_width / 2.0
+    v[in_front] = focal * camera[in_front, 1] / camera[in_front, 2] + image_height / 2.0
+
+    projected = np.column_stack((u, v))
+    face_indices = np.full((image_height, image_width), -1, dtype=np.int32)
+    if faces.ndim == 2 and faces.shape[1] == 3:
+        # Painter-style depth ordering is an inexpensive CPU equivalent of the
+        # one-face-per-pixel rasterizer used by Meta's reference notebook.
+        face_depth = camera[faces, 2].mean(axis=1)
+        for face_index in np.argsort(face_depth)[::-1]:
+            face = faces[face_index]
+            if not np.all(in_front[face]):
+                continue
+            polygon = np.rint(projected[face]).astype(np.int32)
+            if (
+                polygon[:, 0].max() < 0
+                or polygon[:, 0].min() >= image_width
+                or polygon[:, 1].max() < 0
+                or polygon[:, 1].min() >= image_height
+            ):
+                continue
+            cv2.fillConvexPoly(face_indices, polygon, int(face_index))
+    visible_pixels = (face_indices >= 0) & mask
+    if int(visible_pixels.sum()) < MIN_SCENE_ALIGNMENT_SAMPLES:
+        raise ValueError("too few visible subject pixels for Body/Object alignment")
+
+    visible_faces = np.unique(face_indices[visible_pixels])
+    visible_vertices = np.unique(faces[visible_faces].reshape(-1))
+    body_visible = camera[visible_vertices]
+    if len(body_visible) < MIN_SCENE_ALIGNMENT_SAMPLES:
+        raise ValueError("too few visible body vertices for Body/Object alignment")
+
+    pointmap_mask = cv2.resize(
+        visible_pixels.astype(np.uint8),
+        (points.shape[1], points.shape[0]),
+        interpolation=cv2.INTER_NEAREST,
+    ).astype(bool)
+    scene_visible = points[pointmap_mask].copy()
+    scene_visible[:, :2] *= -1.0
+    scene_visible = scene_visible[np.isfinite(scene_visible).all(axis=1)]
+    if len(scene_visible) < MIN_SCENE_ALIGNMENT_SAMPLES:
+        raise ValueError("too few finite MoGe subject points for Body/Object alignment")
+
+    depth_range = float(np.ptp(scene_visible[:, 2]))
+    depth_quantile = 0.90 if depth_range > 6.0 else 0.93 if depth_range > 2.0 else 0.95
+    scene_visible = scene_visible[
+        scene_visible[:, 2] <= np.quantile(scene_visible[:, 2], depth_quantile)
+    ]
+    body_height = float(np.ptp(body_visible[:, 1]))
+    scene_height = float(np.ptp(scene_visible[:, 1]))
+    if body_height <= 1e-9 or scene_height <= 1e-9:
+        raise ValueError("degenerate visible height for Body/Object alignment")
+
+    body_to_scene_scale = scene_height / body_height
+    body_to_scene_translation = (
+        scene_visible.mean(axis=0) - body_to_scene_scale * body_visible.mean(axis=0)
     )
-    indices = np.flatnonzero(visible)
-    if len(indices) < MIN_SCENE_ALIGNMENT_SAMPLES:
-        raise ValueError("too few projected subject samples for scene alignment")
+    scene_to_body_scale = 1.0 / body_to_scene_scale
+    scene_to_body_translation = -body_to_scene_translation / body_to_scene_scale
 
-    flat_pixels = pointmap_v[indices] * pointmap_width + pointmap_u[indices]
-    order = np.lexsort((camera[indices, 2], flat_pixels))
-    ordered_pixels = flat_pixels[order]
-    nearest = np.r_[True, ordered_pixels[1:] != ordered_pixels[:-1]]
-    indices = indices[order[nearest]]
-    source = points[pointmap_v[indices], pointmap_u[indices]].copy()
-    # The object point map uses PyTorch3D image axes; the body camera uses
-    # OpenCV image axes. Depth points forward in both.
-    source[:, :2] *= -1.0
-    target = camera[indices]
-    finite = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
-    source = source[finite]
-    target = target[finite]
-    if len(source) < MIN_SCENE_ALIGNMENT_SAMPLES:
-        raise ValueError("too few finite subject samples for scene alignment")
-
-    inliers = np.ones(len(source), dtype=bool)
-    scale = 1.0
-    translation = np.zeros(3, dtype=np.float64)
-    residuals = np.full(len(source), np.inf, dtype=np.float64)
-    for _ in range(SCENE_ALIGNMENT_ITERATIONS):
-        source_inliers = source[inliers]
-        target_inliers = target[inliers]
-        source_centre = source_inliers.mean(axis=0)
-        target_centre = target_inliers.mean(axis=0)
-        denominator = float(np.square(source_inliers - source_centre).sum())
-        if denominator <= 1e-12:
-            raise ValueError("degenerate subject samples for scene alignment")
-        scale = float(
-            ((source_inliers - source_centre) * (target_inliers - target_centre)).sum()
-            / denominator
+    body_tree = cKDTree(body_visible)
+    scene_in_body = (
+        scene_to_body_scale * scene_visible + scene_to_body_translation
+    )
+    bounded_scene = _evenly_spaced_points(scene_in_body, MAX_INTERACTION_SURFACE_SAMPLES)
+    distances, _ = body_tree.query(bounded_scene, k=1)
+    rms_m = float(np.sqrt(np.mean(np.square(distances))))
+    normalized_rms = rms_m / body_height
+    if not np.isfinite(normalized_rms) or normalized_rms > MAX_BODY_SCENE_RMS_FRACTION:
+        raise ValueError(
+            "Body/Object scene alignment is unreliable: "
+            f"RMS {rms_m:.3f} m ({normalized_rms * 100:.1f}% of subject height)"
         )
-        if not np.isfinite(scale) or scale <= 0:
-            raise ValueError("scene alignment produced a non-positive scale")
-        translation = target_centre - scale * source_centre
-        residuals = np.linalg.norm(target - (scale * source + translation), axis=1)
-        median = float(np.median(residuals[inliers]))
-        mad = float(
-            np.median(np.abs(residuals[inliers] - median)) * 1.4826
-        )
-        threshold = median + 2.5 * max(mad, SCENE_ALIGNMENT_MIN_RESIDUAL_M)
-        refined = residuals <= threshold
-        if int(refined.sum()) < MIN_SCENE_ALIGNMENT_SAMPLES:
-            break
-        inliers = refined
 
-    rms = float(np.sqrt(np.mean(np.square(residuals[inliers]))))
     return {
-        "method": "shared_subject_pointmap_similarity",
-        "scale": scale,
-        "translation_camera": [float(value) for value in translation],
-        "sample_count": int(len(source)),
-        "inlier_count": int(inliers.sum()),
-        "rms_m": rms,
+        "method": "official_body_to_moge_height_center",
+        "source_frame_shared": True,
+        "body_to_scene": {
+            "scale": float(body_to_scene_scale),
+            "translation_camera": body_to_scene_translation.tolist(),
+        },
+        "scene_to_body": {
+            "scale": float(scene_to_body_scale),
+            "translation_camera": scene_to_body_translation.tolist(),
+        },
+        "sample_count": int(len(scene_visible)),
+        "body_vertex_count": int(len(body_visible)),
+        "rms_m": rms_m,
+        "normalized_rms": float(normalized_rms),
+        "subject_height_m": body_height,
     }
 
 
@@ -1257,42 +1275,28 @@ def place_object(
 
 
 def place_model_pose_object(
-    run_dir: Path,
     mesh_path: Path,
     mask_path: Path,
     model_pose: dict[str, Any],
     name: str,
+    scene_alignment: dict[str, Any],
+    alignment_evidence: dict[str, Any],
+    subject_mesh_world: trimesh.Trimesh,
+    focal: float,
     log: Callable[[str], None] = print,
     occluded: np.ndarray | None = None,
-    source_frame: int | None = None,
 ) -> dict[str, Any]:
-    """Place a static model-pose mesh without altering its predicted orientation."""
-    placement, mask, _, _ = _solve_static_placement(run_dir, mask_path, log)
+    """Apply one already-solved Body/Object scene transform to an object."""
+    import cv2
+
+    loaded_mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if loaded_mask is None:
+        raise OSError(f"could not read object mask: {mask_path}")
+    mask = loaded_mask > 127
     mesh = trimesh.load(str(mesh_path), force="mesh")
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
-    subject_mesh_world, source_focal = _subject_mesh_world_on_frame(run_dir, source_frame)
-    focal = source_focal if source_focal is not None else float(placement.get("focal_px", 0.0))
-    pointmap_name = model_pose.get("scene_pointmap")
-    if not pointmap_name:
-        raise ValueError("model pose has no shared scene point map; reconstruct it")
-    if subject_mesh_world is None:
-        raise ValueError("source frame has no subject mesh for shared scene alignment")
-    pointmap_path = Path(str(pointmap_name))
-    if not pointmap_path.is_absolute():
-        pointmap_path = mesh_path.parent / pointmap_path
-    if not pointmap_path.is_file():
-        raise ValueError(f"shared scene point map is missing: {pointmap_path}")
-    with np.load(pointmap_path) as pointmap_file:
-        pointmap = np.asarray(pointmap_file["pointmap"], dtype=np.float64)
-    scene_alignment = align_object_pointmap_to_subject(
-        pointmap,
-        subject_mesh_world,
-        focal,
-        int(mask.shape[1]),
-        int(mask.shape[0]),
-    )
     object_to_world, calibration = calibrate_model_pose_to_subject_frame(
-        model_pose, vertices, placement, scene_alignment
+        model_pose, scene_alignment
     )
     object_to_world, interaction = resolve_floor_object_body_penetration(
         object_to_world,
@@ -1305,32 +1309,42 @@ def place_model_pose_object(
     transformed = transform_points(object_to_world, vertices)
     scale = max(1.0, float(np.abs(transformed).max(initial=0.0)))
     tolerance = float(np.finfo(np.float64).eps * 128.0 * scale)
-    floor_z = float(placement["floor_z"])
     hidden = np.zeros_like(mask, dtype=bool) if occluded is None else np.asarray(occluded, dtype=bool)
     if hidden.shape != mask.shape:
         raise ValueError("occluded mask must have the same shape as mask")
+    projected = _world_mesh_silhouette(
+        object_to_world,
+        mesh,
+        focal,
+        int(mask.shape[1]),
+        int(mask.shape[0]),
+    )
+    visible = ~hidden
+    reprojection_iou = _mask_iou(projected & visible, mask & visible)
     quality = {
-        "source": "sam3d_objects_model_pose_subject_calibrated",
+        "source": "sam3d_objects_model_pose_shared_scene",
         "orientation_source": "sam3d_objects_quaternion",
         "metric_alignment": calibration["method"],
-        "floor_reference": str(placement["floor_reference"]),
         "mask_pixels": int(mask.sum()),
         "occluded_mask_pixels": int(np.logical_and(mask, hidden).sum()),
+        "reprojection_iou": reprojection_iou,
         "subject_interaction": interaction["status"],
     }
-    if placement.get("calibration_spread") is not None:
-        quality["floor_calibration_spread"] = float(placement["calibration_spread"])
     transform_checks = {
         "finite_matrix": bool(np.all(np.isfinite(object_to_world))),
         "positive_determinant": bool(np.linalg.det(object_to_world[:3, :3]) > 0.0),
         "shared_scene_alignment": bool(
-            scene_alignment["inlier_count"] >= MIN_SCENE_ALIGNMENT_SAMPLES
-            and np.isfinite(scene_alignment["rms_m"])
+            alignment_evidence.get("source_frame_shared") is True
+            and float(alignment_evidence.get("normalized_rms", np.inf))
+            <= MAX_BODY_SCENE_RMS_FRACTION
         ),
-        "mesh_is_on_shared_floor": bool(
-            abs(float(transformed[:, 2].min()) - floor_z) <= tolerance
-        ),
+        "model_reprojects_to_mask": bool(reprojection_iou >= MIN_OBJECT_REPROJECTION_IOU),
     }
+    issues = [check for check, passed in transform_checks.items() if not passed]
+    if issues:
+        raise ValueError(
+            "model pose failed shared-scene validation: " + ", ".join(issues)
+        )
     record = {
         "schema": SCHEMA,
         "name": name,
@@ -1344,30 +1358,28 @@ def place_model_pose_object(
         },
         "model_pose": model_pose,
         "model_pose_calibration": calibration,
+        "body_object_alignment": alignment_evidence,
         "subject_interaction": interaction,
         "quality": quality,
         "transform_validation": {
             "status": "valid" if all(transform_checks.values()) else "invalid",
             "checks": transform_checks,
-            "issues": [name for name, passed in transform_checks.items() if not passed],
+            "issues": issues,
             "numerical_tolerance_m": tolerance,
             "lowest_vertex_z_m": float(transformed[:, 2].min()),
         },
-        "solved": placement,
         "note": (
-            "Orientation is the SAM 3D Objects quaternion after documented "
-            "camera and GLB axis conversion. Scale and position come from one "
-            "similarity fitted between the object's scene point map and the "
-            "subject mesh; interaction measurements never modify that pose."
+            "Orientation, scale, and position are the SAM 3D Objects pose after "
+            "one shared Body-to-MoGe scene alignment. The same similarity is "
+            "used for every object and interaction measurements never alter it."
         ),
     }
-    log(f"model orientation retained; subject-frame scale {calibration['model_to_subject_scale']:.4f}")
+    log(f"model pose retained; shared scene scale {calibration['model_to_subject_scale']:.4f}")
     log(
-        "shared scene alignment from subject pixels: "
-        f"scale {scene_alignment['scale']:.4f}, "
-        f"RMS {scene_alignment['rms_m'] * 100:.1f} cm"
+        "one Body/Object alignment: "
+        f"RMS {alignment_evidence['rms_m'] * 100:.1f} cm; "
+        f"mask IoU {reprojection_iou:.3f}"
     )
-    log(f"static floor-contact offset {calibration['floor_offset_m']:.4f} m")
     if interaction["status"] == "overlap_detected":
         log(
             "subject interaction measured without changing pose: "
@@ -1470,16 +1482,14 @@ def build_object_shapes(
     project_root: Path | None = None,
     log: Callable[[str], None] = print,
 ) -> dict:
-    """Find each named object and reconstruct its shape. No placement yet.
+    """Reconstruct all named objects from one shared scene observation.
 
-    This is the slow half — minutes per object — and it needs nothing from the
-    subject's reconstruction, so it runs before it rather than after. Its pose
-    waits until the subject mesh is available because their shared image-space
-    surface is what maps the object model into the metric body space.
+    Every mask is produced by MLX SAM 3 after one image encoding. Every object
+    is then reconstructed against the same SAM 3D Objects/MoGe point map. The
+    finished body reconstruction is required because its silhouette identifies
+    the subject in that same image without confusing it with another person.
     """
     from . import object_masks, object_shapes
-    from .sam3d_runtime import select_device, try_build_human_detector
-    from .subject_preview import DEFAULT_SAM3_CODE_ROOT
 
     if not prompts:
         return {"shapes": [], "failures": [], "skipped": None}
@@ -1502,42 +1512,35 @@ def build_object_shapes(
     scene_dir = run_dir / "scene"
     scene_dir.mkdir(parents=True, exist_ok=True)
 
-    # Spread the first looks across the clip so a subject parked in front of the
-    # object early on cannot hide it from every seed.
-    seed_frames = [
-        subject_masks[round(i * (len(subject_masks) - 1) / max(SEED_FRAMES - 1, 1))][0]
-        for i in range(min(SEED_FRAMES, len(subject_masks)))
-    ]
+    # A point map from a previous scene must never become the geometry of a new
+    # image merely because its filename is stable.
+    for stale in (scene_dir / SCENE_POINTMAP_FILE, scene_dir / SCENE_ALIGNMENT_FILE):
+        if stale.exists():
+            stale.unlink()
 
-    detector = try_build_human_detector(
-        detector_name="sam3",
-        device=select_device(),
-        sam3_code_root=DEFAULT_SAM3_CODE_ROOT,
-    )
-    if detector is None:
-        log("skipping scene objects: the detection model is unavailable")
-        return {"shapes": [], "failures": [], "skipped": "detector unavailable"}
+    try:
+        processor = object_masks.build_sam3_processor(confidence=0.5)
+        found = _select_shared_scene_frame(
+            prompts,
+            _subject_prompts_for_run(run_dir),
+            scene_dir,
+            video_path,
+            subject_masks,
+            processor,
+            log,
+        )
+    except (RuntimeError, ValueError, OSError) as error:
+        log(f"could not build a coherent scene: {error}")
+        return {
+            "shapes": [],
+            "failures": [{"prompt": ", ".join(prompts), "error": str(error)}],
+            "skipped": None,
+        }
 
-    # Segment everything first, then let the detection model go before the
-    # shape model starts: each holds several gigabytes, and nothing needs them
-    # both at once.
-    found: list[dict] = []
-    failures: list[dict] = []
-    for position, prompt in enumerate(prompts, start=1):
-        # Marker the job runner watches for, so the interface can say which
-        # object is being worked on instead of showing a still bar for minutes.
-        log(f"{STAGE_MARKER} looking for {prompt} ({position}/{len(prompts)})")
-        try:
-            found.append(_locate_object(
-                prompt, scene_dir, video_path, subject_masks, seed_frames, detector, log,
-            ))
-        except (RuntimeError, ValueError, OSError) as error:
-            log(f"could not add '{prompt}': {error}")
-            failures.append({"prompt": prompt, "error": str(error)})
-
-    del detector
+    del processor
     _release_memory()
 
+    failures: list[dict] = []
     shaped: list[dict] = []
     for position, target in enumerate(found, start=1):
         log(f"{STAGE_MARKER} reconstructing {target['prompt']} "
@@ -1550,6 +1553,43 @@ def build_object_shapes(
 
     object_shapes.clear_cache(scene_dir / ".cache")
     return {"shapes": shaped, "failures": failures, "skipped": None}
+
+
+def _build_shared_scene_alignment(
+    run_dir: Path,
+    source_frame: int,
+) -> tuple[dict[str, Any], dict[str, Any], trimesh.Trimesh, float, np.ndarray]:
+    """Solve and persist the one transform shared by every static object."""
+    import cv2
+
+    scene_dir = run_dir / "scene"
+    pointmap_path = scene_dir / SCENE_POINTMAP_FILE
+    subject_mask_path = scene_dir / SCENE_SUBJECT_MASK_FILE
+    if not pointmap_path.is_file():
+        raise ValueError("the shared scene point map is missing; reconstruct the scene")
+    loaded_mask = cv2.imread(str(subject_mask_path), cv2.IMREAD_GRAYSCALE)
+    if loaded_mask is None:
+        raise ValueError("the shared subject mask is missing; reconstruct the scene")
+    subject_mask = loaded_mask > 127
+    subject_mesh_world, focal = _subject_mesh_world_on_frame(run_dir, source_frame)
+    if subject_mesh_world is None or focal is None:
+        raise ValueError("the shared scene frame has no reconstructed body mesh")
+    with np.load(pointmap_path) as pointmap_file:
+        pointmap = np.asarray(pointmap_file["pointmap"], dtype=np.float64)
+    evidence = align_body_to_scene_pointmap(
+        pointmap,
+        subject_mesh_world,
+        focal,
+        subject_mask,
+        int(subject_mask.shape[1]),
+        int(subject_mask.shape[0]),
+    )
+    evidence["source_frame"] = int(source_frame)
+    evidence["scene_frame"] = SCENE_FRAME_FILE
+    evidence["scene_pointmap"] = SCENE_POINTMAP_FILE
+    evidence["subject_mask"] = SCENE_SUBJECT_MASK_FILE
+    (scene_dir / SCENE_ALIGNMENT_FILE).write_text(json.dumps(evidence, indent=1))
+    return evidence["scene_to_body"], evidence, subject_mesh_world, focal, subject_mask
 
 
 def place_built_shapes(
@@ -1591,25 +1631,72 @@ def place_built_shapes(
     if not targets:
         return {"objects": [], "failures": [], "skipped": None}
 
+    source_frames = {
+        int(target["source_frame"])
+        for target, _pending in targets
+        if isinstance(target.get("source_frame"), int)
+    }
+    if len(source_frames) != 1 or any(
+        not isinstance(target.get("source_frame"), int) for target, _pending in targets
+    ):
+        error = (
+            "static objects do not share one source frame; reconstruct them together "
+            "instead of recalibrating separate model spaces"
+        )
+        return {
+            "objects": [],
+            "failures": [
+                {"prompt": str(target.get("prompt") or target.get("name") or "object"), "error": error}
+                for target, _pending in targets
+            ],
+            "skipped": None,
+        }
+    source_frame = next(iter(source_frames))
+    try:
+        (
+            scene_alignment,
+            alignment_evidence,
+            subject_mesh_world,
+            focal,
+            subject_mask,
+        ) = _build_shared_scene_alignment(run_dir, source_frame)
+    except (RuntimeError, ValueError, OSError, KeyError) as error:
+        return {
+            "objects": [],
+            "failures": [
+                {
+                    "prompt": str(target.get("prompt") or target.get("name") or "object"),
+                    "error": str(error),
+                }
+                for target, _pending in targets
+            ],
+            "skipped": None,
+        }
+
     placed: list[dict] = []
     failures: list[dict] = []
     for position, (target, pending_entry) in enumerate(targets, start=1):
         prompt = str(target.get("prompt") or target.get("name") or "object")
         log(f"{STAGE_MARKER} placing {prompt} ({position}/{len(targets)})")
         name = target["name"]
+        record_path = scene_dir / f"{name}.json"
+        if record_path.exists():
+            record_path.unlink()
         try:
             pose_file = scene_dir / str(target.get("model_pose") or "")
             if pose_file.is_file():
                 model_pose = json.loads(pose_file.read_text())
                 record = place_model_pose_object(
-                    run_dir,
                     scene_dir / f"{name}.glb",
                     scene_dir / f"{name}_mask.png",
                     model_pose,
                     name,
+                    scene_alignment,
+                    alignment_evidence,
+                    subject_mesh_world,
+                    focal,
                     log,
-                    occluded=_subject_on_frame(run_dir, target.get("source_frame")),
-                    source_frame=target.get("source_frame"),
+                    occluded=subject_mask,
                 )
             else:
                 raise ValueError(
@@ -1623,7 +1710,7 @@ def place_built_shapes(
         record["prompt"] = prompt
         record["source_frame"] = target.get("source_frame")
         record["detection_score"] = target.get("detection_score")
-        (scene_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
+        record_path.write_text(json.dumps(record, indent=1))
         if pending_entry is not None:
             pending_entry.unlink()
         placed.append(record)
@@ -1739,96 +1826,136 @@ def _release_memory() -> None:
         pass
 
 
-def _locate_object(
-    prompt: str,
+def _subject_prompts_for_run(run_dir: Path) -> tuple[str, ...]:
+    """Return the exact open-vocabulary prompts used to select the subject."""
+    try:
+        metadata = json.loads((run_dir / "run_metadata.json").read_text())
+    except (OSError, ValueError):
+        return ("person",)
+    prompts = tuple(
+        cleaned
+        for value in (metadata.get("sam3_text_prompts") or [])
+        if (cleaned := " ".join(str(value).split()))
+    )
+    return prompts or ("person",)
+
+
+def _select_shared_scene_frame(
+    prompts: tuple[str, ...],
+    subject_prompts: tuple[str, ...],
     scene_dir: Path,
     video_path: Path,
     subject_masks: list[tuple[int, Any]],
-    seed_frames: list[int],
-    detector: Any,
+    processor: Any,
     log: Callable[[str], None],
-) -> dict:
-    """Find the object and the clearest view of it, and write both to disk.
-
-    Raises when the object is nowhere to be seen, or is never clear of the
-    subject at its base.
-    """
+) -> list[dict[str, Any]]:
+    """Choose one frame containing the subject and every requested object."""
     from . import object_masks
 
-    name = object_name(prompt)
-
-    # Where is it? Any decent look will do: this outline only has to say which
-    # pixels to watch while the subject moves around.
-    seeds = _read_frames(video_path, seed_frames)
-    coarse = None
-    for index in seed_frames:
-        frame = seeds.get(index)
-        if frame is None:
-            continue
-        found = object_masks.segment_object(frame, prompt, detector)
-        if found is None:
-            continue
-        mask, score = found
-        if coarse is None or mask.sum() > coarse.sum():
-            coarse = mask
-            log(f"'{prompt}' found on frame {index} "
-                f"(score {score:.2f}, {int(mask.sum())} px)")
-    if coarse is None:
-        raise ValueError(f"'{prompt}' was not found anywhere in the clip")
-
-    # When is it clearest? Ranking is free — the subject's whereabouts are
-    # already in hand — so every frame is considered, not a sample.
-    candidates = object_masks.rank_frames(
-        coarse, subject_masks, limit=FINALIST_FRAMES
-    )
-    if not candidates:
-        raise ValueError(
-            f"the subject covers the base of '{prompt}' on every frame, "
-            "so its depth cannot be measured"
-        )
-    log(f"'{prompt}': best frames "
-        + ", ".join(f"{c['frame']} ({c['occlusion'] * 100:.1f}% hidden)"
-                    for c in candidates))
-
-    # Segment the finalists properly and keep the fullest outline.
-    finalist_frames = _read_frames(
-        video_path, [c["frame"] for c in candidates]
-    )
-    best: tuple[int, Any, float] | None = None
-    for candidate in candidates:
-        index = candidate["frame"]
-        frame = finalist_frames.get(index)
-        if frame is None:
-            continue
-        found = object_masks.segment_object(frame, prompt, detector)
-        if found is None:
-            continue
-        mask, score = found
-        if not object_masks.usable_for_depth(mask, mask.shape[0]):
-            continue
-        if best is None or mask.sum() > best[1].sum():
-            best = (index, mask, score)
-    if best is None:
-        raise ValueError(f"'{prompt}' could not be segmented on any usable frame")
-
-    frame_index, mask, score = best
-    log(f"'{prompt}': using frame {frame_index} "
-        f"(score {score:.2f}, {int(mask.sum())} px)")
-
-    image_path = scene_dir / f"{name}_frame.png"
-    mask_path = scene_dir / f"{name}_mask.png"
     import cv2
 
-    cv2.imwrite(str(image_path), finalist_frames[frame_index])
-    object_masks.write_mask(mask, mask_path)
-    return {
-        "prompt": prompt,
-        "name": name,
-        "image_path": image_path,
-        "mask_path": mask_path,
-        "source_frame": frame_index,
-        "detection_score": score,
-    }
+    count = min(SCENE_FRAME_CANDIDATES, len(subject_masks))
+    positions = sorted({
+        round(index * (len(subject_masks) - 1) / max(count - 1, 1))
+        for index in range(count)
+    })
+    candidates = [subject_masks[position] for position in positions]
+    frames = _read_frames(video_path, [frame for frame, _mask in candidates])
+    best: dict[str, Any] | None = None
+    seen_counts = {prompt: 0 for prompt in prompts}
+    for frame_index, reference_subject in candidates:
+        frame = frames.get(frame_index)
+        if frame is None:
+            continue
+        segmented = object_masks.segment_prompt_instances(
+            frame,
+            (*prompts, *subject_prompts),
+            processor,
+        )
+        selected_subject = object_masks.select_mask_for_reference(
+            (
+                instance
+                for subject_prompt in subject_prompts
+                for instance in segmented.get(subject_prompt, [])
+            ),
+            np.asarray(reference_subject, dtype=bool),
+        )
+        if selected_subject is None:
+            continue
+        subject_mask, subject_score = selected_subject
+        object_masks_by_prompt: dict[str, np.ndarray] = {}
+        object_scores: dict[str, float] = {}
+        for prompt in prompts:
+            instances = segmented.get(prompt, [])
+            if not instances:
+                continue
+            mask, score = instances[0]
+            if mask.shape != subject_mask.shape or not np.any(mask):
+                continue
+            seen_counts[prompt] += 1
+            object_masks_by_prompt[prompt] = mask
+            object_scores[prompt] = score
+        if len(object_masks_by_prompt) != len(prompts):
+            continue
+
+        reference = np.asarray(reference_subject, dtype=bool)
+        subject_match = _mask_iou(subject_mask, reference)
+        visible_fractions = [
+            1.0 - float(np.logical_and(mask, subject_mask).sum()) / max(int(mask.sum()), 1)
+            for mask in object_masks_by_prompt.values()
+        ]
+        rank = (
+            min(object_scores.values()),
+            min(visible_fractions),
+            subject_match,
+            float(np.mean(list(object_scores.values()))),
+        )
+        if best is None or rank > best["rank"]:
+            best = {
+                "rank": rank,
+                "frame_index": frame_index,
+                "frame": frame,
+                "subject_mask": subject_mask,
+                "subject_score": subject_score,
+                "object_masks": object_masks_by_prompt,
+                "object_scores": object_scores,
+            }
+
+    if best is None:
+        missing = [prompt for prompt, count_seen in seen_counts.items() if count_seen == 0]
+        detail = f"; never detected: {', '.join(missing)}" if missing else ""
+        raise ValueError(
+            "no single reconstructed frame contains the subject and every requested object"
+            + detail
+        )
+
+    image_path = scene_dir / SCENE_FRAME_FILE
+    if not cv2.imwrite(str(image_path), best["frame"]):
+        raise OSError(f"could not write shared scene frame: {image_path}")
+    object_masks.write_mask(
+        best["subject_mask"], scene_dir / SCENE_SUBJECT_MASK_FILE
+    )
+    frame_index = int(best["frame_index"])
+    log(
+        f"{STAGE_MARKER} shared scene frame {frame_index}: subject and "
+        f"{len(prompts)} object(s), one MLX image encoding"
+    )
+    targets: list[dict[str, Any]] = []
+    for prompt in prompts:
+        name = object_name(prompt)
+        mask_path = scene_dir / f"{name}_mask.png"
+        object_masks.write_mask(best["object_masks"][prompt], mask_path)
+        score = float(best["object_scores"][prompt])
+        log(f"'{prompt}' on shared frame {frame_index} (score {score:.2f})")
+        targets.append({
+            "prompt": prompt,
+            "name": name,
+            "image_path": image_path,
+            "mask_path": mask_path,
+            "source_frame": frame_index,
+            "detection_score": score,
+        })
+    return targets
 
 
 def _shape_object(
@@ -1847,6 +1974,7 @@ def _shape_object(
         output_glb=scene_dir / f"{name}.glb",
         output_pose=scene_dir / f"{name}_model_pose.json",
         cache_dir=scene_dir / ".cache" / name,
+        pointmap_path=scene_dir / SCENE_POINTMAP_FILE,
         root=object_shapes.objects_root(project_root),
         log=log,
     )

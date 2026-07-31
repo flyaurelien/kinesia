@@ -9,8 +9,13 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
-from .object_masks import segment_object_instances, write_mask
-from .object_shapes import reconstruct_mesh, reconstruct_pose
+from .object_masks import (
+    build_sam3_processor,
+    segment_prompt_instances,
+    select_mask_for_reference,
+    write_mask,
+)
+from .object_shapes import objects_root, reconstruct_mesh, reconstruct_pose
 from .video_io import open_video
 
 SCHEMA = "kinesia.dynamic_object.v1"
@@ -160,25 +165,23 @@ def track_dynamic_objects(
     if not records_by_video_frame:
         return {"objects": [], "failures": [], "skipped": "no reconstructed frames"}
 
-    from .sam3d_runtime import select_device, try_build_human_detector
     from .scene_objects import (
+        _subject_on_frame,
         _subject_mesh_world_on_frame,
-        align_object_pointmap_to_subject,
+        _subject_prompts_for_run,
+        align_body_to_scene_pointmap,
         apply_scene_alignment_to_model_pose,
         object_name,
     )
-    from .subject_preview import DEFAULT_SAM3_CODE_ROOT
 
-    detector = try_build_human_detector(
-        detector_name="sam3", device=select_device(), sam3_code_root=DEFAULT_SAM3_CODE_ROOT,
-    )
-    if detector is None:
-        return {"objects": [], "failures": [], "skipped": "detector unavailable"}
+    processor = build_sam3_processor(confidence=0.5)
+    subject_prompts = _subject_prompts_for_run(run_dir)
 
     scene_dir = run_dir / "scene"
     scene_dir.mkdir(parents=True, exist_ok=True)
     output: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    alignments_by_frame: dict[int, dict[str, Any]] = {}
     try:
         for prompt_index, prompt in enumerate(prompts, start=1):
             name = f"{object_name(prompt)}_dynamic"
@@ -201,8 +204,29 @@ def track_dynamic_objects(
                     if frame_index % frame_stride != 0:
                         video_frame += 1
                         continue
+                    reference_subject = _subject_on_frame(run_dir, video_frame)
+                    if reference_subject is None:
+                        video_frame += 1
+                        continue
+                    segmented = segment_prompt_instances(
+                        frame,
+                        (prompt, *subject_prompts),
+                        processor,
+                    )
+                    selected_subject = select_mask_for_reference(
+                        (
+                            instance
+                            for subject_prompt in subject_prompts
+                            for instance in segmented.get(subject_prompt, [])
+                        ),
+                        reference_subject,
+                    )
+                    if selected_subject is None:
+                        video_frame += 1
+                        continue
+                    subject_mask, _subject_score = selected_subject
                     selected = tracker.choose(
-                        segment_object_instances(frame, prompt, detector),
+                        segmented.get(prompt, []),
                         frame_index=frame_index,
                         image_width=width,
                         image_height=height,
@@ -215,15 +239,23 @@ def track_dynamic_objects(
                     _write_frame_image(frame, image_path)
                     write_mask(mask, mask_path)
                     cache_dir = pose_path.parent / "cache"
+                    shared_pointmap = (
+                        scene_dir
+                        / ".dynamic"
+                        / "shared"
+                        / f"frame_{video_frame:06d}_pointmap.npz"
+                    )
                     if not reference_mesh.exists():
                         reconstruct_mesh(
                             image_path, mask_path, reference_mesh, pose_path, cache_dir,
-                            root=project_root, log=log,
+                            pointmap_path=shared_pointmap,
+                            root=objects_root(project_root), log=log,
                         )
                     else:
                         reconstruct_pose(
                             image_path, mask_path, pose_path, cache_dir,
-                            root=project_root, log=log,
+                            pointmap_path=shared_pointmap,
+                            root=objects_root(project_root), log=log,
                         )
                     model_pose = json.loads(pose_path.read_text())
                     pointmap_name = model_pose.get("scene_pointmap")
@@ -249,17 +281,19 @@ def track_dynamic_objects(
                         pointmap = np.asarray(
                             pointmap_file["pointmap"], dtype=np.float64
                         )
-                    scene_alignment = align_object_pointmap_to_subject(
-                        pointmap,
-                        subject_mesh_world,
-                        focal,
-                        width,
-                        height,
-                    )
-                    # The fitted similarity is the compact evidence needed by
-                    # the viewer; retaining a dense point map for every frame
-                    # would make a long dynamic sequence unnecessarily large.
-                    pointmap_path.unlink()
+                    alignment_evidence = alignments_by_frame.get(video_frame)
+                    if alignment_evidence is None:
+                        alignment_evidence = align_body_to_scene_pointmap(
+                            pointmap,
+                            subject_mesh_world,
+                            focal,
+                            subject_mask,
+                            width,
+                            height,
+                        )
+                        alignment_evidence["source_frame"] = video_frame
+                        alignments_by_frame[video_frame] = alignment_evidence
+                    scene_alignment = alignment_evidence["scene_to_body"]
                     model_pose.pop("scene_pointmap", None)
                     poses.append({
                         "frame_index": frame_index,
@@ -267,7 +301,7 @@ def track_dynamic_objects(
                         "time_s": float(video_frame / fps),
                         "detector_score": score,
                         "model_pose": model_pose,
-                        "scene_alignment": scene_alignment,
+                        "body_object_alignment": alignment_evidence,
                         "object_to_world": apply_scene_alignment_to_model_pose(
                             model_pose, scene_alignment
                         ).tolist(),
@@ -295,12 +329,16 @@ def track_dynamic_objects(
                     # multi-frame gap with an invented trajectory.
                     "max_interpolation_gap_frames": frame_stride,
                     "source": "sam3d_objects_model_pose_shared_subject_pointmap",
-                    "metric_alignment": "shared_subject_pointmap_similarity",
+                    "metric_alignment": "official_body_to_moge_height_center",
                 },
             }
             (scene_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
             output.append(record)
             log(f"{STAGE_MARKER} reconstructed {prompt}: {len(poses)} model poses")
     finally:
-        del detector
+        del processor
+        shared_pointmap_dir = scene_dir / ".dynamic" / "shared"
+        if shared_pointmap_dir.is_dir():
+            for pointmap_path in shared_pointmap_dir.glob("*_pointmap.npz"):
+                pointmap_path.unlink()
     return {"objects": output, "failures": failures, "skipped": None}

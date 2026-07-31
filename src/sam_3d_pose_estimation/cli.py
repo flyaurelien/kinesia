@@ -268,10 +268,11 @@ def build_parser() -> argparse.ArgumentParser:
     scene_parser.add_argument(
         "--stage", default="both", choices=["shape", "place", "both", "dynamic"],
         help=(
-            "shape: find each object and reconstruct it, which needs nothing "
-            "from the subject and so can run first. place: stand the built "
-            "shapes on the floor the subject's feet measured. dynamic: sample "
-            "SAM 3D Objects poses through the completed run."
+            "shape: segment the subject and all objects on one shared frame, "
+            "then reconstruct every object in its shared MoGe scene. place: "
+            "apply the single Body/Object scene alignment without per-object "
+            "adjustments. dynamic: infer SAM 3D Objects poses on every "
+            "reconstructed frame by default."
         ),
     )
     scene_parser.add_argument(
@@ -280,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scene_parser.add_argument(
         "--subject-track", type=Path, default=None,
-        help="detection-step track, used to avoid the subject before the run has outlines",
+        help="optional fallback subject track when reconstructed outlines are unavailable",
     )
     scene_parser.add_argument(
         "--dynamic-frame-stride",

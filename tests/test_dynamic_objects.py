@@ -86,12 +86,15 @@ class DynamicObjectArtifactTests(unittest.TestCase):
             "scene_pointmap": "frame_pointmap.npz",
         }
 
-        alignment = {
-            "method": "shared_subject_pointmap_similarity",
+        scene_to_body = {
             "scale": 1.0,
             "translation_camera": [0.0, 0.0, 0.0],
-            "sample_count": 400,
-            "inlier_count": 360,
+        }
+        alignment = {
+            "method": "official_body_to_moge_height_center",
+            "scene_to_body": scene_to_body,
+            "source_frame_shared": True,
+            "normalized_rms": 0.01,
             "rms_m": 0.02,
         }
 
@@ -126,16 +129,23 @@ class DynamicObjectArtifactTests(unittest.TestCase):
             mask = rectangular_mask(20, 20, 40, 40, width=100, height=80)
             with (
                 mock.patch("sam_3d_pose_estimation.dynamic_objects.open_video", return_value=Capture()),
-                mock.patch("sam_3d_pose_estimation.dynamic_objects.segment_object_instances", return_value=[(mask, 0.8)]),
+                mock.patch("sam_3d_pose_estimation.dynamic_objects.build_sam3_processor", return_value=object()),
+                mock.patch(
+                    "sam_3d_pose_estimation.dynamic_objects.segment_prompt_instances",
+                    return_value={"toy": [(mask, 0.8)], "person": [(mask, 0.9)]},
+                ),
+                mock.patch(
+                    "sam_3d_pose_estimation.scene_objects._subject_on_frame",
+                    return_value=mask,
+                ),
                 mock.patch("sam_3d_pose_estimation.dynamic_objects.reconstruct_mesh", side_effect=write_first_mesh),
                 mock.patch("sam_3d_pose_estimation.dynamic_objects.reconstruct_pose", side_effect=write_pose),
-                mock.patch("sam_3d_pose_estimation.sam3d_runtime.try_build_human_detector", return_value=object()),
                 mock.patch(
                     "sam_3d_pose_estimation.scene_objects._subject_mesh_world_on_frame",
                     return_value=(mock.sentinel.subject_mesh, 200.0),
                 ),
                 mock.patch(
-                    "sam_3d_pose_estimation.scene_objects.align_object_pointmap_to_subject",
+                    "sam_3d_pose_estimation.scene_objects.align_body_to_scene_pointmap",
                     return_value=alignment,
                 ),
             ):
@@ -148,7 +158,7 @@ class DynamicObjectArtifactTests(unittest.TestCase):
             key: value for key, value in pose.items() if key != "scene_pointmap"
         }
         self.assertEqual(poses[0]["model_pose"], expected_pose)
-        self.assertEqual(poses[0]["scene_alignment"], alignment)
+        self.assertEqual(poses[0]["body_object_alignment"], alignment)
         self.assertEqual(poses[0]["object_to_world"][0], [0.0, -4.0, 0.0, -3.0])
         self.assertEqual(result["objects"][0]["quality"]["max_interpolation_gap_frames"], 1)
 

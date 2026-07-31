@@ -76,13 +76,14 @@ Human reconstruction is the supported workflow. Scene-object reconstruction is
 an experimental opt-in feature with a deliberately narrower contract:
 
 - A static object creates one mesh, retains SAM 3D Objects' quaternion-derived
-  orientation and internal proportions. The object runtime's full-scene point
-  map and the SAM 3D Body mesh observe the same subject pixels, which determine
-  one robust similarity between their camera spaces. That shared transform
-  fixes object scale and position, while the subject's measured floor supplies
-  the static object's vertical contact without changing its scale. No
-  class-specific rule is used. Subject/object overlap is reported as quality
-  evidence and never used to resize or move the object.
+  orientation, scale, translation, and internal proportions. All requested
+  objects and the subject are segmented by MLX SAM 3 on one common image; all
+  object reconstructions reuse that image's single MoGe point map. Following
+  Meta's Body/Object alignment, the visible body height and centre determine
+  one Body-to-MoGe similarity, whose inverse is applied unchanged to every
+  object. There is no class-specific size, per-object calibration, or floor
+  snap. A pose that does not reproject onto its source mask is rejected instead
+  of being displayed with a plausible-looking correction.
 - A moving object is reconstructed once, then SAM 3D Objects estimates its
   local-to-camera translation, rotation, and scale on every reconstructed
   frame. Each pose is mapped into the metric body space from that frame's
@@ -189,12 +190,12 @@ copy under its own upstream license.
 | **SAM 3D Body** (`sam-3d-body-dinov3`) | per-frame 3D body mesh + joints ([MHR](https://github.com/facebookresearch/MHR) parametric model) | [arXiv:2602.15989](https://arxiv.org/abs/2602.15989) | [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) · [facebookresearch/sam-3d-body](https://github.com/facebookresearch/sam-3d-body) | SAM License (gated) |
 | **DINOv3** backbone | image encoder inside SAM 3D Body | [arXiv:2508.10104](https://arxiv.org/abs/2508.10104) | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
 | **SAM 3** | open-vocabulary person detection + segmentation (PyTorch, all platforms) | [arXiv:2511.16719](https://arxiv.org/abs/2511.16719) | [facebook/sam3](https://huggingface.co/facebook/sam3) · [facebookresearch/sam3](https://github.com/facebookresearch/sam3) | SAM License (gated) |
-| **SAM 3 (MLX)** | fast in-viewer detection preview on Apple Silicon | — | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image) · [Deekshith-Dade/mlx-sam3](https://github.com/Deekshith-Dade/mlx-sam3) | Apache 2.0 (code) / SAM License (weights) |
+| **SAM 3 (MLX)** | fast subject detection plus shared subject/object scene segmentation on Apple Silicon | — | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image) · [Deekshith-Dade/mlx-sam3](https://github.com/Deekshith-Dade/mlx-sam3) | Apache 2.0 (code) / SAM License (weights) |
 | **SAM 3D Objects (optional)** | experimental static scene-object mesh reconstruction | [arXiv:2511.16624](https://arxiv.org/abs/2511.16624) | [facebook/sam-3d-objects](https://huggingface.co/facebook/sam-3d-objects) · [Sam3D-Objects-MLX port](https://github.com/ZimengXiong/Sam3D-Objects-MLX) | SAM License (gated) |
 
-> The in-viewer streaming detector uses the MLX build of SAM 3 (Apple Silicon
-> only). On Linux/Windows the reconstruction pipeline performs detection itself
-> with PyTorch SAM 3 (CUDA/CPU). SAM 3D Body runs everywhere (CUDA → MPS → CPU).
+> The in-viewer streaming detector and scene-object masks use the MLX build of
+> SAM 3 on Apple Silicon. One image backbone pass serves every subject/object
+> prompt on a scene frame. SAM 3D Body runs everywhere (CUDA → MPS → CPU).
 
 ### Optional experimental scene-object runtime
 
