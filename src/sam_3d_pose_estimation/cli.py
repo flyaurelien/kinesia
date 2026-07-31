@@ -59,6 +59,16 @@ def resolve_body_model_root(
     return preferred_root
 
 
+def absolute_model_path(path: Path) -> Path:
+    """Make a model path absolute without dereferencing cache symlinks.
+
+    SAM 3D Body discovers ``model_config.yaml`` relative to the checkpoint
+    path. Resolving a Hugging Face snapshot symlink would move that path into
+    the cache's blob directory, where the configuration file does not live.
+    """
+    return Path(os.path.abspath(path.expanduser()))
+
+
 DEFAULT_BODY_MODEL_ROOT = (
     DEFAULT_MODELS_ROOT / "sam-3d-body-dinov3"
     if "SAM3D_MODELS_ROOT" in os.environ
@@ -468,8 +478,8 @@ def build_pipeline_config(args: argparse.Namespace, output_dir: Path) -> Pipelin
         video_input=args.video_input.expanduser().resolve(),
         output_dir=output_dir.expanduser().resolve(),
         sam3d_code_root=args.sam3d_code_root.expanduser().resolve(),
-        checkpoint_path=args.checkpoint_path.expanduser().resolve(),
-        mhr_path=args.mhr_path.expanduser().resolve(),
+        checkpoint_path=absolute_model_path(args.checkpoint_path),
+        mhr_path=absolute_model_path(args.mhr_path),
         prompt_bbox=prompt_bbox,
         prompt_bbox_frame=(
             max(prompt_bbox_frame_arg, 0)
@@ -774,8 +784,8 @@ def cmd_scene(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Validate the environment and model dependencies, printing the doctor report."""
     summary = run_doctor(
-        checkpoint_path=args.checkpoint_path.expanduser().resolve(),
-        mhr_path=args.mhr_path.expanduser().resolve(),
+        checkpoint_path=absolute_model_path(args.checkpoint_path),
+        mhr_path=absolute_model_path(args.mhr_path),
         sam3d_code_root=args.sam3d_code_root.expanduser().resolve(),
         sam3_code_root=args.sam3_code_root.expanduser().resolve(),
     )
