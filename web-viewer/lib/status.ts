@@ -10,10 +10,10 @@ export const STEPS: Step[] = [
   { key: "uploading", label: "Upload", detail: "Send the video to the remote GPU server" },
   { key: "queued", label: "GPU", detail: "Wait for a free GPU" },
   { key: "tracking", label: "Track people", detail: "SAM 3.1 follows everyone through the video" },
-  { key: "camera", label: "Camera", detail: "Measure the lens and the camera's panning" },
+  { key: "camera", label: "Camera", detail: "Estimate the lens's focal length from the picture (MoGe-2)" },
   { key: "bodies", label: "Bodies", detail: "SAM 3D Body reconstructs each person in 3D" },
   { key: "downloading", label: "Download", detail: "Bring the results back; the GPU is released" },
-  { key: "building", label: "3D scene", detail: "Link identities, smooth motion, ground the feet" },
+  { key: "building", label: "3D scene", detail: "Clean and link identities, smooth motion, ground the feet" },
 ];
 
 /** Index of the step an analysis is currently in (STEPS.length when done). */

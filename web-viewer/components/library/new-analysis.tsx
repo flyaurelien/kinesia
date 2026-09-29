@@ -98,7 +98,7 @@ export function NewAnalysis({ onClose, onCreated }: Props) {
               ) : (
                 <>
                   <strong>Drop a video here, or click to choose</strong>
-                  <span className="faint">MP4, MOV, MKV or WebM · up to about 3 minutes</span>
+                  <span className="faint">From a fixed camera (tripod or stand) · MP4, MOV, MKV or WebM · up to about 3 minutes</span>
                 </>
               )}
             </div>
