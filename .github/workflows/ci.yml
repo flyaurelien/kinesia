@@ -43,12 +43,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: web-viewer/package-lock.json
       - name: Install locked frontend dependencies
         run: npm ci
       - name: Typecheck
         run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm test
       - name: Build
         run: npm run build

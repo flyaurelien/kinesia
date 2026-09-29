@@ -1,290 +1,90 @@
 # Kinesia
 
-**Markerless 3D human motion capture and gait kinematics from a single ordinary video.**
+**Multi-person 3D motion capture from a single ordinary video.**
 
-Kinesia turns any video of people walking or moving into per-frame **3D body meshes**
-and **joint kinematics**, and displays everything in a local browser-based 3D viewer.
-No suits, no markers, no multi-camera rig — one video, one machine, everything local.
+Kinesia follows every person in a video — a football match, a training session,
+a dance — reconstructs each of them as a 3D body on every frame, and plays them
+back together in one animated 3D scene you can orbit, follow, view from above or
+see through the original camera.
 
-![Kinesia viewer: three subjects reconstructed in one 3D scene](docs/viewer.png)
+![Volleyball players reconstructed in one 3D scene](docs/viewer.png)
 
-*Three subjects from one video, reconstructed and animated together in a single 3D
-scene — each with their own colour in the video overlay, the segmentation view, and
-the 3D reconstruction.*
+<sub>Eleven players of Paris Volley vs Resovia (2013), from one fixed camera. Source
+video by Shev123, [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/),
+via [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Paris_Volley_Resovia,_24_October_2013_-_20_-_Debut_Match.webm);
+this image is shared under the same license.</sub>
 
-## Features
+## What it does
 
-- **Whole-video subject detection** — a streaming, text-promptable detector
-  (SAM 3) scans the full video and previews every person it finds, live.
-- **Robust identity tracking** — subjects keep their identity through crossings,
-  occlusions, and even hard scene cuts (see [how tracking works](#identity-tracking)).
-- **Multi-subject reconstruction** — select any number of detected people; each
-  is reconstructed in its own pass and they all appear **together in one 3D
-  scene**, colour-coded, with true relative placement.
-- **Compare subjects on one graph** — one entry per video, and a subject picker
-  on the plots: show everyone or any subset, with their curves on the *same*
-  axes (colour = subject, line style = signal) in both the timeline and the
-  gait-cycle report.
-- **Per-frame 3D body mesh** (SAM 3D Body / MHR parametric model) + full joint
-  set, streamed into the viewer while the job runs.
-- **Gait kinematics** — hip/knee/ankle angles and more, per frame, plotted
-  against the video with a synchronized playhead.
-- **Clinical gait analysis** — zero-phase filtering, sagittal joint angles,
-  heel-strike/toe-off events, spatiotemporal parameters and cycle-normalized
-  curves (see [clinical gait analysis](#clinical-gait-analysis)).
-- **Three synced views** — clean source video, tracking boxes (one colour per
-  subject), and the segmentation render, next to the 3D scene.
-- **Export** — per-joint kinematics as CSV/JSON, the clinical gait report as
-  JSON, and a tracking-box MP4.
-- **Fully local** — after the one-time model download, nothing leaves your machine.
-- **Experimental scene objects** — optionally reconstruct static objects that
-  rest on the ground, or track a prompted moving object frame by frame; see the
-  [capture constraints](#capture-constraints-and-experimental-scene-objects).
+- **Tracks everyone, with memory.** SAM 3.1's video predictor (Object Multiplex)
+  runs one session over the whole clip: each person is a *masklet* with its own
+  memory, re-conditioned on fresh detections, so identities hold through
+  crossings, occlusions and fast motion.
+- **Brings people back.** Someone who leaves the picture and returns comes back
+  as a new masklet; Kinesia joins the fragments using mask-pooled appearance
+  features, a running-speed reachability test and a similarity threshold
+  calibrated on each video (people visible together are certainly different).
+- **Catches tracker slips.** A mask that swallows a neighbour for a frame or two
+  is ignored for those frames; a masklet handed over to someone else (the
+  body jumps further than anyone can run, sideways in the picture or in depth)
+  is cut in two; people whose feet never meet the floor, such as spectators in
+  the stands, are left out.
+- **Reconstructs bodies.** SAM 3D Body (Momentum Human Rig) estimates every
+  person on every frame, prompted with their SAM 3.1 mask so overlapping players
+  are told apart.
+- **One shared world.** The lens focal length is estimated from the image
+  (MoGe-2); one floor is fitted under everybody's feet over the whole clip, and
+  each person is moved along their camera ray until their feet meet it — which
+  fixes the per-person depth errors of monocular reconstruction without changing
+  where they appear in the image.
+- **Fluid, grounded motion.** Body shape is held fixed per person; joint
+  rotations are smoothed with a zero-lag adaptive filter; trajectories use a
+  Kalman smoother that knows depth is the uncertain direction; planted feet are
+  pinned to stop foot skating. Nothing is glued to the floor, so jumps keep their
+  height.
+- **A viewer built around people.** Presence lanes show when each person is on
+  screen; a motion card gives distance, speed, jumps and joint angles with a
+  chart; everything exports to CSV or JSON.
 
 ## How it works
 
-Kinesia is a single Next.js app (UI + API in one process) that drives a Python
-pipeline (`uv run --no-sync sam3d …`):
-
 ```mermaid
 flowchart LR
-    A[Video] --> B["Detect subjects<br/>SAM 3, streaming"]
-    B --> C["Pick subject(s)<br/>merge fragments"]
-    C --> D["Reconstruct<br/>SAM 3D Body, one pass per subject"]
-    D --> E["3D scene + kinematics<br/>all subjects together"]
-    E --> F["Export<br/>CSV / JSON / MP4"]
+    A[Video] --> B["Normalize<br/>(ffmpeg, local)"]
+    B --> C["remote GPU batch job<br/>SAM 3.1 tracking · lens · SAM 3D Body"]
+    C --> D["Download<br/>the GPU is released"]
+    D --> E["Scene build (local)<br/>floor · identities · motion · metrics"]
+    E --> F["3D viewer"]
 ```
 
-1. **Detect** — SAM 3 runs over every frame with your text prompt (default
-   `person`). A tracker assigns stable identities (below) and the UI previews
-   the boxes as the scan streams in. You click the person(s) to reconstruct.
-2. **Reconstruct** — for each chosen subject, the pipeline runs SAM 3D Body per
-   frame, hard-locked to that subject's track (densified to every frame), and
-   writes meshes, joints, and a rendered preview in the subject's colour.
-3. **View** — the browser viewer reunites all the runs of one selection in a
-   single 3D scene. Runs share the source camera space, so the subjects'
-   relative positions are real. Kinematic signals are computed per subject.
+Inference runs on the **remote GPU server** (Kubernetes + the job scheduler) as a *batch*
+workload: its pod ends with the computation, so the GPU is released — and the
+billing stops — as soon as the results are written, if anything fails, or the
+moment you cancel. A hard timeout bounds a job that hangs. Jobs are resumable
+stage by stage, so a pre-empted job restarts where it stopped. Waiting for a
+GPU costs nothing; when the preferred pool (B300) is full for four minutes the
+job moves to the next one (A100).
 
-## Capture constraints and experimental scene objects
+The scene build needs only the CPU and runs on your machine after the download.
 
-Kinesia is designed for a **fixed-camera** recording. Mount the camera on a
-tripod and avoid panning, zooming, or translating it during a take. A moving
-camera invalidates the shared world frame, so metric placement and the spatial
-relationship between subjects and scene objects are not reliable.
+## Setup
 
-Human reconstruction is the supported workflow. Scene-object reconstruction is
-an experimental opt-in feature with a deliberately narrower contract:
-
-- A static object creates one mesh, retains SAM 3D Objects' quaternion-derived
-  orientation, scale, translation, and internal proportions. All requested
-  objects and the subject are segmented by MLX SAM 3 on one common image; all
-  object reconstructions reuse that image's single MoGe point map. Following
-  Meta's Body/Object alignment, the visible body height and centre determine
-  one Body-to-MoGe similarity, whose inverse is applied unchanged to every
-  object. There is no class-specific size, per-object calibration, or floor
-  snap. A pose that does not reproject onto its source mask is rejected instead
-  of being displayed with a plausible-looking correction.
-- A moving object is reconstructed once, then SAM 3D Objects estimates its
-  local-to-camera translation, rotation, and scale on every reconstructed
-  frame. Each pose is mapped into the metric body space from that frame's
-  shared subject point map; it is never floor-snapped. A missing pose is hidden
-  rather than extrapolated across a gap. The default stride is `1`, so every
-  reconstructed video frame is analysed.
-- Monocular depth, orientation, scale, and ground-contact inference are
-  uncertain. Inspect every object placement before using it in analysis or
-  presentation material.
-
-The app continues a human-reconstruction run when the optional object runtime
-is absent; it skips the requested scene-object reconstruction and records the
-reason in the run log.
-
-### Identity tracking
-
-Keeping "Person 1" and "Person 2" from swapping when people cross paths is the
-hard part of single-camera capture. Kinesia uses a layered design, each layer
-matched to what is actually reliable at that time scale:
-
-- **Within a take: position first.** On contiguous frames people cannot
-  teleport, so active tracks are matched to detections by predicted-box IoU
-  (Hungarian assignment, constant-velocity prediction). Appearance embeddings
-  only order near-ties, and are ignored entirely inside a crossing where the
-  two people overlap — exactly where embeddings become contaminated and
-  confidently wrong. Detection runs on every video frame. Confident nested
-  fragments sharing the same box boundaries are removed before association;
-  new identities are never born inside a crossing or a dissolve, so duplicate
-  and occlusion fragments cannot become ghost subjects.
-- **Appearance re-identification** brings a subject back after a real absence
-  (left the frame and returned), with strict or lenient thresholds depending on
-  how recently the track was seen.
-- **Across scene cuts: whole-tracklet linking.** Hard cuts and dissolves are
-  detected from frame differences; positions are void across them, and —
-  measured on real footage — frame-level embedding similarity picks the wrong
-  person disturbingly often right after a cut. So each scene segment is tracked
-  independently, and segments are linked by a signal that survives lighting and
-  viewpoint changes: the **median clothing colour of the trousers region (LAB
-  a\*/b\*)**, aggregated over each whole tracklet, with Hungarian matching,
-  distance caps, and an assignment-margin test. A short bystander blip can
-  never absorb a main subject.
-
-The tracker ships with a deterministic crossing benchmark (blended embeddings,
-merged occlusion boxes, adversarial post-cut embeddings) in `tests/`.
-
-### Multi-subject scenes
-
-Each selected subject gets its own reconstruction run (`--subject-index k` over
-the shared selection file), queued sequentially. Those runs share a selection
-file, which is what lets the viewer put them back together: the sidebar shows
-**one entry per video** (with a dot per subject), and every subject's mesh is
-rendered in the primary run's reference frame — one scene, one colour per
-subject, true relative placement.
-
-The subjects are then chosen at the *plot* level rather than by switching runs.
-A subject row above the analysis panel toggles who is included, and the picked
-subjects' curves are drawn on the same axes:
-
-- **Timeline** — the same signal once per subject, colour for the subject and
-  line style for the signal (one channel cannot encode both). With a single
-  subject selected, the ordinary per-signal palette is used.
-- **Gait cycle** — one parameter row per subject, and the cycle curves overlaid
-  with colour for the subject and solid/dashed for the side, so an asymmetry
-  between two people is visible at a glance.
-
-### Clinical gait analysis
-
-`sam3d analyze` adds a gait-lab layer on top of the raw reconstruction, written
-to `gait.json` next to the signals:
-
-- **Zero-phase filtering** — joint trajectories are low-passed with a 4th-order
-  Butterworth applied forward and backward (`filtfilt`, 6 Hz) *before* any angle
-  is formed. Zero phase means no temporal lag, so event timings stay honest.
-- **Sagittal angles** — hip flexion, knee flexion and ankle dorsiflexion, both
-  sides, measured in the subject's own sagittal plane (pelvis axis + the feet's
-  pointing direction), so the convention holds whichever way the person walks
-  relative to the camera.
-- **Static calibration** — monocular reconstruction carries a systematic
-  standing-posture bias (shank tilted forward, toes up: consistently ~16° at the
-  knee and ~30° at the ankle across subjects). Kinesia detects the subject's own
-  quiet stance — both feet down, pelvis under 8 cm/s, trunk upright, sustained —
-  and subtracts it as a calibration pose, exactly as a lab uses a static trial.
-  The offsets are reported in full and are reversible; clips with no quiet
-  stance keep raw values and say so.
-- **Events and parameters** — heel-strikes (refined to the local minimum of the
-  filtered heel height) and toe-offs, then cadence, step/stride time and length,
-  walking speed, stance/swing and double-support percentages.
-- **Cycle normalization** — every angle resampled to 0–100 % of each stride and
-  aggregated as mean ± SD per side: the curves clinicians actually read. This is
-  where the tracker's occlusion robustness pays off, since cycles survive the
-  crossings that make other tools lose the subject.
-
-Everything degrades gracefully: a standing or non-gait clip reports no walking
-and zero cycles rather than inventing numbers.
-
-## Models
-
-All model weights come from their original publishers — **none are redistributed
-in this repository**. Upstream inference code is vendored under `vendor/`, each
-copy under its own upstream license.
-
-| Model | Role | Paper | Weights / code | License |
-|-------|------|-------|----------------|---------|
-| **SAM 3D Body** (`sam-3d-body-dinov3`) | per-frame 3D body mesh + joints ([MHR](https://github.com/facebookresearch/MHR) parametric model) | [arXiv:2602.15989](https://arxiv.org/abs/2602.15989) | [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) · [facebookresearch/sam-3d-body](https://github.com/facebookresearch/sam-3d-body) | SAM License (gated) |
-| **DINOv3** backbone | image encoder inside SAM 3D Body | [arXiv:2508.10104](https://arxiv.org/abs/2508.10104) | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
-| **SAM 3** | open-vocabulary person detection + segmentation (PyTorch, all platforms) | [arXiv:2511.16719](https://arxiv.org/abs/2511.16719) | [facebook/sam3](https://huggingface.co/facebook/sam3) · [facebookresearch/sam3](https://github.com/facebookresearch/sam3) | SAM License (gated) |
-| **SAM 3 (MLX)** | fast subject detection plus shared subject/object scene segmentation on Apple Silicon | — | [mlx-community/sam3-image](https://huggingface.co/mlx-community/sam3-image) · [Deekshith-Dade/mlx-sam3](https://github.com/Deekshith-Dade/mlx-sam3) | Apache 2.0 (code) / SAM License (weights) |
-| **SAM 3D Objects (optional)** | experimental static scene-object mesh reconstruction | [arXiv:2511.16624](https://arxiv.org/abs/2511.16624) | [facebook/sam-3d-objects](https://huggingface.co/facebook/sam-3d-objects) · [Sam3D-Objects-MLX port](https://github.com/ZimengXiong/Sam3D-Objects-MLX) | SAM License (gated) |
-
-> The in-viewer streaming detector and scene-object masks use the MLX build of
-> SAM 3 on Apple Silicon. One image backbone pass serves every subject/object
-> prompt on a scene frame. SAM 3D Body runs everywhere (CUDA → MPS → CPU).
-
-### Optional experimental scene-object runtime
-
-Static scene-object mesh reconstruction is disabled by default and requires a
-separate runtime. The current integration targets **macOS on Apple Silicon** through the
-[Sam3D-Objects-MLX port](https://github.com/ZimengXiong/Sam3D-Objects-MLX).
-Its code and all SAM 3D Objects checkpoints stay outside this repository; no
-object-model code or weights are redistributed by Kinesia.
-
-Install the known-compatible external runtime at the path Kinesia checks by
-default:
+**Cluster access** (network access): install `kubectl` and the the job scheduler CLI,
+then `scheduler login`. Copy `cluster/config.env.example` to `cluster/config.env`
+(git-ignored) and fill in your the job scheduler project, UID/GID, volume claim, and the
+paths of the SAM 3.1 checkpoint (`facebook/sam3.1`, `sam3.1_multiplex.pt`), a
+clean checkout of `facebookresearch/sam3` and SAM 3D Body
+(`facebook/sam-3d-body-dinov3`) on the lab volume. Then, once (this also puts
+MoGe-2 and its public weights on the volume):
 
 ```bash
-git clone https://github.com/ZimengXiong/Sam3D-Objects-MLX.git vendor/sam3d-objects-mlx
-git -C vendor/sam3d-objects-mlx checkout c6f3701e4c9d45281afe0f022d2ba499cd60b39d
-cd vendor/sam3d-objects-mlx && uv sync && cd ../..
+uv sync --frozen --no-editable                    # local Python environment
+uv run --no-sync python scripts/install_models.py # SAM 3D Body body model + DINOv3 code
+uv run --no-sync kinesia cluster setup            # Python packages on the volume (CPU pod)
 ```
 
-Request access to [the gated SAM 3D Objects model](https://huggingface.co/facebook/sam-3d-objects), then install its checkpoints into the external runtime:
-
-```bash
-cd vendor/sam3d-objects-mlx
-uv run hf auth login
-uv run hf download --repo-type model --local-dir checkpoints/hf-download --max-workers 1 facebook/sam-3d-objects
-mv checkpoints/hf-download/checkpoints checkpoints/hf
-cd ../..
-```
-
-The final file `vendor/sam3d-objects-mlx/checkpoints/hf/pipeline.yaml` must
-exist before object reconstruction can start. To keep the runtime elsewhere,
-set `SAM3D_OBJECTS_ROOT` to its absolute path before launching Kinesia. Review
-the external runtime and model terms before use: SAM 3D Objects code and
-checkpoints are subject to the upstream SAM License, not Kinesia's CC0 license.
-
-## Requirements
-
-| Tool | Notes |
-|------|-------|
-| Python `>=3.12,<3.13` | provisioned automatically by `uv` |
-| [`uv`](https://docs.astral.sh/uv/) | Python environment + runner |
-| Node.js 18+ and npm | the web viewer |
-| `ffmpeg` + `ffprobe` | must be on your `PATH` (video I/O) |
-| Hugging Face account | the model weights are gated (see below) |
-| ~6 GB disk | model weights |
-
-A GPU is optional — the pipeline picks the best device (NVIDIA CUDA → Apple
-Silicon MPS → CPU); pass `--force-cpu` to override.
-
-```bash
-brew install ffmpeg                 # macOS
-sudo apt-get install -y ffmpeg      # Debian / Ubuntu
-winget install --id Gyan.FFmpeg     # Windows — ensure ffmpeg/ffprobe are on PATH
-```
-
-## Install
-
-```bash
-uv sync --frozen --no-editable             # creates .venv from the locked backend dependencies
-cd web-viewer && npm ci && cd ..          # installs the locked web viewer dependencies
-```
-
-Kinesia uses a `src/` package layout. The commands below include `--no-sync` so
-`uv` keeps that known-good non-editable installation and avoids
-platform-specific ambiguity around editable `.pth` resolution. After changing
-backend source locally, rebuild that local package before running the commands:
-
-```bash
-uv sync --frozen --no-editable --reinstall-package sam-3d-pose-estimation
-```
-
-### Download the models
-
-Request access on each gated Hugging Face page (one click), log in with a
-token, then materialize every runtime weight under the project's gitignored
-`models/` directory:
-
-```bash
-uv run --no-sync hf auth login    # token from https://huggingface.co/settings/tokens
-uv run --no-sync python scripts/install_models.py
-```
-
-This installs SAM 3D Body, PyTorch SAM 3, and MLX SAM 3 at stable local paths;
-later runs are fully offline and do not resolve the global Hugging Face cache.
-The optional SAM 3D Objects weights already live in its separate vendored
-runtime as described above. Verify the setup with:
-
-```bash
-uv run --no-sync sam3d doctor --json
-```
+**Local tools:** [`uv`](https://docs.astral.sh/uv/), `ffmpeg`/`ffprobe` on the
+`PATH`, and Node.js 24.
 
 ## Run
 
@@ -292,85 +92,89 @@ uv run --no-sync sam3d doctor --json
 ./dev.sh
 ```
 
-Open <http://127.0.0.1:4001/>. Run it **from the repository root** — the app
-locates `input/`, `output/`, and the Python environment relative to it.
-(Manual equivalent: `cd web-viewer && UV_NO_SYNC=1 npm run dev -- --hostname 127.0.0.1 --port 4001`.)
+Open <http://127.0.0.1:4001/>, choose **New analysis**, drop a video. The page
+follows the job through its steps (upload, GPU, tracking, camera, bodies,
+download, 3D scene) and opens the viewer when it is ready. Cancelling deletes
+the cluster job immediately.
 
-### Using the app
-
-1. **Upload** a video.
-2. **Detect** — enter a prompt (default `person`), scan the video, and click the
-   subject(s) to reconstruct. Fragments of the same person can be merged.
-3. **Reconstruct** — one job per subject queues up; the viewer streams progress.
-4. **Inspect & export** — play the synchronized Video / Tracking box /
-   Segmentation views next to the 3D scene, plot any joint signal, export
-   kinematics (CSV/JSON) or a tracking-box MP4.
-
-### Command line (optional)
+Everything is also available from the command line:
 
 ```bash
-# reconstruct one video (automatic subject detection)
-uv run --no-sync sam3d run --video-input input/example.mp4 --run-id example_processed \
-  --inference-target body --precision float32 --no-preview --output-codec h264
-
-# reconstruct subject k of a saved multi-subject selection
-uv run --no-sync sam3d run --video-input input/example.mp4 --run-id example_p2 \
-  --subject-track-file input/.detect/<id>/chosen_subject_track.json --subject-index 1
-
-# derive kinematics for a run
-uv run --no-sync sam3d analyze --run-id example_processed
-
-# reconstruct a generic moving object using SAM 3D model poses on every frame
-uv run --no-sync sam3d scene --run-id example_processed --stage dynamic --prompts object
+uv run --no-sync kinesia new input/match.mp4 --name "Sunday match" [--prompt "football player"]
+uv run --no-sync kinesia process <run-id>                           # GPU job, download, scene
+uv run --no-sync kinesia cancel <run-id>                            # delete the job, free the GPU
+uv run --no-sync kinesia scene <run-id>                             # rebuild the 3D scene locally
 ```
 
-Artifacts land under `output/<run_id>/` (meshes, metadata, previews, kinematics).
+Each analysis lives in `output/<run-id>/`: the normalized `video.mp4`, the raw
+GPU results in `raw/` and the viewer files in `scene/`.
 
-## Configuration
+### Using the viewer
 
-Copy `web-viewer/.env.example` to `web-viewer/.env.local` to override defaults.
+| Control | |
+| --- | --- |
+| Space · ← → · Shift+← → | play/pause · one frame · one second |
+| O · F · T · C | orbit · follow the selected person · top view · through the recording camera, over the video |
+| Click a body, a list row, a lane or an outline in the video | select that person |
+| Double-click a name | rename |
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `KINESIA_RUNS_ROOT` | `output` | where processed runs are stored |
-| `KINESIA_UPLOADS_ROOT` | `input` | where uploaded videos are stored |
-| `NEXT_PUBLIC_KINESIA_BACKEND_URL` | empty | set only to split the frontend onto another host |
-| `NEXT_PUBLIC_KINESIA_BASIC_UI` | `0` | set to `1` for the reduced single-video workflow |
-| `KINESIA_ALLOWED_ORIGINS` | `http://127.0.0.1:4001` | browser origins allowed to call the API |
+The toolbar toggles body meshes, skeletons, motion trails, name tags and the
+source video (picture-in-picture or side by side). Names and hidden people are
+saved with the analysis.
+
+## Capture advice and limits
+
+- **The camera must be fixed** (tripod, stand, or rested on something): one
+  camera frame serves the whole clip. A panning, zooming or hand-held camera is
+  not supported.
+- Works best when people are seen **whole** and at least ~50 pixels tall. The
+  text prompt (default `person`) can be narrowed, e.g. `volleyball player`, so
+  that spectators are not tracked.
+- Depth from one camera is uncertain: distances and speeds are estimates, best
+  compared between people of the same clip. Absolute size comes from SAM 3D
+  Body's human prior, so unusually tall or short people are pulled towards
+  average height, and their distances and speeds scale with it (professional
+  volleyball players read about 1.6 m tall).
+- Joining fragments is conservative: two players in the same kit who leave and
+  re-enter at the same time may stay separate people rather than risk a swap.
+- SAM 3.1's multiplex tracker at the pinned upstream revision crashes on long
+  clips when an object sharing a conditioning frame is removed
+  ([facebookresearch/sam3#572](https://github.com/facebookresearch/sam3/issues/572));
+  Kinesia applies the fix proposed upstream (#573) at runtime.
 
 ## Development
 
 ```bash
-uv run --no-sync sam3d doctor --json             # environment + model files
-uv run --no-sync python -m unittest discover -s tests  # backend tests
-cd web-viewer && npx tsc --noEmit && npm run build
+PYTHONPATH=src uv run --no-sync python -m unittest discover -s tests   # backend, on the source tree
+cd web-viewer && npx tsc --noEmit && npm test && npm run build
 ```
 
 ```text
 kinesia/
-  docs/          README assets
-  input/         source videos (gitignored)
-  output/        processed runs + logs (gitignored)
-  models/        local model weights (gitignored)
-  src/           Python backend: detection, tracking, 3D reconstruction, kinematics
-  tests/         backend tests (tracking benchmarks, kinematics, pipeline units)
-  web-viewer/    Next.js viewer UI + API (single process)
-  vendor/        SAM 3D Body, SAM 3, MLX SAM 3 upstream code (each under its own license)
+  cluster/          GPU job and one-time setup scripts (run inside the pods)
+  src/kinesia/
+    cluster/        the job scheduler/kubectl orchestration from this machine
+    remote/         code that runs on the GPU: SAM 3.1 tracking, lens, SAM 3D Body
+    scene/          floor, identities, motion smoothing, metrics, export
+  web-viewer/       Next.js app: library, processing status, 3D viewer
+  vendor/           SAM 3D Body code (uploaded to the cluster with each job)
+  tests/            backend tests
 ```
+
+## Models
+
+All model weights come from their original publishers; none are redistributed here.
+
+| Model | Role | Paper | Weights / code | License |
+| --- | --- | --- | --- | --- |
+| **SAM 3.1** (Object Multiplex) | video detection, segmentation and tracking | [arXiv:2511.16719](https://arxiv.org/abs/2511.16719) | [facebook/sam3.1](https://huggingface.co/facebook/sam3.1) · [facebookresearch/sam3](https://github.com/facebookresearch/sam3) | SAM License (gated) |
+| **SAM 3D Body** | per-person 3D body ([MHR](https://github.com/facebookresearch/MHR)) | [arXiv:2602.15989](https://arxiv.org/abs/2602.15989) | [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) · [facebookresearch/sam-3d-body](https://github.com/facebookresearch/sam-3d-body) | SAM License (gated) |
+| **DINOv3** | image encoder inside SAM 3D Body | [arXiv:2508.10104](https://arxiv.org/abs/2508.10104) | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
+| **MoGe-2** | camera focal length from a single image | [arXiv:2507.02546](https://arxiv.org/abs/2507.02546) | [Ruicheng/moge-2-vitl-normal](https://huggingface.co/Ruicheng/moge-2-vitl-normal) · [microsoft/MoGe](https://github.com/microsoft/MoGe) | MIT (code) / weights per model card |
 
 ## Citations
 
-Kinesia builds on the following research. If you use Kinesia in academic work,
-please cite the underlying models:
-
 ```bibtex
-@article{yang2026sam3dbody,
-  title={SAM 3D Body: Robust Full-Body Human Mesh Recovery},
-  author={Yang, Xitong and Kukreja, Devansh and Pinkus, Don and Sagar, Anushka and Fan, Taosha and Park, Jinhyung and Shin, Soyong and Cao, Jinkun and Liu, Jiawei and Ugrinovic, Nicolas and Feiszli, Matt and Malik, Jitendra and Dollar, Piotr and Kitani, Kris},
-  journal={arXiv preprint arXiv:2602.15989},
-  year={2026}
-}
-
 @misc{carion2025sam3segmentconcepts,
   title={SAM 3: Segment Anything with Concepts},
   author={Nicolas Carion and Laura Gustafson and Yuan-Ting Hu and Shoubhik Debnath and Ronghang Hu and Didac Suris and Chaitanya Ryali and Kalyan Vasudev Alwala and Haitham Khedr and Andrew Huang and Jie Lei and Tengyu Ma and Baishan Guo and Arpit Kalla and Markus Marks and Joseph Greer and Meng Wang and Peize Sun and Roman R{\"a}dle and Triantafyllos Afouras and Effrosyni Mavroudi and Katherine Xu and Tsung-Han Wu and Yu Zhou and Liliane Momeni and Rishi Hazra and Shuangrui Ding and Sagar Vaze and Francois Porcher and Feng Li and Siyuan Li and Aishwarya Kamath and Ho Kei Cheng and Piotr Doll{\'a}r and Nikhila Ravi and Kate Saenko and Pengchuan Zhang and Christoph Feichtenhofer},
@@ -379,6 +183,13 @@ please cite the underlying models:
   archivePrefix={arXiv},
   primaryClass={cs.CV},
   url={https://arxiv.org/abs/2511.16719},
+}
+
+@article{yang2026sam3dbody,
+  title={SAM 3D Body: Robust Full-Body Human Mesh Recovery},
+  author={Yang, Xitong and Kukreja, Devansh and Pinkus, Don and Sagar, Anushka and Fan, Taosha and Park, Jinhyung and Shin, Soyong and Cao, Jinkun and Liu, Jiawei and Ugrinovic, Nicolas and Feiszli, Matt and Malik, Jitendra and Dollar, Piotr and Kitani, Kris},
+  journal={arXiv preprint arXiv:2602.15989},
+  year={2026}
 }
 
 @misc{simeoni2025dinov3,
@@ -392,20 +203,11 @@ please cite the underlying models:
 }
 ```
 
-Thanks also to [Deekshith Dade's MLX port of SAM 3](https://github.com/Deekshith-Dade/mlx-sam3)
-(Apache 2.0), Apple's [MLX](https://github.com/ml-explore/mlx) framework, and
-Meta's [Momentum Human Rig](https://github.com/facebookresearch/MHR) parametric
-body model used by SAM 3D Body.
-
 ## License
 
 Kinesia's own code is dedicated to the **public domain** under
-[CC0 1.0 Universal](LICENSE) — use it for anything, no attribution required.
-
-The vendored third-party code keeps its upstream licenses: `vendor/sam3-main`
-and `vendor/sam-3d-body-main` are under Meta's SAM License (included in each
-directory), `vendor/mlx_sam3` is Apache 2.0. The optional
-`vendor/sam3d-objects-mlx` runtime is deliberately not vendored and its SAM 3D
-Objects components are subject to their upstream SAM License. Model weights are
-downloaded from their original gated sources and remain subject to their own
-license terms — CC0 applies only to Kinesia's own code.
+[CC0 1.0 Universal](LICENSE). The vendored `vendor/sam-3d-body-main` keeps Meta's
+SAM License (included in that directory). Model weights are downloaded from their
+original gated sources and remain subject to their own license terms.
+`docs/viewer.png` is derived from a CC BY-SA 3.0 video (credited above) and is
+shared under that license.

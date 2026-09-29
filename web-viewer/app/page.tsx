@@ -1,10 +1,7 @@
-import { ViewerShell } from "../components/viewer-shell";
-import { WizardProvider } from "../components/wizard/state";
+import "./library.css";
 
-export default function HomePage() {
-  return (
-    <WizardProvider>
-      <ViewerShell />
-    </WizardProvider>
-  );
+import { Library } from "@/components/library/library";
+
+export default function Home() {
+  return <Library />;
 }

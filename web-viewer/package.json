@@ -1,12 +1,13 @@
 {
-  "name": "sam3d-web-viewer",
+  "name": "kinesia-web",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "next build --no-lint"
+    "typecheck": "tsc --noEmit",
+    "test": "node --no-warnings --test tests/*.test.mts"
   },
   "dependencies": {
     "@react-three/drei": "^9.122.0",

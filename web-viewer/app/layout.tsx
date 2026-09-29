@@ -1,20 +1,21 @@
 import "./globals.css";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
+import type { ReactNode } from "react";
 
 export const metadata: Metadata = {
   title: "Kinesia",
-  description: "Markerless 3D body reconstruction and gait kinematics viewer",
+  description: "Multi-person 3D motion capture from a single video",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#ffffff",
+};
+
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <head>
-        {/* No external fonts/CDNs: the app must run fully offline. The CSS
-            font stack falls back to the system UI font (Inter, ui-sans-serif,
-            system-ui, …) without any network request. */}
-        <link rel="icon" href="/favicon.png" type="image/png" />
-      </head>
       <body>{children}</body>
     </html>
   );
