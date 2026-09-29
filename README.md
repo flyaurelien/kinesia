@@ -1,50 +1,46 @@
-# Kinesia
+<h1 align="center">Kinesia</h1>
 
-**Multi-person 3D motion capture from a single ordinary video.**
+<p align="center"><b>Multi-person 3D motion capture from a single, ordinary video.</b></p>
 
-Kinesia follows every person in a video — a football match, a training session,
-a dance — reconstructs each of them as a 3D body on every frame, and plays them
-back together in one animated 3D scene you can orbit, follow, view from above or
-see through the original camera.
+<p align="center">
+  <a href="https://github.com/flyaurelien/kinesia/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/flyaurelien/kinesia/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License: CC0-1.0" src="https://img.shields.io/badge/license-CC0--1.0-lightgrey.svg"></a>
+</p>
 
-![Volleyball players reconstructed in one 3D scene](docs/viewer.png)
+<p align="center">
+  <img src="docs/demo.webp" width="100%" alt="Left: a night streetball game in which every player's SAM 3.1 mask is outlined and numbered. Right: the same players reconstructed as 3D bodies in one scene, in the same colours, while the camera slowly orbits.">
+</p>
 
-<sub>Eleven players of Paris Volley vs Resovia (2013), from one fixed camera. Source
-video by Shev123, [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/),
-via [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Paris_Volley_Resovia,_24_October_2013_-_20_-_Debut_Match.webm);
-this image is shared under the same license.</sub>
+<p align="center"><sub>
+Streetball at night, filmed from one fixed camera: 18 s at 1080p, 19 people tracked
+(up to 13 at a time), each rebuilt in 3D on one shared floor. Colours match between
+the two sides. Source video by Khanh Hoang Minh on
+<a href="https://www.pexels.com/video/a-group-of-people-playing-basketball-at-night-19570048/">Pexels</a>.
+</sub></p>
 
-## What it does
+Kinesia follows every person in a video (a match, a training session, a dance),
+reconstructs each of them as a 3D body on every frame, and plays them back
+together in one animated scene you can orbit, follow, view from above or see
+through the original camera.
 
-- **Tracks everyone, with memory.** SAM 3.1's video predictor (Object Multiplex)
-  runs one session over the whole clip: each person is a *masklet* with its own
-  memory, re-conditioned on fresh detections, so identities hold through
-  crossings, occlusions and fast motion.
-- **Brings people back.** Someone who leaves the picture and returns comes back
-  as a new masklet; Kinesia joins the fragments using mask-pooled appearance
-  features, a running-speed reachability test and a similarity threshold
-  calibrated on each video (people visible together are certainly different).
-- **Catches tracker slips.** A mask that swallows a neighbour for a frame or two
-  is ignored for those frames; a masklet handed over to someone else (the
-  body jumps further than anyone can run, sideways in the picture or in depth)
-  is cut in two; people whose feet never meet the floor, such as spectators in
-  the stands, are left out.
-- **Reconstructs bodies.** SAM 3D Body (Momentum Human Rig) estimates every
-  person on every frame, prompted with their SAM 3.1 mask so overlapping players
-  are told apart.
-- **One shared world.** The lens focal length is estimated from the image
-  (MoGe-2); one floor is fitted under everybody's feet over the whole clip, and
-  each person is moved along their camera ray until their feet meet it — which
-  fixes the per-person depth errors of monocular reconstruction without changing
-  where they appear in the image.
-- **Fluid, grounded motion.** Body shape is held fixed per person; joint
-  rotations are smoothed with a zero-lag adaptive filter; trajectories use a
-  Kalman smoother that knows depth is the uncertain direction; planted feet are
-  pinned to stop foot skating. Nothing is glued to the floor, so jumps keep their
-  height.
-- **A viewer built around people.** Presence lanes show when each person is on
-  screen; a motion card gives distance, speed, jumps and joint angles with a
-  chart; everything exports to CSV or JSON.
+## What is hard here, and what Kinesia does about it
+
+| In the clip above | How Kinesia handles it |
+| --- | --- |
+| A dozen players crossing, screening and hiding each other | **SAM 3.1 video tracking** (Object Multiplex): one session over the whole clip, a memory per person, re-conditioned on fresh detections, so identities hold through crossings and occlusions. |
+| One camera, so no depth | **One shared floor.** The lens is measured from the picture (MoGe-2), one floor is fitted under everybody's feet, and each person is slid along their camera ray until their feet meet it. Their image never moves; only the depth error goes away. |
+| People cut by the frame or seen from behind | **SAM 3D Body** (Momentum Human Rig) rebuilds the whole body from what is visible, prompted with each person's mask so overlapping players are told apart. Where the feet are cut off, their depth is interpolated from neighbouring frames. |
+| Sprints, jumps, sudden turns | **Motion that respects physics.** Body shape is fixed per person, joint rotations are smoothed without lag, the trajectory filter knows that depth is the uncertain direction, and planted feet are pinned (no skating) while jumps keep their height. |
+| Players leaving and coming back | **Re-identification.** Fragments are joined using appearance, a running-speed reachability test and a similarity threshold calibrated on each video. |
+| Tracker slips | **Masklet cleaning.** Frames where a mask swallows a neighbour are dropped, a track handed over to someone else is cut in two, and people whose feet never reach the floor (spectators in the stands) are left out. |
+
+**Measured on this clip**: 434 frames, focal length 1338 px estimated from the
+image, heights between 1.58 and 1.78 m. On one NVIDIA B300, tracking took 92 s
+and body reconstruction 104 s; the GPU was held for 4 min 55 s in all and
+released when the job ended. The 3D scene was then built locally in 15 s.
+
+The viewer shows when each person is on screen (presence lanes), and gives
+distance, speed, jumps and joint angles per person, with CSV and JSON export.
 
 ## How it works
 
@@ -126,9 +122,9 @@ saved with the analysis.
 
 - **The camera must be fixed** (tripod, stand, or rested on something): one
   camera frame serves the whole clip. A panning, zooming or hand-held camera is
-  not supported.
+  not supported: even a few degrees of panning slide everyone sideways in 3D.
 - Works best when people are seen **whole** and at least ~50 pixels tall. The
-  text prompt (default `person`) can be narrowed, e.g. `volleyball player`, so
+  text prompt (default `person`) can be narrowed, e.g. `basketball player`, so
   that spectators are not tracked.
 - Clips of up to 6,000 frames (about 3 minutes at 30 fps). SAM 3.1's state
   grows with every frame, by about 19 MB with 20 people: a B300 has room to
@@ -138,8 +134,8 @@ saved with the analysis.
 - Depth from one camera is uncertain: distances and speeds are estimates, best
   compared between people of the same clip. Absolute size comes from SAM 3D
   Body's human prior, so unusually tall or short people are pulled towards
-  average height, and their distances and speeds scale with it (professional
-  volleyball players read about 1.6 m tall).
+  average height (tall athletes come out shorter than they are), and their
+  distances and speeds scale with it.
 - Joining fragments is conservative: two players in the same kit who leave and
   re-enter at the same time may stay separate people rather than risk a swap.
 - SAM 3.1's multiplex tracker at the pinned upstream revision crashes on long
@@ -214,5 +210,5 @@ Kinesia's own code is dedicated to the **public domain** under
 [CC0 1.0 Universal](LICENSE). The vendored `vendor/sam-3d-body-main` keeps Meta's
 SAM License (included in that directory). Model weights are downloaded from their
 original gated sources and remain subject to their own license terms.
-`docs/viewer.png` is derived from a CC BY-SA 3.0 video (credited above) and is
-shared under that license.
+`docs/demo.webp` is made from a video on Pexels (credited above), used under the
+[Pexels license](https://www.pexels.com/license/).
