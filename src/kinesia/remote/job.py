@@ -72,7 +72,6 @@ def run(run_dir: Path, *, sam31_checkpoint: str, sam3_source: str, body_dir: str
             sam31_checkpoint,
             sam3_source,
             max_objects=int(request.get("max_people", 64)),
-            prob_threshold=float(request.get("detection_threshold", 0.5)),
         )
         emit("stage", stage="tracking", state="running", total=frames)
         result = track_video(

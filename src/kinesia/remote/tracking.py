@@ -25,6 +25,7 @@ from .. import masks as mask_ops
 from ..tracks import FrameTracks, TracksWriter
 
 MIN_MASK_PIXELS = 64
+MEMORY_MARGIN_GB = 8.0  # activations and allocator slack on top of the tracked state
 
 
 def _accept_false_offload_keyword(predictor) -> None:
@@ -106,7 +107,7 @@ def keep_shared_conditioning() -> bool:
     return True
 
 
-def build_predictor(checkpoint: str, source: str, *, max_objects: int, prob_threshold: float):
+def build_predictor(checkpoint: str, source: str, *, max_objects: int):
     """Load the official multiplex video predictor on the GPU."""
     import torch
 
@@ -125,13 +126,64 @@ def build_predictor(checkpoint: str, source: str, *, max_objects: int, prob_thre
             compile=False,
             warm_up=False,
             async_loading_frames=False,
-            default_output_prob_thresh=prob_threshold,
-        )
+        )  # no output threshold: this revision accepts one but never applies it
     # The predictor enters a process-wide bf16 autocast; keep it to our own calls.
     predictor.bf16_context.__exit__(None, None, None)
     _accept_false_offload_keyword(predictor)
     keep_shared_conditioning()
     return predictor
+
+
+def _forget_yielded_scores(predictor, session: str, frame_index: int) -> None:
+    """Drop the tracker's per-frame scores of frames already handed to us.
+
+    SAM 3.1 deep-copies this history on every frame, which makes tracking
+    quadratic in the clip length, yet in one forward propagation it reads only
+    the frame being processed, and every result it yields keeps its own
+    reference. Frames are yielded a little behind processing, so only frames
+    before the one just yielded are dropped.
+    """
+    metadata = predictor._get_session(session)["state"].get("tracker_metadata") or {}
+    history = metadata.get("obj_id_to_sam2_score_frame_wise")
+    if history:
+        for old in [frame for frame in history if frame < frame_index]:
+            del history[old]
+
+
+class MemoryGuard:
+    """Fail early, with the reason, when a clip will not fit in GPU memory.
+
+    The tracker's state still grows with every frame (masks and memory
+    features of past frames). The growth rate is measured once tracking has
+    settled and projected to the end of the clip, so an oversized clip stops
+    after a few minutes instead of running out of memory near the end.
+    """
+
+    def __init__(self, frame_count: int, settle: int = 100, every: int = 50):
+        import torch
+
+        self.frame_count, self.settle, self.every = frame_count, settle, every
+        self.capacity = torch.cuda.get_device_properties(0).total_memory
+        self.reference: tuple[int, int] | None = None
+        self.per_frame = 0.0
+
+    def __call__(self, done: int) -> None:
+        if done < self.settle or done % self.every:
+            return
+        import torch
+
+        allocated = torch.cuda.memory_allocated()
+        if self.reference is None:
+            self.reference = (done, allocated)
+            return
+        first, base = self.reference
+        self.per_frame = max(0.0, (allocated - base) / (done - first))
+        projected = allocated + self.per_frame * (self.frame_count - done) + MEMORY_MARGIN_GB * 1e9
+        if projected > self.capacity:
+            raise RuntimeError(
+                f"this clip needs about {projected / 1e9:.0f} GB of GPU memory to track, more than "
+                f"this GPU's {self.capacity / 1e9:.0f} GB: trim it or use a larger GPU"
+            )
 
 
 def _numpy(value) -> np.ndarray:
@@ -184,6 +236,7 @@ def track_video(
     seen: set[int] = set()
     started = time.monotonic()
     torch.cuda.reset_peak_memory_stats()
+    guard = MemoryGuard(frame_count)
     session = None
     try:
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -198,6 +251,9 @@ def track_video(
                 session_id=session,
                 propagation_direction="forward",
                 start_frame_index=0,
+                # Full-resolution masks are cached per frame for later fetches;
+                # we take each frame once, so let the predictor drop them.
+                evict_cached_frame_outputs=True,
             )
             for response in predictor.handle_stream_request(request):
                 index = int(response["frame_index"])
@@ -205,6 +261,8 @@ def track_video(
                     raise RuntimeError(f"SAM 3.1 returned frame {index} twice")
                 writer.write(frame_record(index, response["outputs"], width, height))
                 seen.add(index)
+                _forget_yielded_scores(predictor, session, index)
+                guard(len(seen))
                 if on_frame:
                     on_frame(len(seen), frame_count)
         # Checked before the file is published: a resumed job reuses any
@@ -224,4 +282,5 @@ def track_video(
         "frames": len(seen),
         "seconds": round(time.monotonic() - started, 1),
         "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
+        "state_mb_per_frame": round(guard.per_frame / 1e6, 2),
     }

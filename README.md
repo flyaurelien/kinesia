@@ -130,6 +130,11 @@ saved with the analysis.
 - Works best when people are seen **whole** and at least ~50 pixels tall. The
   text prompt (default `person`) can be narrowed, e.g. `volleyball player`, so
   that spectators are not tracked.
+- Clips of up to 6,000 frames (about 3 minutes at 30 fps). SAM 3.1's state
+  grows with every frame, by about 19 MB with 20 people: a B300 has room to
+  spare, an 80 GB GPU fits about 2,500 frames. A clip too long for the GPU it
+  lands on stops within the first minutes, with the reason, rather than near
+  the end.
 - Depth from one camera is uncertain: distances and speeds are estimates, best
   compared between people of the same clip. Absolute size comes from SAM 3D
   Body's human prior, so unusually tall or short people are pulled towards
