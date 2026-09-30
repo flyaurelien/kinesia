@@ -19,11 +19,10 @@ export type RunStatus = {
   message?: string;
   stage?: string | null;
   progress?: { done: number; total: number } | null;
-  job?: string;
-  pools?: string[];
-  pool?: string | null;
-  node?: string | null;
-  gpu?: string | null;
+  /** Declared by the runner; the default local steps otherwise. */
+  steps?: { key: string; label: string; detail: string }[];
+  /** Where the GPU stages run, as the runner describes it. */
+  location?: string | null;
   error?: string | null;
   started_at?: string;
   submitted_at?: string;

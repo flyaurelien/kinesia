@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { clock, duration, elapsed } from "@/lib/format";
 import { isActive, type RunSummary } from "@/lib/runs";
-import { STEPS, describe, stepIndex, stepProgress } from "@/lib/status";
+import { describe, stepIndex, stepProgress, stepsOf } from "@/lib/status";
 import { Check, Chip, Refresh, Stop, Trash } from "../icons";
 
 type Props = {
@@ -27,6 +27,7 @@ export function Processing({ run, onAction }: Props) {
   const active = isActive(s.state);
   const now = useNow(active);
   const [busy, setBusy] = useState<string | null>(null);
+  const steps = stepsOf(s);
   const current = stepIndex(s);
   const progress = stepProgress(s);
   const summary = describe(run);
@@ -36,7 +37,7 @@ export function Processing({ run, onAction }: Props) {
   const sceneMissing = s.state === "done" && !run.has_scene;
 
   async function act(action: "process" | "cancel" | "delete") {
-    if (action === "cancel" && !window.confirm("Stop the analysis? The cluster job is deleted and its GPU released.")) return;
+    if (action === "cancel" && !window.confirm("Stop the analysis? Its GPU work stops at once.")) return;
     setBusy(action);
     try {
       await onAction(action);
@@ -51,7 +52,7 @@ export function Processing({ run, onAction }: Props) {
         <header className="processing-head">
           <div>
             <h2>{s.state === "failed" ? "The analysis failed" : s.state === "cancelled" ? "Cancelled" : "Processing"}</h2>
-            <p className="muted">{stalled ? "Paused: the local worker stopped. Resume to reconnect to the cluster." : s.message}</p>
+            <p className="muted">{stalled ? "Paused: the worker stopped. Resume to carry on where it left off." : s.message}</p>
           </div>
           <span className={`chip ${summary.tone}`}>
             <span className={`dot${active && !stalled ? " pulse" : ""}`} />
@@ -60,7 +61,7 @@ export function Processing({ run, onAction }: Props) {
         </header>
 
         <ol className="steps">
-          {STEPS.map((step, index) => {
+          {steps.map((step, index) => {
             const state = index < current ? "done" : index === current && active ? "current" : "pending";
             return (
               <li key={step.key} className={`step ${state}`}>
@@ -90,23 +91,18 @@ export function Processing({ run, onAction }: Props) {
       <aside className="processing-side">
         <section className="card side-card">
           <h3>
-            <Chip size={15} /> Cluster GPU
+            <Chip size={15} /> GPU
           </h3>
           <dl className="facts">
-            <dt>Pool</dt>
-            <dd>{s.pool ?? (s.pools?.length ? `${s.pools.join(" → ")}` : "–")}</dd>
-            <dt>Node</dt>
-            <dd>{s.node?.replace("", "") ?? "–"}</dd>
+            <dt>Where</dt>
+            <dd>{s.location ?? "–"}</dd>
             <dt>GPU</dt>
-            <dd>{s.receipts?.gpu ?? (s.node ? "allocated" : "–")}</dd>
+            <dd>{s.receipts?.gpu ?? "–"}</dd>
             <dt>On GPU</dt>
             <dd className="tabular">{onGpuSeconds != null ? clock(onGpuSeconds) : "–"}</dd>
             <dt>Total</dt>
             <dd className="tabular">{totalSeconds != null ? duration(totalSeconds) : "–"}</dd>
           </dl>
-          <p className="faint" style={{ fontSize: 12, margin: "10px 0 0" }}>
-            The job runs as a batch workload: its GPU is released the moment it finishes, fails or is cancelled.
-          </p>
         </section>
 
         <section className="card side-card">
@@ -132,7 +128,7 @@ export function Processing({ run, onAction }: Props) {
           )}
           {active && (
             <button className="btn btn-danger" disabled={busy !== null} onClick={() => act("cancel")}>
-              <Stop /> Cancel and release the GPU
+              <Stop /> Cancel
             </button>
           )}
           {!active && (

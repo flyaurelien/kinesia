@@ -20,14 +20,15 @@ models/*
 !models/.gitkeep
 benchmarks/
 
-# Upstream demo media (the code under vendor/ is kept so the cluster job runs)
+# Upstream demo media (the code under vendor/ is kept: the GPU stages import it)
 vendor/sam-3d-body-main/assets/
 vendor/sam-3d-body-main/notebook/
 # Optional external runtime, not part of Kinesia
 vendor/sam3d-objects-mlx/
 
-# Personal cluster settings (the job scheduler project, UID, volume paths)
-/cluster/config.env
+# Local settings and private extensions (see local.env.example)
+/local.env
+/private/
 
 # Local notes and scratch files, never published
 /PROJECT.md

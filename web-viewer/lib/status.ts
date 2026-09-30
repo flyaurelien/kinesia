@@ -4,43 +4,30 @@ export type Tone = "ok" | "busy" | "warn" | "bad" | "idle";
 
 export type Step = { key: string; label: string; detail: string };
 
-/** The steps of an analysis, in order, as shown on the processing screen. */
+/** The steps of an analysis on this machine; a runner can declare others in `status.steps`. */
 export const STEPS: Step[] = [
   { key: "preparing", label: "Prepare", detail: "Normalize the video (frame rate, size, rotation)" },
-  { key: "uploading", label: "Upload", detail: "Send the video to the remote GPU server" },
-  { key: "queued", label: "GPU", detail: "Wait for a free GPU" },
   { key: "tracking", label: "Track people", detail: "SAM 3.1 follows everyone through the video" },
   { key: "camera", label: "Camera", detail: "Estimate the lens's focal length from the picture (MoGe-2)" },
   { key: "bodies", label: "Bodies", detail: "SAM 3D Body reconstructs each person in 3D" },
-  { key: "downloading", label: "Download", detail: "Bring the results back; the GPU is released" },
   { key: "building", label: "3D scene", detail: "Clean and link identities, smooth motion, ground the feet" },
 ];
 
-/** Index of the step an analysis is currently in (STEPS.length when done). */
+export function stepsOf(status: RunStatus): Step[] {
+  return status.steps?.length ? status.steps : STEPS;
+}
+
+/** Index of the step an analysis is currently in (the number of steps when done). */
 export function stepIndex(status: RunStatus): number {
-  switch (status.state) {
-    case "new":
-    case "preparing":
-      return 0;
-    case "uploading":
-      return 1;
-    case "queued":
-      return 2;
-    case "running": {
-      const stage = status.stage ?? "";
-      if (stage === "bodies" || stage === "packing") return stage === "packing" ? 6 : 5;
-      if (stage === "camera") return 4;
-      return 3;
-    }
-    case "downloading":
-      return 6;
-    case "building":
-      return 7;
-    case "done":
-      return STEPS.length;
-    default:
-      return -1;
-  }
+  const steps = stepsOf(status);
+  if (status.state === "done") return steps.length;
+  if (status.state === "new") return 0;
+  // While the GPU stages run, the stage names the step; otherwise the state does.
+  const stage = status.stage === "packing" ? "bodies" : status.stage; // packing closes the GPU work
+  const key = status.state === "running" ? stage ?? "tracking" : status.state;
+  const index = steps.findIndex((step) => step.key === key);
+  if (index >= 0) return index;
+  return status.state === "running" ? steps.findIndex((step) => step.key === "tracking") : -1;
 }
 
 export function stepProgress(status: RunStatus): number | null {
@@ -62,8 +49,7 @@ export function describe(run: Pick<RunSummary, "status" | "worker_alive">): { la
       return { label: "Not started", tone: "idle" };
     default: {
       if (!run.worker_alive) return { label: "Paused", tone: "warn" };
-      const index = stepIndex(s);
-      const step = STEPS[index];
+      const step = stepsOf(s)[stepIndex(s)];
       const progress = stepProgress(s);
       const pct = progress != null && s.state === "running" ? ` ${Math.round(progress * 100)}%` : "";
       return { label: `${step?.label ?? "Working"}${pct}`, tone: s.state === "queued" ? "warn" : "busy" };

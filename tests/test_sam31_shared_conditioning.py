@@ -57,7 +57,7 @@ class SharedConditioningTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sys.path.insert(0, SOURCE)
-        from kinesia.remote.tracking import keep_shared_conditioning
+        from kinesia.inference.tracking import keep_shared_conditioning
         from sam3.model.video_tracking_multiplex_demo import Sam3VideoTrackingMultiplexDemo
 
         keep_shared_conditioning()

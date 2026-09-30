@@ -107,13 +107,17 @@ def keep_shared_conditioning() -> bool:
     return True
 
 
-def build_predictor(checkpoint: str, source: str, *, max_objects: int):
-    """Load the official multiplex video predictor on the GPU."""
+def build_predictor(checkpoint: str, source: str | None, *, max_objects: int):
+    """Load the official multiplex video predictor on the GPU.
+
+    ``source`` is a facebookresearch/sam3 checkout, when the ``sam3`` package
+    is not installed in the environment.
+    """
     import torch
 
     if not torch.cuda.is_available():
         raise RuntimeError("SAM 3.1 video tracking needs a CUDA GPU")
-    if source not in sys.path:
+    if source and source not in sys.path:
         sys.path.insert(0, source)
     from sam3.model_builder import build_sam3_multiplex_video_predictor
 

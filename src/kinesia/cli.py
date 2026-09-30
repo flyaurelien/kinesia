@@ -1,10 +1,10 @@
 """``kinesia`` command line: create, process and inspect analyses.
 
     kinesia new input/match.mp4 --name "Sunday match"   # prints the run id
-    kinesia process <run-id>                           # cluster GPU, then the 3D scene
-    kinesia cancel <run-id>                            # deletes the job, frees the GPU
-    kinesia scene <run-id>                             # rebuild the 3D scene locally
-    kinesia cluster check | setup
+    kinesia process <run-id>                           # GPU stages, then the 3D scene
+    kinesia cancel <run-id>                            # stop it (the GPU is freed)
+    kinesia scene <run-id>                             # rebuild the 3D scene
+    kinesia doctor [--json]                            # can analyses run here?
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .paths import run_dir, runs_root
+from .settings import load_local_env
 
 
 def slug(text: str) -> str:
@@ -61,12 +62,13 @@ def main(argv: list[str] | None = None) -> int:
     for command in ("process", "cancel", "status", "scene"):
         sub.add_parser(command).add_argument("run_id")
 
-    cluster = sub.add_parser("cluster", help="cluster access and one-time setup")
-    cluster.add_argument("action", choices=["check", "setup"])
+    doctor = sub.add_parser("doctor", help="check the GPU and the model files")
+    doctor.add_argument("--json", action="store_true")
 
     sub.add_parser("list", help="list analyses")
 
     args = parser.parse_args(argv)
+    load_local_env()
 
     if args.command == "new":
         request = {k: v for k, v in {"max_people": args.max_people, "prompt": args.prompt}.items() if v}
@@ -89,29 +91,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"process", "cancel"}:
         import signal
 
-        from .cluster.orchestrate import Orchestrator
+        from .pipeline import runner_class
 
-        # Stopping the worker must still run its cleanup (it deletes transfer pods).
+        # Stopping the worker must still run its cleanup (it stops the GPU job).
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
-        orchestrator = Orchestrator(args.run_id)
+        runner = runner_class()(args.run_id)
         if args.command == "cancel":
-            orchestrator.cancel()
+            runner.cancel()
         else:
-            orchestrator.process()
+            runner.process()
         return 0
-    if args.command == "cluster":
-        from .cluster.config import load_config
-        from .cluster.kube import Cluster
-        from .cluster.remote import setup
-        from .cluster.transfer import io_pod
+    if args.command == "doctor":
+        from .pipeline import runner_class
 
-        cluster_ = Cluster(load_config())
-        print(f"the job scheduler user: {cluster_.check_access()}")
-        if args.action == "setup":
-            with io_pod(cluster_) as pod:
-                print(setup(cluster_, pod)[-1500:])
-        return 0
+        report = runner_class().check()
+        print(json.dumps(report) if args.json else f"{'ok' if report['ok'] else 'not ready'}: {report['label']} ({report['detail']})")
+        return 0 if report["ok"] else 1
     return 1
 
 

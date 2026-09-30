@@ -16,7 +16,7 @@ export async function GET() {
 
 /**
  * Upload a video and start its analysis. The body is the raw file; options
- * travel in the query string (`name`, `filename`, `max_people`, `pools`).
+ * travel in the query string (`name`, `filename`, `max_people`).
  */
 export async function POST(request: Request) {
   const url = new URL(request.url);
@@ -27,9 +27,8 @@ export async function POST(request: Request) {
   if (!request.body) return Response.json({ error: "Empty upload." }, { status: 400 });
   const name = (url.searchParams.get("name") ?? "").trim() || filename.replace(/\.[^.]+$/, "");
   const maxPeople = Number(url.searchParams.get("max_people") ?? "") || undefined;
-  const pools = (url.searchParams.get("pools") ?? "").split(",").map((p) => p.trim()).filter(Boolean);
 
-  const { id, sourcePath } = createRun({ name, originalName: filename, maxPeople, gpuPools: pools });
+  const { id, sourcePath } = createRun({ name, originalName: filename, maxPeople });
   try {
     await pipeline(Readable.fromWeb(request.body as never), fs.createWriteStream(sourcePath));
   } catch (error) {

@@ -77,7 +77,7 @@ function stamp(date: Date): string {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
-export type NewRunOptions = { name: string; originalName: string; maxPeople?: number; gpuPools?: string[] };
+export type NewRunOptions = { name: string; originalName: string; maxPeople?: number };
 
 /** Create the folder of a new analysis; the caller streams the video into `sourcePath`. */
 export function createRun(options: NewRunOptions): { id: string; sourcePath: string } {
@@ -89,7 +89,6 @@ export function createRun(options: NewRunOptions): { id: string; sourcePath: str
   const source = `source${extension}`;
   const request: Record<string, unknown> = {};
   if (options.maxPeople) request.max_people = options.maxPeople;
-  if (options.gpuPools?.length) request.gpu_pools = options.gpuPools;
   fs.writeFileSync(
     path.join(dir, "run.json"),
     JSON.stringify({ id, name: options.name, source, original_name: options.originalName, created_at: now.toISOString(), request }, null, 1),

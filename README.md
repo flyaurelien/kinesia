@@ -36,8 +36,7 @@ through the original camera.
 
 **Measured on this clip**: 434 frames, focal length 1338 px estimated from the
 image, heights between 1.58 and 1.78 m. On one NVIDIA B300, tracking took 92 s
-and body reconstruction 104 s; the GPU was held for 4 min 55 s in all and
-released when the job ended. The 3D scene was then built locally in 15 s.
+and body reconstruction 104 s; the 3D scene was then built in 15 s.
 
 The viewer shows when each person is on screen (presence lanes), and gives
 distance, speed, jumps and joint angles per person, with CSV and JSON export.
@@ -46,41 +45,39 @@ distance, speed, jumps and joint angles per person, with CSV and JSON export.
 
 ```mermaid
 flowchart LR
-    A[Video] --> B["Normalize<br/>(ffmpeg, local)"]
-    B --> C["remote GPU batch job<br/>SAM 3.1 tracking · lens · SAM 3D Body"]
-    C --> D["Download<br/>the GPU is released"]
-    D --> E["Scene build (local)<br/>floor · identities · motion · metrics"]
-    E --> F["3D viewer"]
+    A[Video] --> B["Normalize<br/>(ffmpeg)"]
+    B --> C["GPU stages<br/>SAM 3.1 tracking · lens · SAM 3D Body"]
+    C --> D["Scene build (CPU)<br/>floor · identities · motion · metrics"]
+    D --> E["3D viewer"]
 ```
 
-Inference runs on the **remote GPU server** (Kubernetes + the job scheduler) as a *batch*
-workload: its pod ends with the computation, so the GPU is released — and the
-billing stops — as soon as the results are written, if anything fails, or the
-moment you cancel. A hard timeout bounds a job that hangs. Jobs are resumable
-stage by stage, so a pre-empted job restarts where it stopped. Waiting for a
-GPU costs nothing; when the preferred pool (B300) is full for four minutes the
-job moves to the next one (A100).
-
-The scene build needs only the CPU and runs on your machine after the download.
+The GPU stages run on your NVIDIA GPU, in a child process of the analysis.
+Each stage is saved as soon as it completes, so an interrupted analysis resumes
+where it stopped, and cancelling stops the GPU work at once. The scene build
+needs only the CPU.
 
 ## Setup
 
-**Cluster access** (network access): install `kubectl` and the the job scheduler CLI,
-then `scheduler login`. Copy `cluster/config.env.example` to `cluster/config.env`
-(git-ignored) and fill in your the job scheduler project, UID/GID, volume claim, and the
-paths of the SAM 3.1 checkpoint (`facebook/sam3.1`, `sam3.1_multiplex.pt`), a
-clean checkout of `facebookresearch/sam3` and SAM 3D Body
-(`facebook/sam-3d-body-dinov3`) on the lab volume. Then, once (this also puts
-MoGe-2 and its public weights on the volume):
+**Requirements:** Linux with an NVIDIA GPU and its CUDA driver, with about
+32 GB of GPU memory for a short clip (see [Capture advice](#capture-advice-and-limits)
+for longer ones); [`uv`](https://docs.astral.sh/uv/), `ffmpeg`/`ffprobe` on the
+`PATH`, and Node.js 24 for the web app.
+
+SAM 3.1 and SAM 3D Body are gated: accept their licenses on Hugging Face
+([facebook/sam3.1](https://huggingface.co/facebook/sam3.1),
+[facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3))
+and log in with `hf auth login`. Then, once:
 
 ```bash
-uv sync --frozen --no-editable                    # local Python environment
-uv run --no-sync python scripts/install_models.py # SAM 3D Body body model + DINOv3 code
-uv run --no-sync kinesia cluster setup            # Python packages on the volume (CPU pod)
+uv sync --frozen --no-editable                     # Python environment
+bash scripts/install_gpu.sh                        # SAM 3.1, SAM 3D Body and MoGe-2 packages
+uv run --no-sync python scripts/install_models.py  # model weights into models/
+uv run --no-sync kinesia doctor                    # checks the GPU and the model files
 ```
 
-**Local tools:** [`uv`](https://docs.astral.sh/uv/), `ffmpeg`/`ffprobe` on the
-`PATH`, and Node.js 24.
+Model files can live elsewhere: set their paths in `local.env` (see
+`local.env.example`). Without a GPU, the web app still builds and plays scenes
+made on another machine (`install_models.py --scene-only`).
 
 ## Run
 
@@ -89,21 +86,20 @@ uv run --no-sync kinesia cluster setup            # Python packages on the volum
 ```
 
 Open <http://127.0.0.1:4001/>, choose **New analysis**, drop a video. The page
-follows the job through its steps (upload, GPU, tracking, camera, bodies,
-download, 3D scene) and opens the viewer when it is ready. Cancelling deletes
-the cluster job immediately.
+follows the analysis through its steps (prepare, tracking, camera, bodies, 3D
+scene) and opens the viewer when it is ready.
 
 Everything is also available from the command line:
 
 ```bash
 uv run --no-sync kinesia new input/match.mp4 --name "Sunday match" [--prompt "football player"]
-uv run --no-sync kinesia process <run-id>                           # GPU job, download, scene
-uv run --no-sync kinesia cancel <run-id>                            # delete the job, free the GPU
-uv run --no-sync kinesia scene <run-id>                             # rebuild the 3D scene locally
+uv run --no-sync kinesia process <run-id>                           # GPU stages, then the 3D scene
+uv run --no-sync kinesia cancel <run-id>                            # stop it; the GPU is freed
+uv run --no-sync kinesia scene <run-id>                             # rebuild the 3D scene
 ```
 
 Each analysis lives in `output/<run-id>/`: the normalized `video.mp4`, the raw
-GPU results in `raw/` and the viewer files in `scene/`.
+GPU results in `raw/`, the viewer files in `scene/` and the GPU log in `gpu.log`.
 
 ### Using the viewer
 
@@ -127,10 +123,10 @@ saved with the analysis.
   text prompt (default `person`) can be narrowed, e.g. `basketball player`, so
   that spectators are not tracked.
 - Clips of up to 6,000 frames (about 3 minutes at 30 fps). SAM 3.1's state
-  grows with every frame, by about 19 MB with 20 people: a B300 has room to
-  spare, an 80 GB GPU fits about 2,500 frames. A clip too long for the GPU it
-  lands on stops within the first minutes, with the reason, rather than near
-  the end.
+  grows with every frame, by about 19 MB with 20 people: measured peaks were
+  29 GB of GPU memory for 434 frames with up to 13 people, and 48 GB for 1,261
+  frames with about 20. A clip too long for the GPU stops within the first
+  minutes, with the reason, rather than near the end.
 - Depth from one camera is uncertain: distances and speeds are estimates, best
   compared between people of the same clip. Absolute size comes from SAM 3D
   Body's human prior, so unusually tall or short people are pulled towards
@@ -152,13 +148,13 @@ cd web-viewer && npx tsc --noEmit && npm test && npm run build
 
 ```text
 kinesia/
-  cluster/          GPU job and one-time setup scripts (run inside the pods)
+  scripts/          install_gpu.sh (GPU packages), install_models.py (model weights)
   src/kinesia/
-    cluster/        the job scheduler/kubectl orchestration from this machine
-    remote/         code that runs on the GPU: SAM 3.1 tracking, lens, SAM 3D Body
+    pipeline.py     the steps of an analysis and the runner that carries them out
+    inference/      the GPU stages: SAM 3.1 tracking, lens, SAM 3D Body
     scene/          floor, identities, motion smoothing, metrics, export
   web-viewer/       Next.js app: library, processing status, 3D viewer
-  vendor/           SAM 3D Body code (uploaded to the cluster with each job)
+  vendor/           SAM 3D Body code (the GPU stages import it)
   tests/            backend tests
 ```
 

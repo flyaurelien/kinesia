@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Kinesia: the web app (UI + API) on http://127.0.0.1:4001.
-# Processing runs on the remote GPU server; see cluster/config.env.example.
+# The GPU stages run on this machine (see local.env.example to configure).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

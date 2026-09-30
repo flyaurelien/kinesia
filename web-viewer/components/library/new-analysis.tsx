@@ -5,12 +5,6 @@ import { useRef, useState, type DragEvent } from "react";
 import { bytes } from "@/lib/format";
 import { Close, Upload } from "../icons";
 
-const POOLS: { value: string; label: string; hint: string }[] = [
-  { value: "b300,default", label: "B300, then A100", hint: "Fastest; falls back to the A100 pool when every B300 is busy." },
-  { value: "default,b300", label: "A100 first", hint: "Your guaranteed quota; usually starts right away." },
-  { value: "h100,h200,default", label: "H100 / H200", hint: "Pre-emptible pools; a pre-empted job resumes where it stopped." },
-];
-
 type Props = { onClose: () => void; onCreated: (id: string) => void };
 
 export function NewAnalysis({ onClose, onCreated }: Props) {
@@ -18,7 +12,6 @@ export function NewAnalysis({ onClose, onCreated }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState("");
   const [maxPeople, setMaxPeople] = useState(64);
-  const [pools, setPools] = useState(POOLS[0].value);
   const [over, setOver] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +31,7 @@ export function NewAnalysis({ onClose, onCreated }: Props) {
 
   function start() {
     if (!file) return;
-    const query = new URLSearchParams({ filename: file.name, name: name || file.name, max_people: String(maxPeople), pools });
+    const query = new URLSearchParams({ filename: file.name, name: name || file.name, max_people: String(maxPeople) });
     const request = new XMLHttpRequest();
     request.open("POST", `/api/runs?${query}`);
     request.setRequestHeader("content-type", file.type || "application/octet-stream");
@@ -109,36 +102,23 @@ export function NewAnalysis({ onClose, onCreated }: Props) {
             <input id="run-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Sunday match" />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 12 }}>
-            <div className="field">
-              <label htmlFor="max-people">People to track</label>
-              <input
-                id="max-people"
-                className="input"
-                type="number"
-                min={4}
-                max={128}
-                value={maxPeople}
-                onChange={(e) => setMaxPeople(Math.max(4, Math.min(128, Number(e.target.value) || 64)))}
-              />
-              <span className="hint">At most, at the same time</span>
-            </div>
-            <div className="field">
-              <label htmlFor="pools">GPU</label>
-              <select id="pools" className="input" value={pools} onChange={(e) => setPools(e.target.value)}>
-                {POOLS.map((p) => (
-                  <option key={p.value} value={p.value}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-              <span className="hint">{POOLS.find((p) => p.value === pools)?.hint}</span>
-            </div>
+          <div className="field">
+            <label htmlFor="max-people">People to track</label>
+            <input
+              id="max-people"
+              className="input"
+              type="number"
+              min={4}
+              max={128}
+              value={maxPeople}
+              onChange={(e) => setMaxPeople(Math.max(4, Math.min(128, Number(e.target.value) || 64)))}
+            />
+            <span className="hint">At most, at the same time</span>
           </div>
 
           <p className="faint" style={{ margin: 0, fontSize: 12.5 }}>
-            Tracking and 3D reconstruction run on one remote GPU server GPU as a batch job. The job ends, and
-            the GPU is released, as soon as the results are ready — or immediately if you cancel.
+            Tracking and 3D reconstruction run on the GPU. Each step is shown as it happens, and you can
+            cancel at any time.
           </p>
 
           {busy && (

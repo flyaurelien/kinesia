@@ -1,14 +1,18 @@
-"""Put the local model files in place.
+"""Put the model files in ``models/``.
 
-Inference runs on the cluster, where SAM 3.1 and SAM 3D Body already live.
-This machine only needs:
+* SAM 3.1 (``facebook/sam3.1``, ``sam3.1_multiplex.pt``): video tracking;
+* SAM 3D Body (``facebook/sam-3d-body-dinov3``): the 3D bodies, and the
+  Momentum Human Rig body model the 3D scene is built with;
+* the DINOv3 source (Torch Hub), where SAM 3D Body loads its backbone code from;
+* MoGe-2 (``Ruicheng/moge-2-vitl-normal``): the lens's focal length.
 
-* SAM 3D Body (``facebook/sam-3d-body-dinov3``): its Momentum Human Rig body
-  model and keypoint regressor are used to build the 3D scene locally;
-* the DINOv3 source (Torch Hub), uploaded once to the cluster, where SAM 3D
-  Body loads its backbone code from.
+SAM 3.1 and SAM 3D Body are gated on Hugging Face: accept their licenses on
+the model pages, then log in (``hf auth login``) before running this.
 
-    uv run python scripts/install_models.py [--offline]
+    uv run --no-sync python scripts/install_models.py [--offline] [--scene-only]
+
+``--scene-only`` fetches just what building and viewing scenes needs (SAM 3D
+Body's body model), for a machine without a CUDA GPU.
 """
 
 from __future__ import annotations
@@ -18,13 +22,23 @@ import os
 import shutil
 from pathlib import Path
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODELS_ROOT = PROJECT_ROOT / "models"
 BODY = MODELS_ROOT / "sam-3d-body-dinov3"
 BODY_FILES = ("model_config.yaml", "model.ckpt", "assets/mhr_model.pt")
 DINOV3 = MODELS_ROOT / "torch" / "hub" / "facebookresearch_dinov3_main"
+SAM31 = MODELS_ROOT / "sam3.1"
+MOGE = MODELS_ROOT / "moge-2-vitl-normal"
+
+
+def install_file(repo_id: str, filename: str, folder: Path, offline: bool, label: str) -> None:
+    if (folder / filename).is_file():
+        print(f"ready: {label} -> {folder / filename}")
+        return
+    hf_hub_download(repo_id=repo_id, filename=filename, local_dir=folder, local_files_only=offline)
+    print(f"installed: {label} -> {folder / filename}")
 
 
 def install_body(offline: bool) -> None:
@@ -64,10 +78,14 @@ def install_dinov3() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--offline", action="store_true", help="only reuse files already downloaded")
+    parser.add_argument("--scene-only", action="store_true", help="skip the GPU-only models")
     args = parser.parse_args()
     MODELS_ROOT.mkdir(parents=True, exist_ok=True)
     install_body(args.offline)
-    install_dinov3()
+    if not args.scene_only:
+        install_file("facebook/sam3.1", "sam3.1_multiplex.pt", SAM31, args.offline, "SAM 3.1")
+        install_file("Ruicheng/moge-2-vitl-normal", "model.pt", MOGE, args.offline, "MoGe-2")
+        install_dinov3()
     return 0
 
 

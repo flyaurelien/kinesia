@@ -20,16 +20,16 @@ export async function PATCH(request: Request, { params }: Context) {
   return Response.json(readRun(params.id));
 }
 
-/** Delete an analysis; a job that may still be on the cluster is cancelled first (freeing its GPU). */
+/** Delete an analysis; GPU work that may still be running is cancelled first. */
 export async function DELETE(_request: Request, { params }: Context) {
   const run = readRun(params.id);
   if (!run) return Response.json({ error: "Not found" }, { status: 404 });
-  const { state, job } = run.status;
-  // A local failure (lost network, failed download) can leave the job running.
-  if (isActive(state) || (state === "failed" && job)) {
+  const { state, gpu_started_at: started, gpu_finished_at: finished } = run.status;
+  // A failure on this side (a lost connection, a crash) can leave GPU work running.
+  if (isActive(state) || (state === "failed" && started && !finished)) {
     const result = await runCli(["cancel", params.id], CANCEL_TIMEOUT_MS);
     if (result.code !== 0) {
-      return Response.json({ error: `Could not cancel the cluster job:\n${result.output.slice(-800)}` }, { status: 502 });
+      return Response.json({ error: `Could not cancel the analysis:\n${result.output.slice(-800)}` }, { status: 502 });
     }
   }
   deleteRun(params.id);

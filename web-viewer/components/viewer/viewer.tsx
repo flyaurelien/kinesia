@@ -9,7 +9,7 @@ import { useScene } from "@/lib/scene/load";
 import type { Edits } from "@/lib/scene/types";
 import { PlaybackClock } from "@/lib/viewer/clock";
 import { Back, Body, Bones, Camera, Grid, Orbit, Swap, Tag, Target, Trail, Trash, Video } from "../icons";
-import { ClusterBadge } from "../topbar";
+import { GpuBadge } from "../topbar";
 import { MotionPanel, exportAllMotion } from "./motion-panel";
 import { PeoplePanel } from "./people-panel";
 import { Stage, type CameraMode, type Display } from "./stage";
@@ -126,7 +126,7 @@ export function Viewer({ run, onRenamed, onDelete }: Props) {
           </span>
         )}
         <div className="topbar-spacer" />
-        <ClusterBadge />
+        <GpuBadge />
         <button className="icon-btn" onClick={onDelete} title="Delete analysis">
           <Trash size={16} />
         </button>

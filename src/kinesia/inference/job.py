@@ -1,11 +1,12 @@
-"""One analysis on the GPU, run as a batch job that ends (and frees the GPU) when done.
+"""The GPU stages of one analysis: people tracking, the lens, 3D bodies.
 
-    python -m kinesia.remote.job --run-dir /scratch/.../kinesia/runs/<id>
+    python -m kinesia.inference.job --run-dir output/<run-id>
 
-Stages are resumable: a stage whose output already exists is skipped, so a job
-preempted on a shared GPU and restarted by the scheduler carries on. Progress
-is printed as ``KINESIA {json}`` lines, which the local app reads from the pod
-log.
+Reads ``video.mp4`` and ``request.json`` from the run folder and writes the
+results to ``raw/``. Stages are resumable: a stage whose output already exists
+is skipped, so an interrupted job carries on where it stopped. Progress is
+printed as ``KINESIA {json}`` lines, which the runner turns into the status the
+app shows.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ class Progress:
             emit("progress", stage=self.stage, done=done, total=total)
 
 
-def run(run_dir: Path, *, sam31_checkpoint: str, sam3_source: str, body_dir: str) -> None:
+def run(run_dir: Path, *, sam31_checkpoint: str, sam3_source: str | None, body_dir: str, package: bool = False) -> None:
     import numpy as np
 
     request = json.loads((run_dir / "request.json").read_text())
@@ -139,25 +140,30 @@ def run(run_dir: Path, *, sam31_checkpoint: str, sam3_source: str, body_dir: str
         torch.cuda.empty_cache()
         emit("stage", stage="bodies", state="done", **result)
 
-    # 4. Package everything the local app downloads.
+    if not package:
+        emit("done")
+        return
+
+    # 4. For a runner that computes elsewhere: one archive to bring back.
     emit("stage", stage="packing", state="running")
-    package = run_dir / "out.tar"
+    bundle = run_dir / "out.tar"
     partial = run_dir / "out.tar.part"
     with tarfile.open(partial, "w") as archive:
         for name in ("tracks.jsonl.gz", "camera.json", "bodies.npz", "receipts.json"):
             path = raw / name
             if path.is_file():
                 archive.add(path, arcname=f"raw/{name}")
-    partial.replace(package)
-    emit("done", package=package.name, size=package.stat().st_size)
+    partial.replace(bundle)
+    emit("done", package=bundle.name, size=bundle.stat().st_size)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--sam31-checkpoint", default=os.environ.get("SAM31_CHECKPOINT"))
-    parser.add_argument("--sam3-source", default=os.environ.get("SAM3_SOURCE"))
+    parser.add_argument("--sam3-source", default=os.environ.get("SAM3_SOURCE") or None)
     parser.add_argument("--body-dir", default=os.environ.get("SAM3D_BODY_DIR"))
+    parser.add_argument("--package", action="store_true", help="also write out.tar with the results")
     args = parser.parse_args()
     try:
         run(
@@ -165,6 +171,7 @@ def main() -> None:
             sam31_checkpoint=args.sam31_checkpoint,
             sam3_source=args.sam3_source,
             body_dir=args.body_dir,
+            package=args.package,
         )
     except Exception as error:
         emit("error", message=f"{type(error).__name__}: {error}")

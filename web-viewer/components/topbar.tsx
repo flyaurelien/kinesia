@@ -3,17 +3,18 @@
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 
-type ClusterState = { ok: boolean; user?: string; message: string };
+type GpuState = { ok: boolean; label: string; detail: string };
 
-export function ClusterBadge() {
-  const [state, setState] = useState<ClusterState | null>(null);
+/** Whether analyses can run here: the GPU (or the configured runner) and the model files. */
+export function GpuBadge() {
+  const [state, setState] = useState<GpuState | null>(null);
   useEffect(() => {
     let alive = true;
     const load = () =>
-      fetch("/api/cluster")
+      fetch("/api/gpu")
         .then((r) => r.json())
-        .then((value: ClusterState) => alive && setState(value))
-        .catch(() => alive && setState({ ok: false, message: "Cluster status unavailable" }));
+        .then((value: GpuState) => alive && setState(value))
+        .catch(() => alive && setState({ ok: false, label: "GPU status unavailable", detail: "" }));
     load();
     const timer = setInterval(load, 60_000);
     return () => {
@@ -24,14 +25,14 @@ export function ClusterBadge() {
   if (!state) {
     return (
       <span className="chip">
-        <span className="dot pulse" /> Checking cluster
+        <span className="dot pulse" /> Checking the GPU
       </span>
     );
   }
   return (
-    <span className={`chip ${state.ok ? "ok" : "warn"}`} title={state.message}>
+    <span className={`chip ${state.ok ? "ok" : "warn"}`} title={state.detail}>
       <span className="dot" />
-      {state.ok ? "remote GPU server connected" : "Cluster offline"}
+      {state.label}
     </span>
   );
 }
@@ -45,7 +46,7 @@ export function Topbar({ children }: { children?: ReactNode }) {
       </Link>
       {children}
       <div className="topbar-spacer" />
-      <ClusterBadge />
+      <GpuBadge />
     </header>
   );
 }
