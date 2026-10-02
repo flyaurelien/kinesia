@@ -9,11 +9,13 @@ Steps, for each person (a chain of joined masklets):
    short gaps are filled by interpolation, single-frame flips are removed and
    the rest is smoothed with a zero-lag adaptive filter.
 3. **Placement.** The pelvis is placed in the world (camera rotation and
-   depth-to-floor correction applied) and its trajectory and orientation are
-   smoothed the same way.
-4. **Feet.** Planted feet are detected against the floor and pinned in place,
-   which removes foot skating; in the air nothing is pinned, so jumps keep
-   their height.
+   depth-to-floor correction applied) and its orientation smoothed the same
+   way.
+4. **Trajectory.** Planted feet are detected against the floor, and the
+   pelvis trajectory is solved once for the whole segment under the physics
+   of contact and flight (see ``trajectory``): planted feet stay put on the
+   floor, a body in the air follows a free-fall arc, and the image of the
+   person stays where the video shows it.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import filters, quat
+from . import filters, quat, trajectory
 from .body_model import BodyModel
 from .ground import smooth_scales
 from .keypoints import LEFT_FOOT, RIGHT_FOOT
@@ -34,15 +36,8 @@ FILL_GAP_SECONDS = 0.35  # shorter absences are interpolated, longer ones split 
 MIN_SEGMENT_FRAMES = 3  # isolated glimpses shorter than this carry more noise than motion
 POSE_FILTER = dict(min_cutoff=2.5, beta=0.4)
 ROOT_TURN_FILTER = dict(min_cutoff=2.0, beta=0.5)
-HORIZONTAL_ACCEL = 5.0  # m/s^2 a player can change pace or direction with
-VERTICAL_ACCEL = 14.0  # m/s^2: jumps and landings (gravity alone is 9.8)
-LATERAL_NOISE = 0.002  # metres of sideways error per metre of distance (~3 px)
-DEPTH_NOISE = 0.25  # metres of error along the camera ray, plus 2% of the distance
-HEIGHT_NOISE = 0.04
 CONTACT_HEIGHT = 0.06  # metres above the floor
 CONTACT_SPEED = 0.9  # m/s: a planted foot barely moves
-MAX_CORRECTION = 0.35  # metres of horizontal pinning at most
-CORRECTION_DECAY_SECONDS = 0.6
 
 
 @dataclass
@@ -93,26 +88,6 @@ def _placement(camera: np.ndarray, cam_t: np.ndarray, depth: np.ndarray, world_r
     cam_rc = quat.rotate(camera, depth[:, None] * cam_t)  # rotation-compensated camera coords
     translation = (cam_rc - world_origin) @ world_rotation.T
     return np.concatenate([translation, rotation, (depth / 100.0)[:, None]], axis=1)
-
-
-def smooth_trajectory(positions: np.ndarray, camera: np.ndarray, measured: np.ndarray, rate: float) -> np.ndarray:
-    """Zero-lag trajectory smoothing that knows depth is the uncertain direction.
-
-    One camera sees sideways motion precisely but distance poorly, so the
-    horizontal measurement noise is stretched along each frame's viewing ray.
-    Interpolated frames carry no information and are left to the motion model.
-    """
-    offset = positions[:, :2] - camera[:2]
-    distance = np.linalg.norm(offset, axis=1).clip(0.5)
-    ray = offset / distance[:, None]
-    lateral = (LATERAL_NOISE * distance) ** 2
-    depth = (DEPTH_NOISE + 0.02 * distance) ** 2
-    noise = lateral[:, None, None] * np.eye(2) + (depth - lateral)[:, None, None] * ray[:, :, None] * ray[:, None, :]
-    noise[~measured] = np.eye(2) * 1e6
-    horizontal = filters.kalman_smooth(positions[:, :2], rate, HORIZONTAL_ACCEL, noise)
-    vertical_noise = np.where(measured, HEIGHT_NOISE**2, 1e6)[:, None, None]
-    vertical = filters.kalman_smooth(positions[:, 2:3], rate, VERTICAL_ACCEL, vertical_noise)
-    return np.concatenate([horizontal, vertical], axis=1)
 
 
 def _fill(frames: np.ndarray, values: np.ndarray, full: np.ndarray, rotations: bool) -> np.ndarray:
@@ -168,38 +143,6 @@ def _contacts(feet_world: np.ndarray, rate: float) -> np.ndarray:
     return planted
 
 
-def _pin_feet(pelvis: np.ndarray, feet_world: np.ndarray, planted: np.ndarray, rate: float) -> tuple[np.ndarray, np.ndarray]:
-    """Horizontal/vertical pelvis offsets that keep planted feet still (N, 3)."""
-    n = len(pelvis)
-    offset = np.zeros((n, 3))
-    anchors: list[np.ndarray | None] = [None, None]
-    decay = np.exp(-1.0 / (CORRECTION_DECAY_SECONDS * rate))
-    current = np.zeros(3)
-    for t in range(n):
-        centres = [feet_world[side][t].mean(axis=0) for side in range(2)]
-        for side in range(2):
-            if planted[t, side]:
-                if anchors[side] is None:  # capture where the corrected foot is now
-                    anchors[side] = centres[side] + current
-            else:
-                anchors[side] = None
-        active = [side for side in range(2) if anchors[side] is not None]
-        if active:
-            wanted = np.mean([anchors[s][:2] - centres[s][:2] for s in active], axis=0)
-            current[:2] = wanted
-            lowest = min(float(feet_world[s][t][:, 2].min()) for s in active)
-            current[2] = float(np.clip(-lowest, -0.1, 0.1))
-        else:
-            current = current * decay
-        norm = np.linalg.norm(current[:2])
-        if norm > MAX_CORRECTION:
-            current[:2] *= MAX_CORRECTION / norm
-            for s in active:  # re-anchor so the clamp does not accumulate
-                anchors[s] = centres[s] + current
-        offset[t] = current
-    return filters.smooth(offset, rate, min_cutoff=3.0, beta=1.0), planted
-
-
 def animate(
     person: PersonFrames,
     model: BodyModel,
@@ -244,18 +187,24 @@ def animate(
         pelvis_q, _ = filters.despike_quaternions(pelvis_q[:, None], np.deg2rad(35), np.deg2rad(12))
         pelvis_q = filters.smooth_quaternions(pelvis_q[:, 0], rate, **ROOT_TURN_FILTER)
         pelvis_t, spikes = filters.despike(pelvis_t, window=5, factor=5.0, floor=0.4)
-        pelvis_t = smooth_trajectory(pelvis_t, camera_position, measured & ~spikes, rate)
+        trusted = measured & ~spikes
+        first = trajectory.solve(pelvis_t, camera_position, trusted, rate)
         pelvis_s = np.exp(filters.smooth(np.log(pelvis_s), rate, min_cutoff=0.5, beta=0.0))
-        pelvis = np.concatenate([pelvis_t, pelvis_q, pelvis_s], axis=1)
+        pelvis = np.concatenate([first, pelvis_q, pelvis_s], axis=1)
 
+        # Feet are judged on this first, unconstrained pass; then the
+        # trajectory is solved again under contact and flight.
         states = _world_joints(model, pelvis, lt, lq, joint_scales)
         keypoints = model.keypoints(states, rest)
         feet = [keypoints[:, list(LEFT_FOOT)], keypoints[:, list(RIGHT_FOOT)]]
         planted = _contacts(feet, rate)
-        offset, planted = _pin_feet(pelvis, feet, planted, rate)
-        pelvis[:, :3] += offset
-        states[:, :, :3] += offset[:, None, :]
-        keypoints = keypoints + offset[:, None, :]
+        body = trajectory.Body.from_keypoints(keypoints, first)
+        airborne = ~planted.any(axis=1) & ((body.soles[..., 2] + first[None, :, 2]).min(axis=0) > CONTACT_HEIGHT)
+        final = trajectory.solve(pelvis_t, camera_position, trusted, rate, body, planted, airborne)
+        shift = final - first
+        pelvis[:, :3] = final
+        states[:, :, :3] += shift[:, None, :]
+        keypoints = keypoints + shift[:, None, :]
 
         out_frames.append(full)
         out_measured.append(measured)

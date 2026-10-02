@@ -35,6 +35,17 @@ def walk(n: int, speed: float, depth: float = 15.0) -> np.ndarray:
 
 
 class PiecesTest(unittest.TestCase):
+    def test_a_box_that_shrinks_for_a_moment_is_a_partial_view(self):
+        rows, points = masklet(walk(80, speed=1.0))
+        box = rows["box"]
+        hidden = slice(40, 46)  # someone in front: only the head and shoulders show
+        box[hidden, 3] = box[hidden, 1] + 0.25 * (box[hidden, 3] - box[hidden, 1])
+        crouch = slice(60, 70)  # bending down: shorter but wider
+        box[crouch, 1] += 0.4 * (box[crouch, 3] - box[crouch, 1])
+        box[crouch, 2] += 0.3 * (box[crouch, 2] - box[crouch, 0])
+        partial = build._partial_views(rows, np.zeros(80, dtype=np.int64), RATE)
+        self.assertEqual(np.flatnonzero(partial).tolist(), list(range(40, 46)))
+
     def test_a_sprinter_is_one_piece(self):
         rows, points = masklet(walk(80, speed=9.0))
         piece = build._pieces(rows, points, RATE)

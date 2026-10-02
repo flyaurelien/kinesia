@@ -34,6 +34,7 @@ MAX_ASPECT = 2.5  # box width / height: anything wider is a bench, a banner or a
 TELEPORT_SPEED = 15.0  # m/s; a masklet moving faster between sightings has changed person
 SPRINT_HEIGHTS = 7.0  # the same across the picture, in person heights per second (crouched sprint)
 OFF_FLOOR_SHARE = 0.3  # pieces whose feet miss the floor this often are not on it
+SHRINK = 0.6  # a box this much smaller than usual around that moment shows only part of its person
 # Views that tell who someone is: the person is this tall, shows most of their
 # box and is not hidden behind someone else.
 SEEN_HEIGHT = 60  # pixels
@@ -101,6 +102,26 @@ def _pieces(rows: dict, points_rc: np.ndarray, rate: float) -> np.ndarray:
         piece[index] = ids
         next_id = int(ids[-1]) + 1 if len(ids) else next_id
     return piece
+
+
+def _partial_views(rows: dict, piece: np.ndarray, rate: float) -> np.ndarray:
+    """Rows whose box suddenly shrinks well below its size around that moment.
+
+    When someone passes in front, a mask can cover only the head and
+    shoulders for a moment; the body model then guesses the rest of the body,
+    and its distance with it (one such guess put a player 1.3 m away). Those
+    rows still tell who the person is, but their bodies are left out of the
+    motion, which fills short gaps.
+    """
+    box = rows["box"].astype(np.float64)
+    diagonal = np.hypot(box[:, 2] - box[:, 0], box[:, 3] - box[:, 1])
+    partial = np.zeros(len(piece), dtype=bool)
+    window = max(3, int(round(2 * rate)) | 1)
+    for p in np.unique(piece[piece >= 0]):
+        index = np.flatnonzero(piece == p)
+        index = index[np.argsort(rows["frame"][index], kind="stable")]
+        partial[index] = diagonal[index] < SHRINK * filters.rolling_median(diagonal[index], window)
+    return partial
 
 
 def _runs(flags: np.ndarray) -> list[tuple[int, int]]:
@@ -225,9 +246,10 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     found = identify(Observations(rows["frame"], rows["track"], piece, position, clear, appearance, colour), rate)
 
     log("motion")
+    partial = _partial_views(rows, found.pieces, rate)  # who they are, yes; their 3D body, no
     motions, people = [], []
     for who in range(int(found.person.max()) + 1 if len(found.person) else 0):
-        index = np.flatnonzero(found.person == who)
+        index = np.flatnonzero((found.person == who) & ~partial)
         index = index[np.argsort(rows["frame"][index], kind="stable")]
         frames = rows["frame"][index]
         keep = np.concatenate([[True], np.diff(frames) > 0])  # one estimate per frame

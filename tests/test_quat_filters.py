@@ -57,19 +57,6 @@ class FilterTest(unittest.TestCase):
         # zero-lag: the peak stays where it is
         self.assertLessEqual(abs(int(np.argmax(smooth[:120])) - int(np.argmax(truth[:120]))), 2)
 
-    def test_kalman_follows_a_sprint_and_trusts_the_precise_axis(self):
-        rng = np.random.default_rng(4)
-        t = np.arange(240) / 30.0
-        speed = np.clip(t - 2.0, 0, 3.0) * 2.5  # accelerate to 7.5 m/s
-        truth = np.column_stack([np.cumsum(speed) / 30.0, 0.3 * np.sin(t)])
-        noise = np.diag([0.35**2, 0.03**2])  # x is the depth axis here
-        measured = truth + rng.normal(0, [0.35, 0.03], truth.shape)
-        smooth = filters.kalman_smooth(measured, 30.0, accel_std=4.0, noise=noise)
-        self.assertLess(np.abs(smooth - truth)[:, 0].mean(), 0.4 * np.abs(measured - truth)[:, 0].mean())
-        self.assertLess(np.abs(smooth - truth)[:, 1].mean(), 0.03)
-        step_speed = np.linalg.norm(np.diff(smooth, axis=0), axis=1) * 30.0
-        self.assertLess(float(np.percentile(step_speed, 99)), 9.0)
-
     def test_despike_replaces_single_outliers(self):
         x = np.linspace(0, 1, 50)[:, None].repeat(3, axis=1)
         x[20] += 5.0
