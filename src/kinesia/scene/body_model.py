@@ -41,6 +41,7 @@ class BodyModel:
         character = self.module.character_torch
         self._character = character
         self.parents = character.skeleton.joint_parents.numpy().astype(np.int64)
+        self.joint_names = list(character.skeleton.joint_names)
         if any(p >= i for i, p in enumerate(self.parents) if p >= 0):
             raise ValueError("MHR joints are expected in parent-before-child order")
         self.faces = character.mesh.faces.numpy().astype(np.int64)

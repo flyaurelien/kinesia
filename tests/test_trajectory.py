@@ -57,7 +57,7 @@ class TrajectoryTest(unittest.TestCase):
         measured = depth_noise(truth, rng, along=0.3)
         body = standing_body(count)
         planted = np.ones((count, 2), bool)
-        solved = trajectory.solve(measured, CAMERA, np.ones(count, bool), RATE, body, planted, np.zeros(count, bool))
+        solved = trajectory.solve(measured, CAMERA, np.ones(count, bool), RATE, body, planted)
         self.assertLess(np.abs(along_ray(solved, truth)).max(), 0.05)  # the floor fixes the distance
         sole = solved[:, 2] + body.soles[0, :, 2]
         self.assertLess(np.abs(sole).max(), 0.03)
@@ -75,12 +75,27 @@ class TrajectoryTest(unittest.TestCase):
         body = standing_body(len(t), mass_height=0.0)
         body.feet[:, up, 2] = body.soles[:, up, 2] = -0.6  # knees tucked: feet well off the floor
         planted = np.zeros((len(t), 2), bool)
-        solved = trajectory.solve(measured, CAMERA, np.ones(len(t), bool), RATE, body, planted, up)
+        solved = trajectory.solve(measured, CAMERA, np.ones(len(t), bool), RATE, body, planted, (up, up))
         arc = solved[up]
         acceleration = (arc[2:] - 2 * arc[1:-1] + arc[:-2]) * RATE**2
         self.assertLess(np.abs(acceleration[:, :2]).max(), 1.5)  # horizontal: constant velocity
         self.assertAlmostEqual(float(acceleration[:, 2].mean()), -GRAVITY, delta=1.0)
         self.assertLess(np.abs(along_ray(arc, truth[up])).mean(), 0.5 * np.abs(along_ray(measured[up], truth[up])).mean())
+
+    def test_only_jumps_are_flights_and_only_true_falls_fall_at_g(self):
+        rate = 30.0
+        t = np.arange(90) / rate
+        half_second, second = (t >= 0.5) & (t < 1.0), (t >= 0.5) & (t < 1.5)
+        standing = np.full(90, 1.0)  # feet look lifted, but the body does not move
+        real = np.full(90, 1.0)
+        real[half_second] += 2.45 * (t[half_second] - 0.5) - 0.5 * GRAVITY * (t[half_second] - 0.5) ** 2
+        slow = np.full(90, 1.0)  # the same jump played at half speed: twice as long, curving at g/4
+        slow[second] += 1.225 * (t[second] - 0.5) - 0.5 * GRAVITY / 4 * (t[second] - 0.5) ** 2
+        cases = ((standing, half_second, False, False), (real, half_second, True, True), (slow, second, True, False))
+        for height, airborne, jump, fall in cases:
+            jumping, falling = trajectory.flights(height, airborne, rate)
+            self.assertEqual(jumping.any(), jump)
+            self.assertEqual(falling.any(), fall)
 
     def test_centre_of_mass_of_a_standing_body_is_near_the_pelvis(self):
         keypoints = np.zeros((1, 70, 3))

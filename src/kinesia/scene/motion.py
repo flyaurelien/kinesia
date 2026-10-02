@@ -16,6 +16,9 @@ Steps, for each person (a chain of joined masklets):
    of contact and flight (see ``trajectory``): planted feet stay put on the
    floor, a body in the air follows a free-fall arc, and the image of the
    person stays where the video shows it.
+5. **Feet.** What creep is left comes from the leg pose: the legs are bent
+   by inverse kinematics so that planted feet hold one spot and no foot goes
+   below the floor (see ``footlock``).
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import filters, quat, trajectory
+from . import filters, footlock, quat, trajectory
 from .body_model import BodyModel
 from .ground import smooth_scales
 from .keypoints import LEFT_FOOT, RIGHT_FOOT
@@ -200,11 +203,20 @@ def animate(
         planted = _contacts(feet, rate)
         body = trajectory.Body.from_keypoints(keypoints, first)
         airborne = ~planted.any(axis=1) & ((body.soles[..., 2] + first[None, :, 2]).min(axis=0) > CONTACT_HEIGHT)
-        final = trajectory.solve(pelvis_t, camera_position, trusted, rate, body, planted, airborne)
+        flight = trajectory.flights(first[:, 2] + body.mass[:, 2], airborne, rate)
+        final = trajectory.estimate(pelvis_t, camera_position, trusted, rate, body, planted, flight)
         shift = final - first
         pelvis[:, :3] = final
         states[:, :, :3] += shift[:, None, :]
         keypoints = keypoints + shift[:, None, :]
+
+        # What creep is left is the legs' own: bend them so planted feet hold still.
+        feet = np.stack([keypoints[:, list(LEFT_FOOT)], keypoints[:, list(RIGHT_FOOT)]])
+        planted = _contacts(list(feet), rate)
+        moves = footlock.shifts(feet, planted, rate)
+        lq = footlock.bend_legs(model.joint_names, model.parents, states, lq, moves)
+        states = _world_joints(model, pelvis, lt, lq, joint_scales)
+        keypoints = model.keypoints(states, rest)
 
         out_frames.append(full)
         out_measured.append(measured)

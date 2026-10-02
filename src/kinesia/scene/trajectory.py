@@ -10,9 +10,14 @@ deserves (closely across its ray, loosely along it), under the physics of a
 body on a floor:
 
 * a person changes pace with bounded accelerations;
-* a planted foot does not slide, and stands on the floor;
-* with no foot on the floor the centre of mass is in free fall: its
-  horizontal velocity stays constant and it accelerates downwards at g.
+* a planted foot does not slide, and stands on the floor; no foot sinks
+  below it;
+* with no foot on the floor nothing pushes the body sideways: the centre of
+  mass keeps its horizontal velocity, and it falls at g. Feet that merely
+  look lifted do not make a flight: the horizontal condition needs a jump
+  (the centre of mass rises and comes down), the vertical one an arc that
+  already curves at about g (``flights``), which footage in slow motion or
+  a poor reconstruction does not show.
 
 These are the contact and flight conditions of physics-based monocular motion
 capture (Rempe et al., "Contact and Human Dynamics from Monocular Video",
@@ -41,6 +46,10 @@ VERTICAL_ACCEL = 14.0  # m/s^2: pushing off and landing
 FREE_FALL_ACCEL = 1.0  # m/s^2: how far a centre of mass in the air may stray from free fall
 SLIP_SPEED = 0.07  # m/s: how fast a planted foot may still creep
 FLOOR_GAP = 0.02  # metres between a planted sole and the floor
+FALL_TOLERANCE = 4.0  # m/s^2: a stretch whose height curves this close to -g is a free fall
+FLIGHT_TRIM = 2  # frames that take-off and landing may blur at either end of a flight
+MIN_FLIGHT_SECONDS = 0.15
+JUMP_RISE = 0.05  # metres the centre of mass must rise above the ends of a stretch to make a jump
 
 # Mass shares of the body's segments (de Leva, J. Biomech. 1996), each between two keypoints.
 SEGMENTS = (
@@ -129,6 +138,84 @@ class _Normal:
         return x.reshape(self.count, 3)
 
 
+def flights(height: np.ndarray, airborne: np.ndarray, rate: float) -> tuple[np.ndarray, np.ndarray]:
+    """``(jumping, falling)``: frames of ``airborne`` runs (no foot near the floor) that are jumps,
+    and the frames of those that are seen falling at g.
+
+    ``height`` is the centre of mass from an unconstrained pass. A run is a
+    jump when its centre of mass rises ``JUMP_RISE`` above both ends: feet
+    that only look lifted (a pose or scale error while the person stands)
+    leave the height flat. It falls at g when a parabola fitted to it curves
+    at about -g; take-off and landing may blur ``FLIGHT_TRIM`` frames at
+    either end, so the longest trimmed stretch that passes is kept.
+    """
+    jumping = np.zeros(len(airborne), dtype=bool)
+    falling = np.zeros(len(airborne), dtype=bool)
+    shortest = max(4, int(round(MIN_FLIGHT_SECONDS * rate)))
+    edges = np.flatnonzero(np.diff(np.r_[0, airborne.astype(np.int8), 0]))
+    for a, b in zip(edges[::2], edges[1::2]):
+        if b - a < shortest or height[a:b].max() - max(height[a], height[b - 1]) < JUMP_RISE:
+            continue
+        jumping[a:b] = True
+        for left, right in sorted(((i, j) for i in range(FLIGHT_TRIM + 1) for j in range(FLIGHT_TRIM + 1)), key=sum):
+            lo, hi = a + left, b - right
+            if hi - lo < shortest:
+                continue
+            t = np.arange(hi - lo) / rate
+            (_, _, curve), *_ = np.linalg.lstsq(np.column_stack([np.ones_like(t), t, 0.5 * t * t]), height[lo:hi], rcond=None)
+            if abs(curve + GRAVITY) <= FALL_TOLERANCE:
+                falling[lo:hi] = True
+                break
+    return jumping, falling
+
+
+def solve(self) -> np.ndarray:
+        """Banded Cholesky factorisation and the two triangular solves."""
+        band, n, w = self.band, 3 * self.count, self.WIDTH
+        low = np.zeros_like(band)  # low[i, k] = L[i, i - k]
+        for i in range(n):
+            start = max(0, i - w)
+            for j in range(start, i + 1):
+                m = np.arange(start, j)
+                value = band[i, i - j] - low[i, i - m] @ low[j, j - m]
+                low[i, i - j] = np.sqrt(max(value, 1e-12)) if j == i else value / low[j, 0]
+        y = np.zeros(n)
+        for i in range(n):
+            m = np.arange(max(0, i - w), i)
+            y[i] = (self.rhs[i] - low[i, i - m] @ y[m]) / low[i, 0]
+        x = np.zeros(n)
+        for i in range(n - 1, -1, -1):
+            m = np.arange(i + 1, min(n, i + w + 1))
+            x[i] = (y[i] - low[m, m - i] @ x[m]) / low[i, 0]
+        return x.reshape(self.count, 3)
+
+
+def free_falls(height: np.ndarray, airborne: np.ndarray, rate: float) -> np.ndarray:
+    """The frames of ``airborne`` runs (no foot near the floor) that are true free falls.
+
+    ``height`` is the centre of mass from an unconstrained pass. A run counts
+    only if a parabola fitted to it curves at about -g; take-off and landing
+    may blur ``FLIGHT_TRIM`` frames at either end, so the longest trimmed run
+    that passes is kept. Feet that only look lifted (a pose or scale error
+    while the person still stands) leave a flat height and are not flights.
+    """
+    out = np.zeros(len(airborne), dtype=bool)
+    shortest = max(4, int(round(MIN_FLIGHT_SECONDS * rate)))
+    edges = np.flatnonzero(np.diff(np.r_[0, airborne.astype(np.int8), 0]))
+    for a, b in zip(edges[::2], edges[1::2]):
+        trims = sorted(((left, right) for left in range(FLIGHT_TRIM + 1) for right in range(FLIGHT_TRIM + 1)), key=sum)
+        for left, right in trims:
+            lo, hi = a + left, b - right
+            if hi - lo < shortest:
+                continue
+            t = np.arange(hi - lo) / rate
+            (_, _, curve), *_ = np.linalg.lstsq(np.column_stack([np.ones_like(t), t, 0.5 * t * t]), height[lo:hi], rcond=None)
+            if abs(curve + GRAVITY) <= FALL_TOLERANCE:
+                out[lo:hi] = True
+                break
+    return out
+
+
 def solve(
     estimates: np.ndarray,
     camera: np.ndarray,
@@ -136,14 +223,17 @@ def solve(
     rate: float,
     body: Body | None = None,
     planted: np.ndarray | None = None,
-    airborne: np.ndarray | None = None,
+    flight: tuple[np.ndarray, np.ndarray] | None = None,
+    touching: np.ndarray | None = None,
 ) -> np.ndarray:
     """The pelvis trajectory (N, 3) that best explains the per-frame ``estimates`` (N, 3).
 
     ``trusted`` frames are measurements, the others (filled gaps) carry no
-    information. With ``body``, ``planted`` (N, 2) feet and ``airborne``
-    (N,) frames, the contact and flight conditions apply; without, the
-    result is a smoothing that knows depth is the uncertain direction.
+    information. With ``body``: ``planted`` (N, 2) feet stand still on the
+    floor, ``touching`` (N, 2) feet are held on it without being still, and
+    over ``flight`` = ``(jumping, falling)`` (N,) frames the centre of mass
+    keeps its horizontal velocity, and falls at g. Without, the result is a
+    smoothing that knows depth is the uncertain direction.
     """
     count = len(estimates)
     if count < 3:
@@ -161,27 +251,53 @@ def solve(
     normal.frames(np.arange(count), weights, estimates)
 
     middle = np.arange(count - 2)  # second differences over frames t, t+1, t+2
-    falling = np.zeros(count - 2, dtype=bool)
-    if body is not None and airborne is not None:
-        falling = airborne[:-2] & airborne[1:-1] & airborne[2:]
     for axis, accel in ((0, HORIZONTAL_ACCEL), (1, HORIZONTAL_ACCEL), (2, VERTICAL_ACCEL)):
-        free = middle[~falling]
-        normal.differences(free, (1.0, -2.0, 1.0), axis, 1.0 / (accel * dt * dt) ** 2, np.zeros(len(free)))
-        if falling.any():
+        thrown = np.zeros(count - 2, dtype=bool)
+        if body is not None and flight is not None:
+            free = flight[1] if axis == 2 else flight[0]
+            thrown = free[:-2] & free[1:-1] & free[2:]
+        unbound = middle[~thrown]
+        normal.differences(unbound, (1.0, -2.0, 1.0), axis, 1.0 / (accel * dt * dt) ** 2, np.zeros(len(unbound)))
+        if thrown.any():
             # The centre of mass (pelvis + offset) moves as a thrown stone.
-            t = middle[falling]
+            t = middle[thrown]
             mass = body.mass[:, axis]
             target = -(mass[t] - 2 * mass[t + 1] + mass[t + 2]) - (GRAVITY * dt * dt if axis == 2 else 0.0)
             normal.differences(t, (1.0, -2.0, 1.0), axis, 1.0 / (FREE_FALL_ACCEL * dt * dt) ** 2, target)
 
-    if body is not None and planted is not None:
+    if body is not None:
+        on_floor = np.zeros((count, 2), dtype=bool)
+        for mask in (planted, touching):
+            if mask is not None:
+                on_floor |= mask
         for side in range(2):
-            down = np.flatnonzero(planted[:, side])
-            sole = body.soles[side, down]
-            normal.differences(down, (1.0,), 2, 1.0 / FLOOR_GAP**2, -sole[:, 2])
+            down = np.flatnonzero(on_floor[:, side])
+            normal.differences(down, (1.0,), 2, 1.0 / FLOOR_GAP**2, -body.soles[side, down, 2])
+            if planted is None:
+                continue
             still = np.flatnonzero(planted[:-1, side] & planted[1:, side])
             foot = body.feet[side]
             for axis in range(3):
                 target = -(foot[still + 1, axis] - foot[still, axis])
                 normal.differences(still, (-1.0, 1.0), axis, 1.0 / (SLIP_SPEED * dt) ** 2, target)
     return normal.solve()
+
+
+def estimate(
+    estimates: np.ndarray,
+    camera: np.ndarray,
+    trusted: np.ndarray,
+    rate: float,
+    body: Body,
+    planted: np.ndarray,
+    flight: tuple[np.ndarray, np.ndarray],
+) -> np.ndarray:
+    """``solve`` under contact and flight, then again with any sole that sank below the floor held on it."""
+    touching = np.zeros_like(planted)
+    for _ in range(3):
+        trajectory = solve(estimates, camera, trusted, rate, body, planted, flight, touching)
+        sunk = (body.soles[..., 2] + trajectory[None, :, 2]).T < -FLOOR_GAP
+        if not (sunk & ~touching).any():
+            break
+        touching |= sunk
+    return trajectory

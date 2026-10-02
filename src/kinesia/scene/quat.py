@@ -112,6 +112,19 @@ def apply(state: np.ndarray, points: np.ndarray) -> np.ndarray:
     return state[..., :3] + rotate(state[..., 3:7], state[..., 7:8] * points)
 
 
+def between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """The shortest rotations taking directions ``a`` to directions ``b`` (..., 3)."""
+    a = a / np.linalg.norm(a, axis=-1, keepdims=True).clip(1e-12)
+    b = b / np.linalg.norm(b, axis=-1, keepdims=True).clip(1e-12)
+    q = np.concatenate([np.cross(a, b), 1.0 + np.sum(a * b, axis=-1, keepdims=True)], axis=-1)
+    opposite = q[..., 3] < 1e-9
+    if np.any(opposite):  # half a turn about any axis square to a
+        side = np.where(np.abs(a[..., :1]) < 0.9, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+        axis = np.cross(a, side)
+        q[opposite] = np.concatenate([axis, np.zeros(axis.shape[:-1] + (1,))], axis=-1)[opposite]
+    return normalize(q)
+
+
 def axis_angle(axis: np.ndarray, radians: float) -> np.ndarray:
     axis = np.asarray(axis, dtype=np.float64)
     axis = axis / np.linalg.norm(axis)
