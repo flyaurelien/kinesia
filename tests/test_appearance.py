@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from kinesia.inference import appearance
+from kinesia.scene import build
 
 
 class CropTest(unittest.TestCase):
@@ -76,6 +77,42 @@ class WeightsTest(unittest.TestCase):
         z = appearance.principal_components(x.astype(np.float32), dims=2)
         self.assertEqual(z.shape, (500, 2))
         self.assertGreater(abs(np.corrcoef(z[:, 0], x[:, 0])[0, 1]), 0.999)
+
+
+class SceneInputTest(unittest.TestCase):
+    def rows(self, embed: bool) -> dict:
+        rows = {
+            "frame": np.array([0, 0, 1]),
+            "track": np.array([3, 5, 3]),
+            "box": np.array([[100, 100, 150, 300], [0, 100, 50, 300], [400, 100, 450, 130]], dtype=np.float32),
+        }
+        if embed:
+            rows["embed"] = np.ones((3, 8), np.float16)
+        return rows
+
+    def test_features_are_matched_to_bodies_by_frame_and_track(self):
+        with tempfile.TemporaryDirectory() as folder:
+            raw = Path(folder)
+            np.savez(
+                raw / "appearance.npz", frame=np.array([1, 0, 0]), track=np.array([3, 5, 3]),
+                dino=np.arange(3, dtype=np.float16)[:, None] * np.ones((3, 4), np.float16),
+                colour=np.ones((3, 6), np.float16), visible=np.array([0.6, 0.6, 0.1], np.float16),
+                hidden=np.zeros(3, np.float16),
+            )  # fmt: skip
+            features, colour, clear = build._appearance(raw, self.rows(embed=False), 1920, 1080)
+        self.assertEqual(features[:, 0].tolist(), [2.0, 1.0, 0.0])
+        self.assertEqual(colour.shape, (3, 6))
+        # its mask fills a tenth of its box / touching the picture's edge / too small
+        self.assertEqual(clear.tolist(), [False, False, False])
+
+    def test_older_analyses_fall_back_on_the_body_model_features(self):
+        with tempfile.TemporaryDirectory() as folder:
+            features, colour, clear = build._appearance(Path(folder), self.rows(embed=True), 1920, 1080)
+            self.assertEqual(features.shape, (3, 8))
+            self.assertIsNone(colour)
+            self.assertEqual(clear.tolist(), [True, False, False])
+            with self.assertRaises(FileNotFoundError):
+                build._appearance(Path(folder), self.rows(embed=False), 1920, 1080)
 
 
 if __name__ == "__main__":
