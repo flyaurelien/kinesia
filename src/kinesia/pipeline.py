@@ -33,7 +33,7 @@ EVENT_PREFIX = "KINESIA "
 MAX_FRAMES = 6000
 
 DEFAULT_REQUEST = {
-    "prompt": "person",
+    "prompt": "person",  # measured: finds more people than "human", "people", "player" or "athlete"
     "max_people": 64,
     "min_person_height": 48,
 }

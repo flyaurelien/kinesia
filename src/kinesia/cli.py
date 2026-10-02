@@ -58,7 +58,6 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("video", type=Path)
     create.add_argument("--name")
     create.add_argument("--max-people", type=int)
-    create.add_argument("--prompt")
 
     for command in ("process", "cancel", "status", "scene"):
         sub.add_parser(command).add_argument("run_id")
@@ -76,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     load_local_env()
 
     if args.command == "new":
-        request = {k: v for k, v in {"max_people": args.max_people, "prompt": args.prompt}.items() if v}
+        request = {"max_people": args.max_people} if args.max_people else {}
         print(new_run(args.video, args.name, request))
         return 0
     if args.command == "list":

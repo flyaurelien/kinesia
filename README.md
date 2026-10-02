@@ -30,7 +30,7 @@ through the original camera.
 | A dozen players crossing, screening and hiding each other | **SAM 3.1 video tracking** (Object Multiplex): one session over the whole clip, a memory per person, re-conditioned on fresh detections, so identities hold through crossings and occlusions. |
 | One camera, so no depth | **One shared floor.** The lens is measured from the picture (MoGe-2), one floor is fitted under everybody's feet, and each person is slid along their camera ray until their feet meet it. Their image never moves; only the depth error goes away. |
 | People cut by the frame or seen from behind | **SAM 3D Body** (Momentum Human Rig) rebuilds the whole body from what is visible, prompted with each person's mask so overlapping players are told apart. Where the feet are cut off, their depth is interpolated from neighbouring frames. |
-| Sprints, jumps, sudden turns | **Motion that respects physics.** Body shape is fixed per person, joint rotations are smoothed without lag, the trajectory filter knows that depth is the uncertain direction, and planted feet are pinned (no skating) while jumps keep their height. |
+| Sprints, jumps, sudden turns | **Motion that respects physics.** Body shape is fixed per person and joint rotations are smoothed without lag. Each person's path is solved once for the whole clip, close to the picture but loose in depth (one camera judges distance poorly), with planted feet held still on the floor and the body in free fall while airborne: constant speed across the floor, gravity downwards, as in physics-based motion capture. |
 | Players leaving and coming back, or swapped while hidden | **Re-identification by appearance.** Each person is cut out with their mask, background greyed, and described by DINOv3 (head, torso and legs separately) and by the colours of their top and bottom. Each video calibrates its own score: the same masklet seconds apart is one person, people seen at the same time are two. A masklet that slides onto someone else during an occlusion is cut where it changes; pieces are then joined most-confident first, never two people seen together, never faster than a sprint, and never when a rival candidate scores nearly as well. |
 | Tracker slips | **Masklet cleaning.** Frames where a mask swallows a neighbour are dropped, a track handed over to someone else is cut in two, and people whose feet never reach the floor (spectators in the stands) are left out. |
 
@@ -96,7 +96,7 @@ appearance, 3D scene) and opens the viewer when it is ready.
 Everything is also available from the command line:
 
 ```bash
-uv run --no-sync kinesia new input/match.mp4 --name "Sunday match" [--prompt "football player"]
+uv run --no-sync kinesia new input/match.mp4 --name "Sunday match"
 uv run --no-sync kinesia process <run-id>                           # GPU stages, then the 3D scene
 uv run --no-sync kinesia cancel <run-id>                            # stop it; the GPU is freed
 uv run --no-sync kinesia scene <run-id>                             # rebuild the 3D scene
@@ -128,9 +128,11 @@ saved with the analysis.
 - **The camera must be fixed** (tripod, stand, or rested on something): one
   camera frame serves the whole clip. A panning, zooming or hand-held camera is
   not supported: even a few degrees of panning slide everyone sideways in 3D.
-- Works best when people are seen **whole** and at least ~50 pixels tall. The
-  text prompt (default `person`) can be narrowed, e.g. `basketball player`, so
-  that spectators are not tracked.
+- Works best when people are seen **whole** and at least ~50 pixels tall.
+  SAM 3.1 is prompted with `person`, which finds the most people: on two test
+  clips it found 90% and 97% of everyone that any prompt found, against 86%
+  and 54% for `human`, and under 55% for `player` or `athlete`. Spectators in
+  the stands are left out by the floor test, not by the prompt.
 - Clips of up to 6,000 frames (about 3 minutes at 30 fps). SAM 3.1's state
   grows with every frame, by about 19 MB with 20 people: measured peaks were
   29 GB of GPU memory for 434 frames with up to 13 people, and 48 GB for 1,261
