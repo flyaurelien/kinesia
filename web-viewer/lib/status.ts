@@ -10,7 +10,8 @@ export const STEPS: Step[] = [
   { key: "tracking", label: "Track people", detail: "SAM 3.1 follows everyone through the video" },
   { key: "camera", label: "Camera", detail: "Estimate the lens's focal length from the picture (MoGe-2)" },
   { key: "bodies", label: "Bodies", detail: "SAM 3D Body reconstructs each person in 3D" },
-  { key: "building", label: "3D scene", detail: "Clean and link identities, smooth motion, ground the feet" },
+  { key: "appearance", label: "Appearance", detail: "DINOv3 describes each person, to tell people apart" },
+  { key: "building", label: "3D scene", detail: "Who is who, smooth motion, ground the feet" },
 ];
 
 export function stepsOf(status: RunStatus): Step[] {
@@ -23,7 +24,7 @@ export function stepIndex(status: RunStatus): number {
   if (status.state === "done") return steps.length;
   if (status.state === "new") return 0;
   // While the GPU stages run, the stage names the step; otherwise the state does.
-  const stage = status.stage === "packing" ? "bodies" : status.stage; // packing closes the GPU work
+  const stage = status.stage === "packing" ? "appearance" : status.stage; // packing closes the GPU work
   const key = status.state === "running" ? stage ?? "tracking" : status.state;
   const index = steps.findIndex((step) => step.key === key);
   if (index >= 0) return index;

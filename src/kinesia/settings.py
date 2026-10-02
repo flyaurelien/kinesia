@@ -51,6 +51,7 @@ def model_files() -> dict[str, Path]:
         "SAM31_CHECKPOINT": _path("SAM31_CHECKPOINT", root / "sam3.1" / "sam3.1_multiplex.pt"),
         "SAM3D_BODY_DIR": _path("SAM3D_BODY_DIR", root / "sam-3d-body-dinov3"),
         "MOGE_WEIGHTS": _path("MOGE_WEIGHTS", root / "moge-2-vitl-normal" / "model.pt"),
+        "DINOV3_WEIGHTS": _path("DINOV3_WEIGHTS", root / "dinov3-vith16plus" / "model.safetensors"),
     }
 
 
@@ -67,7 +68,7 @@ def inference_environment() -> dict[str, str]:
         **os.environ,
         **{key: str(value) for key, value in model_files().items()},
         "PYTHONPATH": os.pathsep.join(paths),
-        "TORCH_HOME": str(models_root() / "torch"),  # SAM 3D Body's DINOv3 code (Torch Hub)
+        "TORCH_HOME": str(models_root() / "torch"),  # DINOv3's code (Torch Hub), for SAM 3D Body and appearance
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "TOKENIZERS_PARALLELISM": "false",

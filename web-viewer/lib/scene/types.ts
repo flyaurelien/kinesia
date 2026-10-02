@@ -73,7 +73,16 @@ export type SceneFile = {
   };
   bones: [number, number][];
   people: PersonEntry[];
-  identity: { threshold: number; fragments: number; links: { from: number; to: number; similarity: number; gap_frames: number }[] };
+  /** How masklets became people: cuts where a masklet changed person, and pieces joined (scores are log-likelihood ratios). */
+  identity: {
+    features: string;
+    pieces: number;
+    cuts: { piece: number; last_before: number; first_after: number; score: number }[];
+    links: { pieces: number[]; joined: number[]; score: number; rival: number | null }[];
+    ambiguous: { pieces: number[]; other: number[]; score: number }[];
+    leftovers: { track: number; first: number; last: number; rows: number }[];
+    off_floor: number;
+  };
 };
 
 export type OverlayFile = {

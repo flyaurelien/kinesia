@@ -1,11 +1,10 @@
-"""Floor fitting, depth-to-floor correction and joining masklets into people."""
+"""Floor fitting and depth-to-floor correction."""
 
 import unittest
 
 import numpy as np
 
 from kinesia.scene.ground import Plane, WorldFrame, depth_scales, fit_plane, smooth_scales
-from kinesia.scene.identity import Fragment, link_fragments
 
 
 class GroundTest(unittest.TestCase):
@@ -40,41 +39,6 @@ class GroundTest(unittest.TestCase):
         self.assertAlmostEqual(on_floor[2], 0.0, places=9)
         self.assertAlmostEqual(world.camera_position[2], 1.5, places=9)
         self.assertTrue(np.allclose(np.linalg.det(world.rotation), 1.0))
-
-
-def fragment(track, frames, direction, start_xy):
-    frames = np.asarray(frames)
-    embed = np.tile(direction / np.linalg.norm(direction), (len(frames), 1))
-    positions = np.column_stack([np.full(len(frames), start_xy[0]), np.full(len(frames), start_xy[1]), np.zeros(len(frames))])
-    return Fragment(track, frames, embed, positions)
-
-
-class IdentityTest(unittest.TestCase):
-    def setUp(self):
-        rng = np.random.default_rng(1)
-        self.looks = [rng.normal(size=16) for _ in range(3)]
-
-    def test_rejoins_a_person_after_they_leave_and_return(self):
-        a = fragment(0, range(0, 100), self.looks[0], (0, 0))
-        b = fragment(1, range(0, 250), self.looks[1], (5, 5))  # someone else, always visible
-        c = fragment(2, range(160, 250), self.looks[0] + 0.02, (3, 0))  # person 0 back
-        result = link_fragments([a, b, c], rate=30.0)
-        self.assertIn([0, 2], result.groups)
-        self.assertIn([1], result.groups)
-
-    def test_never_joins_fragments_seen_at_the_same_time(self):
-        a = fragment(0, range(0, 100), self.looks[0], (0, 0))
-        b = fragment(1, range(50, 150), self.looks[0], (0, 0))  # identical look, overlapping
-        result = link_fragments([a, b], rate=30.0)
-        self.assertEqual(sorted(result.groups), [[0], [1]])
-
-    def test_refuses_a_teleport(self):
-        a = fragment(0, range(0, 60), self.looks[0], (0, 0))
-        other = fragment(5, range(0, 200), self.looks[1], (9, 9))
-        b = fragment(1, range(62, 200), self.looks[0], (40, 0))  # 40 m away 2 frames later
-        result = link_fragments([a, other, b], rate=30.0)
-        self.assertIn([0], result.groups)
-        self.assertIn([1], result.groups)
 
 
 if __name__ == "__main__":

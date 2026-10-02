@@ -42,8 +42,13 @@ STAGE_MESSAGES = {
     "tracking": "Tracking people",
     "camera": "Measuring the camera",
     "bodies": "Reconstructing bodies",
+    "appearance": "Describing people",
     "packing": "Packaging results",
 }
+
+# What the GPU stages write to raw/; an analysis missing one (made by an older
+# version) gets just that stage when processed again.
+GPU_RESULTS = ("tracks.jsonl.gz", "camera.json", "bodies.npz", "appearance.npz")
 
 # The steps the processing screen shows, as (state or GPU stage, label, detail).
 LOCAL_STEPS = [
@@ -51,7 +56,8 @@ LOCAL_STEPS = [
     {"key": "tracking", "label": "Track people", "detail": "SAM 3.1 follows everyone through the video"},
     {"key": "camera", "label": "Camera", "detail": "Estimate the lens's focal length from the picture (MoGe-2)"},
     {"key": "bodies", "label": "Bodies", "detail": "SAM 3D Body reconstructs each person in 3D"},
-    {"key": "building", "label": "3D scene", "detail": "Clean and link identities, smooth motion, ground the feet"},
+    {"key": "appearance", "label": "Appearance", "detail": "DINOv3 describes each person, to tell people apart"},
+    {"key": "building", "label": "3D scene", "detail": "Who is who, smooth motion, ground the feet"},
 ]
 
 
@@ -223,13 +229,15 @@ class LocalRunner(Runner):
             started_at=self.status.get("started_at") or now(),
         )  # fmt: skip
         try:
-            if not (self.folder / "raw" / "bodies.npz").is_file():
+            computed = False
+            if not all((self.folder / "raw" / name).is_file() for name in GPU_RESULTS):
                 self.status.update("preparing", "Preparing the video")
                 prepare(self.folder)
                 self._gpu_stages()
                 if self.status.cancelled:
                     return
-            if not (self.folder / "scene" / "scene.json").is_file():
+                computed = True
+            if computed or not (self.folder / "scene" / "scene.json").is_file():
                 self.build_scene()
             self.status.update("done", "Ready", finished_at=now(), progress=None, stage=None)
         except Exception as error:

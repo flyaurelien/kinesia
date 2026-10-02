@@ -23,7 +23,7 @@ from ..tracks import TracksFile, read_tracks
 from . import export, filters, quat
 from .body_model import BodyModel
 from .ground import WorldFrame, find_floor, floor_factors, lowest_foot, smooth_scales
-from .identity import Fragment, link_fragments
+from .identity import Observations, identify
 from .keypoints import BONES, LEFT_HIP, RIGHT_HIP
 from .metrics import SERIES, person_metrics
 from .motion import PersonFrames, animate
@@ -34,6 +34,11 @@ MAX_ASPECT = 2.5  # box width / height: anything wider is a bench, a banner or a
 TELEPORT_SPEED = 15.0  # m/s; a masklet moving faster between sightings has changed person
 SPRINT_HEIGHTS = 7.0  # the same across the picture, in person heights per second (crouched sprint)
 OFF_FLOOR_SHARE = 0.3  # pieces whose feet miss the floor this often are not on it
+# Views that tell who someone is: the person is this tall, shows most of their
+# box and is not hidden behind someone else.
+SEEN_HEIGHT = 60  # pixels
+SEEN_SHARE = 0.25  # of the box covered by the person's own mask
+HIDDEN_SHARE = 0.3  # of the box covered by other people's masks
 
 
 def palette(count: int) -> list[str]:
@@ -128,20 +133,43 @@ def _keep_on_floor(rows: dict, piece: np.ndarray, depth: np.ndarray, reachable: 
     return keep
 
 
-def _fragments(rows: dict, points_rc: np.ndarray, depth: np.ndarray, world: WorldFrame, rate: float, piece: np.ndarray) -> list[Fragment]:
-    fragments = []
+def _positions(rows: dict, points_rc: np.ndarray, depth: np.ndarray, world: WorldFrame, rate: float, piece: np.ndarray) -> np.ndarray:
+    """World position of each row's body root (between the hips)."""
     hips = 0.5 * (points_rc[:, LEFT_HIP] + points_rc[:, RIGHT_HIP])
+    positions = np.full((len(piece), 3), np.nan)
     for p in np.unique(piece):
         index = np.flatnonzero(piece == p)
-        index = index[np.argsort(rows["frame"][index])]
-        embed = rows["embed"][index].astype(np.float64)
-        embed /= np.linalg.norm(embed, axis=1, keepdims=True).clip(1e-9)
-        # A fragment's ends are where its person enters or leaves the picture,
+        index = index[np.argsort(rows["frame"][index], kind="stable")]
+        # A piece's ends are where its person enters or leaves the picture,
         # often with the feet cut off: the raw depth factor is least reliable
         # exactly there, so positions use the smoothed one.
-        pelvis = hips[index] * smooth_scales(depth[index], rate)[:, None]
-        fragments.append(Fragment(int(p), rows["frame"][index], embed, world.apply(pelvis)))
-    return fragments
+        positions[index] = world.apply(hips[index] * smooth_scales(depth[index], rate)[:, None])
+    return positions
+
+
+def _appearance(raw: Path, rows: dict, width: int, height: int) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Each row's appearance features, colour histograms and whether it is a clear view.
+
+    They come from ``appearance.npz`` (DINOv3 and colours of the masked
+    person, from the GPU stages). Analyses made before that stage existed fall
+    back on SAM 3D Body's own image features, which tell people apart less
+    well, and on the box alone to judge the view.
+    """
+    box = rows["box"].astype(np.float64)
+    clear = (box[:, 3] - box[:, 1] >= SEEN_HEIGHT) & (box[:, 0] > 2) & (box[:, 1] > 2)
+    clear &= (box[:, 2] < width - 3) & (box[:, 3] < height - 3)  # wholly in the picture
+    path = raw / "appearance.npz"
+    if not path.is_file():
+        if "embed" not in rows:
+            raise FileNotFoundError(f"{path} is missing: run `kinesia appearance` on this analysis")
+        return rows["embed"].astype(np.float64), None, clear
+    with np.load(path) as data:
+        found = {(int(f), int(t)): i for i, (f, t) in enumerate(zip(data["frame"], data["track"]))}
+        index = np.array([found.get((int(f), int(t)), -1) for f, t in zip(rows["frame"], rows["track"])])
+        if (index < 0).any():
+            raise ValueError(f"appearance.npz lacks {int((index < 0).sum())} of the bodies; delete it to compute it again")
+        clear &= (data["visible"][index] >= SEEN_SHARE) & (data["hidden"][index] < HIDDEN_SHARE)
+        return data["dino"][index].astype(np.float64), data["colour"][index].astype(np.float64), clear
 
 
 def _overlay(tracks: TracksFile, spans: dict[int, list[tuple[int, int, int]]]) -> list[list]:
@@ -192,14 +220,14 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     world = WorldFrame.from_floor(plane, np.median(lowest * depth[:, None], axis=0))
 
     log("identities")
-    fragments = _fragments(rows, points_rc, depth, world, rate, piece)
-    linking = link_fragments(fragments, rate)
-    track_of_piece = {int(p): int(t) for p, t in zip(piece, rows["track"])}
+    appearance, colour, clear = _appearance(raw, rows, tracks.width, tracks.height)
+    position = _positions(rows, points_rc, depth, world, rate, piece)
+    found = identify(Observations(rows["frame"], rows["track"], piece, position, clear, appearance, colour), rate)
 
     log("motion")
     motions, people = [], []
-    for group in linking.groups:
-        index = np.flatnonzero(np.isin(piece, group))
+    for who in range(int(found.person.max()) + 1 if len(found.person) else 0):
+        index = np.flatnonzero(found.person == who)
         index = index[np.argsort(rows["frame"][index], kind="stable")]
         frames = rows["frame"][index]
         keep = np.concatenate([[True], np.diff(frames) > 0])  # one estimate per frame
@@ -217,14 +245,15 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
             image_height=tracks.height,
         )
         motions.append(animate(person, model, rate, world.rotation, world.origin, world.camera_position))
-        people.append(group)
+        people.append(index)
 
     colours = palette(len(motions))
     spans: dict[int, list[tuple[int, int, int]]] = {}
-    for person, group in enumerate(people):
-        for p in group:
-            frames = rows["frame"][piece == p]
-            spans.setdefault(track_of_piece[p], []).append((int(frames.min()), int(frames.max()), person))
+    for person, index in enumerate(people):
+        for p in np.unique(found.pieces[index]):
+            frames = rows["frame"][index][found.pieces[index] == p]
+            track = int(rows["track"][index][found.pieces[index] == p][0])
+            spans.setdefault(track, []).append((int(frames.min()), int(frames.max()), person))
     metrics = [person_metrics(motion, rate) for motion in motions]
 
     log("export")
@@ -264,7 +293,7 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
                 "id": i,
                 "label": f"Person {i + 1}",
                 "color": colours[i],
-                "tracks": sorted({track_of_piece[p] for p in group}),
+                "tracks": sorted({int(t) for t in rows["track"][index]}),
                 "segments": [list(s) for s in motion.segments],
                 "first": int(motion.frames[0]),
                 "last": int(motion.frames[-1]),
@@ -272,17 +301,24 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
                 "summary": metrics[i]["summary"],
                 "layout": people_layout[i],
             }
-            for i, (group, motion) in enumerate(zip(people, motions))
+            for i, (index, motion) in enumerate(zip(people, motions))
         ],
         "identity": {
-            "threshold": round(linking.threshold, 3),
-            "links": [{**link, "from": track_of_piece[link["from"]], "to": track_of_piece[link["to"]]} for link in linking.links],
-            "fragments": len(fragments),
+            "features": "dinov3+colour" if colour is not None else "sam-3d-body",
+            "pieces": int(len(np.unique(found.pieces[found.pieces >= 0]))),
+            "cuts": found.cuts,
+            "links": found.links,
+            "ambiguous": found.ambiguous,
+            "leftovers": found.leftovers,
+            "calibration": found.calibration,
             "off_floor": off_floor,
         },
         "built_seconds": round(time.monotonic() - started, 1),
     }
     export.write_json(out / "scene.json", scene)
-    log(f"scene: {len(motions)} people from {len(fragments)} pieces of masklets ({off_floor} off the floor) in {scene['built_seconds']} s")
+    log(
+        f"scene: {len(motions)} people from {scene['identity']['pieces']} pieces of masklets "
+        f"({len(found.cuts)} cut at a change of person, {off_floor} off the floor) in {scene['built_seconds']} s"
+    )
     return scene
 

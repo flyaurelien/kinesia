@@ -29,7 +29,6 @@ FIELDS = {
     "cam_t": np.float32,  # (3,) body root in camera coordinates, metres
     "kp3d": np.float16,  # (70, 3) MHR70 keypoints relative to cam_t
     "kp2d": np.float16,  # (70, 2) the same keypoints in source pixels
-    "embed": np.float16,  # (1280,) mask-pooled image features (appearance)
 }
 
 
@@ -49,29 +48,7 @@ def load_model(body_dir: str):
     return estimator
 
 
-class _FeatureTap:
-    """Keeps the last backbone feature map (before the mask embedding is added)."""
-
-    def __init__(self, backbone):
-        self.value = None
-        self._handle = backbone.register_forward_hook(self._hook)
-
-    def _hook(self, _module, _inputs, output):
-        self.value = output[-1] if isinstance(output, tuple) else output
-
-
-def _pooled_features(features, crop_masks):
-    """Average each crop's features over its own (downsampled) person mask."""
-    import torch
-    import torch.nn.functional as F
-
-    weights = F.adaptive_avg_pool2d(crop_masks.float(), features.shape[-2:])
-    weights = torch.where(weights.sum(dim=(2, 3), keepdim=True) > 1e-3, weights, torch.ones_like(weights))
-    pooled = (features.float() * weights).sum(dim=(2, 3)) / weights.sum(dim=(2, 3))
-    return F.normalize(pooled, dim=1)
-
-
-def infer_frame(estimator, tap: _FeatureTap, image_rgb: np.ndarray, boxes: np.ndarray, masks: np.ndarray, cam_int: np.ndarray) -> dict:
+def infer_frame(estimator, image_rgb: np.ndarray, boxes: np.ndarray, masks: np.ndarray, cam_int: np.ndarray) -> dict:
     """Run the body decoder on all people of one frame; return per-person arrays."""
     import torch
     from sam_3d_body.data.utils.prepare_batch import prepare_batch
@@ -99,8 +76,6 @@ def infer_frame(estimator, tap: _FeatureTap, image_rgb: np.ndarray, boxes: np.nd
             thresh_wrist_angle=estimator.thresh_wrist_angle,
         )
         mhr = output["mhr"]
-        crop_masks = batch["mask"].flatten(0, 1)  # (N, 1, H, W) in crop space
-        embed = _pooled_features(tap.value, crop_masks)
     to_np = lambda t: t.detach().float().cpu().numpy()  # noqa: E731
     return {
         "model_params": to_np(mhr["mhr_model_params"]),
@@ -109,7 +84,6 @@ def infer_frame(estimator, tap: _FeatureTap, image_rgb: np.ndarray, boxes: np.nd
         "cam_t": to_np(mhr["pred_cam_t"]),
         "kp3d": to_np(mhr["pred_keypoints_3d"]),
         "kp2d": to_np(mhr["pred_keypoints_2d"]),
-        "embed": to_np(embed),
     }
 
 
@@ -132,7 +106,6 @@ def reconstruct_bodies(
 ) -> dict:
     """Reconstruct every selected person; write ``out_dir/chunk_XXXX.npz`` files."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    tap = _FeatureTap(estimator.model.backbone)
     by_frame = {record.frame: record for record in tracks}
     total = len(tracks)
     chunk_count = (total + CHUNK_FRAMES - 1) // CHUNK_FRAMES
@@ -152,7 +125,7 @@ def reconstruct_bodies(
             if chosen:
                 boxes = np.array([record.boxes[i] for i in chosen], dtype=np.float32)
                 masks = np.stack([record.mask(i, height, width) for i in chosen])
-                result = infer_frame(estimator, tap, image_rgb, boxes, masks, cam_int)
+                result = infer_frame(estimator, image_rgb, boxes, masks, cam_int)
                 rows["frame"].extend([index] * len(chosen))
                 rows["track"].extend(record.ids[i] for i in chosen)
                 rows["box"].extend(boxes)

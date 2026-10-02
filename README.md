@@ -12,9 +12,9 @@
 </p>
 
 <p align="center"><sub>
-Streetball at night, filmed from one fixed camera: 18 s at 1080p, 19 people tracked
-(up to 13 at a time), each rebuilt in 3D on one shared floor. Colours match between
-the two sides. Source video by Khanh Hoang Minh on
+Streetball at night, filmed from one fixed camera: 18 s at 1080p, up to 13 people
+at a time, each rebuilt in 3D on one shared floor. Colours match between the two
+sides. Source video by Khanh Hoang Minh on
 <a href="https://www.pexels.com/video/a-group-of-people-playing-basketball-at-night-19570048/">Pexels</a>.
 </sub></p>
 
@@ -31,12 +31,16 @@ through the original camera.
 | One camera, so no depth | **One shared floor.** The lens is measured from the picture (MoGe-2), one floor is fitted under everybody's feet, and each person is slid along their camera ray until their feet meet it. Their image never moves; only the depth error goes away. |
 | People cut by the frame or seen from behind | **SAM 3D Body** (Momentum Human Rig) rebuilds the whole body from what is visible, prompted with each person's mask so overlapping players are told apart. Where the feet are cut off, their depth is interpolated from neighbouring frames. |
 | Sprints, jumps, sudden turns | **Motion that respects physics.** Body shape is fixed per person, joint rotations are smoothed without lag, the trajectory filter knows that depth is the uncertain direction, and planted feet are pinned (no skating) while jumps keep their height. |
-| Players leaving and coming back | **Re-identification.** Fragments are joined using appearance, a running-speed reachability test and a similarity threshold calibrated on each video. |
+| Players leaving and coming back, or swapped while hidden | **Re-identification by appearance.** Each person is cut out with their mask, background greyed, and described by DINOv3 (head, torso and legs separately) and by the colours of their top and bottom. Each video calibrates its own score: the same masklet seconds apart is one person, people seen at the same time are two. A masklet that slides onto someone else during an occlusion is cut where it changes; pieces are then joined most-confident first, never two people seen together, never faster than a sprint, and never when a rival candidate scores nearly as well. |
 | Tracker slips | **Masklet cleaning.** Frames where a mask swallows a neighbour are dropped, a track handed over to someone else is cut in two, and people whose feet never reach the floor (spectators in the stands) are left out. |
 
 **Measured on this clip**: 434 frames, focal length 1338 px estimated from the
 image, heights between 1.58 and 1.78 m. On one NVIDIA B300, tracking took 92 s
-and body reconstruction 104 s; the 3D scene was then built in 15 s.
+and body reconstruction 104 s; the 3D scene was then built in 15 s. SAM 3.1's
+20 masklet pieces belong to 14 people (checked by hand, frame by frame):
+re-identification finds 15, with every return of a player who left the picture
+or was hidden for 7 s, and the two players whose masklets swapped during a
+screen given back their own identity; no two people are ever merged.
 
 The viewer shows when each person is on screen (presence lanes), and gives
 distance, speed, jumps and joint angles per person, with CSV and JSON export.
@@ -46,7 +50,7 @@ distance, speed, jumps and joint angles per person, with CSV and JSON export.
 ```mermaid
 flowchart LR
     A[Video] --> B["Normalize<br/>(ffmpeg)"]
-    B --> C["GPU stages<br/>SAM 3.1 tracking · lens · SAM 3D Body"]
+    B --> C["GPU stages<br/>SAM 3.1 tracking · lens · SAM 3D Body · DINOv3 appearance"]
     C --> D["Scene build (CPU)<br/>floor · identities · motion · metrics"]
     D --> E["3D viewer"]
 ```
@@ -86,8 +90,8 @@ made on another machine (`install_models.py --scene-only`).
 ```
 
 Open <http://127.0.0.1:4001/>, choose **New analysis**, drop a video. The page
-follows the analysis through its steps (prepare, tracking, camera, bodies, 3D
-scene) and opens the viewer when it is ready.
+follows the analysis through its steps (prepare, tracking, camera, bodies,
+appearance, 3D scene) and opens the viewer when it is ready.
 
 Everything is also available from the command line:
 
@@ -96,7 +100,12 @@ uv run --no-sync kinesia new input/match.mp4 --name "Sunday match" [--prompt "fo
 uv run --no-sync kinesia process <run-id>                           # GPU stages, then the 3D scene
 uv run --no-sync kinesia cancel <run-id>                            # stop it; the GPU is freed
 uv run --no-sync kinesia scene <run-id>                             # rebuild the 3D scene
+uv run --no-sync kinesia appearance <run-id> [--device mps]         # older analyses: add appearance, rebuild
 ```
+
+Analyses made before the appearance stage existed still build, with SAM 3D
+Body's own image features standing in (they tell people apart less well);
+`kinesia appearance` adds the stage on any CUDA or Apple GPU.
 
 Each analysis lives in `output/<run-id>/`: the normalized `video.mp4`, the raw
 GPU results in `raw/`, the viewer files in `scene/` and the GPU log in `gpu.log`.
@@ -132,8 +141,10 @@ saved with the analysis.
   Body's human prior, so unusually tall or short people are pulled towards
   average height (tall athletes come out shorter than they are), and their
   distances and speeds scale with it.
-- Joining fragments is conservative: two players in the same kit who leave and
-  re-enter at the same time may stay separate people rather than risk a swap.
+- Joining fragments is conservative: when a returning player looks as much
+  like two absent people (team-mates in the same kit), they stay a new person
+  rather than risk a wrong identity. Appearance is all it goes on: shirt
+  numbers are not read.
 - SAM 3.1's multiplex tracker at the pinned upstream revision crashes on long
   clips when an object sharing a conditioning frame is removed
   ([facebookresearch/sam3#572](https://github.com/facebookresearch/sam3/issues/572));
@@ -151,7 +162,7 @@ kinesia/
   scripts/          install_gpu.sh (GPU packages), install_models.py (model weights)
   src/kinesia/
     pipeline.py     the steps of an analysis and the runner that carries them out
-    inference/      the GPU stages: SAM 3.1 tracking, lens, SAM 3D Body
+    inference/      the GPU stages: SAM 3.1 tracking, lens, SAM 3D Body, appearance
     scene/          floor, identities, motion smoothing, metrics, export
   web-viewer/       Next.js app: library, processing status, 3D viewer
   vendor/           SAM 3D Body code (the GPU stages import it)
@@ -166,7 +177,7 @@ All model weights come from their original publishers; none are redistributed he
 | --- | --- | --- | --- | --- |
 | **SAM 3.1** (Object Multiplex) | video detection, segmentation and tracking | [arXiv:2511.16719](https://arxiv.org/abs/2511.16719) | [facebook/sam3.1](https://huggingface.co/facebook/sam3.1) · [facebookresearch/sam3](https://github.com/facebookresearch/sam3) | SAM License (gated) |
 | **SAM 3D Body** | per-person 3D body ([MHR](https://github.com/facebookresearch/MHR)) | [arXiv:2602.15989](https://arxiv.org/abs/2602.15989) | [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) · [facebookresearch/sam-3d-body](https://github.com/facebookresearch/sam-3d-body) | SAM License (gated) |
-| **DINOv3** | image encoder inside SAM 3D Body | [arXiv:2508.10104](https://arxiv.org/abs/2508.10104) | [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
+| **DINOv3** | image encoder inside SAM 3D Body; ViT-H+ alone describes each person's appearance | [arXiv:2508.10104](https://arxiv.org/abs/2508.10104) | [timm/vit_huge_plus_patch16_dinov3.lvd1689m](https://huggingface.co/timm/vit_huge_plus_patch16_dinov3.lvd1689m) · [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) | DINOv3 License |
 | **MoGe-2** | camera focal length from a single image | [arXiv:2507.02546](https://arxiv.org/abs/2507.02546) | [Ruicheng/moge-2-vitl-normal](https://huggingface.co/Ruicheng/moge-2-vitl-normal) · [microsoft/MoGe](https://github.com/microsoft/MoGe) | MIT (code) / weights per model card |
 
 ## Citations

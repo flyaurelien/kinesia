@@ -4,6 +4,7 @@
     kinesia process <run-id>                           # GPU stages, then the 3D scene
     kinesia cancel <run-id>                            # stop it (the GPU is freed)
     kinesia scene <run-id>                             # rebuild the 3D scene
+    kinesia appearance <run-id> [--device mps]         # describe people (older analyses), rebuild
     kinesia doctor [--json]                            # can analyses run here?
 """
 
@@ -62,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     for command in ("process", "cancel", "status", "scene"):
         sub.add_parser(command).add_argument("run_id")
 
+    describe = sub.add_parser("appearance", help="describe the people of an older analysis here, then rebuild its scene")
+    describe.add_argument("run_id")
+    describe.add_argument("--device", default="auto", help="cuda, mps or cpu (default: the best one available)")
+
     doctor = sub.add_parser("doctor", help="check the GPU and the model files")
     doctor.add_argument("--json", action="store_true")
 
@@ -86,6 +91,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "scene":
         from .scene.build import build_scene
 
+        build_scene(run_dir(args.run_id))
+        return 0
+    if args.command == "appearance":
+        import torch
+
+        from .inference.appearance import HUB, describe_run, load_model
+        from .paths import models_root
+        from .scene.build import build_scene
+        from .settings import model_files
+
+        device = args.device
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+        model = load_model(model_files()["DINOV3_WEIGHTS"], device, models_root() / "torch" / "hub" / HUB)
+        print(describe_run(model, run_dir(args.run_id), device=device))
+        del model
         build_scene(run_dir(args.run_id))
         return 0
     if args.command in {"process", "cancel"}:

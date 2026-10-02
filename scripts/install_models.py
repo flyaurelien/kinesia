@@ -4,6 +4,8 @@
 * SAM 3D Body (``facebook/sam-3d-body-dinov3``): the 3D bodies, and the
   Momentum Human Rig body model the 3D scene is built with;
 * the DINOv3 source (Torch Hub), where SAM 3D Body loads its backbone code from;
+* DINOv3 ViT-H+ (``timm/vit_huge_plus_patch16_dinov3.lvd1689m``, under the
+  DINOv3 License): what each person looks like, to tell people apart;
 * MoGe-2 (``Ruicheng/moge-2-vitl-normal``): the lens's focal length.
 
 SAM 3.1 and SAM 3D Body are gated on Hugging Face: accept their licenses on
@@ -31,6 +33,7 @@ BODY_FILES = ("model_config.yaml", "model.ckpt", "assets/mhr_model.pt")
 DINOV3 = MODELS_ROOT / "torch" / "hub" / "facebookresearch_dinov3_main"
 SAM31 = MODELS_ROOT / "sam3.1"
 MOGE = MODELS_ROOT / "moge-2-vitl-normal"
+DINOV3_WEIGHTS = MODELS_ROOT / "dinov3-vith16plus"
 
 
 def install_file(repo_id: str, filename: str, folder: Path, offline: bool, label: str) -> None:
@@ -86,6 +89,7 @@ def main() -> int:
         install_file("facebook/sam3.1", "sam3.1_multiplex.pt", SAM31, args.offline, "SAM 3.1")
         install_file("Ruicheng/moge-2-vitl-normal", "model.pt", MOGE, args.offline, "MoGe-2")
         install_dinov3()
+        install_file("timm/vit_huge_plus_patch16_dinov3.lvd1689m", "model.safetensors", DINOV3_WEIGHTS, args.offline, "DINOv3 ViT-H+")
     return 0
 
 

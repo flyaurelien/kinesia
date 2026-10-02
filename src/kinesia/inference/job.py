@@ -1,4 +1,4 @@
-"""The GPU stages of one analysis: people tracking, the lens, 3D bodies.
+"""The GPU stages of one analysis: people tracking, the lens, 3D bodies, appearance.
 
     python -m kinesia.inference.job --run-dir output/<run-id>
 
@@ -40,7 +40,9 @@ class Progress:
             emit("progress", stage=self.stage, done=done, total=total)
 
 
-def run(run_dir: Path, *, sam31_checkpoint: str, sam3_source: str | None, body_dir: str, package: bool = False) -> None:
+def run(
+    run_dir: Path, *, sam31_checkpoint: str, sam3_source: str | None, body_dir: str, dinov3_weights: str, package: bool = False
+) -> None:
     import numpy as np
 
     request = json.loads((run_dir / "request.json").read_text())
@@ -140,16 +142,32 @@ def run(run_dir: Path, *, sam31_checkpoint: str, sam3_source: str | None, body_d
         torch.cuda.empty_cache()
         emit("stage", stage="bodies", state="done", **result)
 
+    # 4. Appearance: what each person looks like, to tell people apart.
+    appearance_path = raw / "appearance.npz"
+    if not appearance_path.is_file():
+        from .appearance import describe_run
+        from .appearance import load_model as load_appearance
+
+        emit("stage", stage="appearance", state="loading")
+        model = load_appearance(Path(dinov3_weights), "cuda")
+        emit("stage", stage="appearance", state="running", total=frames)
+        result = describe_run(model, run_dir, device="cuda", on_frame=Progress("appearance"))
+        receipts["appearance"] = {**result, "model": "DINOv3 ViT-H+/16 LVD-1689M (timm/vit_huge_plus_patch16_dinov3.lvd1689m)"}
+        save_receipts()
+        del model
+        torch.cuda.empty_cache()
+        emit("stage", stage="appearance", state="done", **result)
+
     if not package:
         emit("done")
         return
 
-    # 4. For a runner that computes elsewhere: one archive to bring back.
+    # 5. For a runner that computes elsewhere: one archive to bring back.
     emit("stage", stage="packing", state="running")
     bundle = run_dir / "out.tar"
     partial = run_dir / "out.tar.part"
     with tarfile.open(partial, "w") as archive:
-        for name in ("tracks.jsonl.gz", "camera.json", "bodies.npz", "receipts.json"):
+        for name in ("tracks.jsonl.gz", "camera.json", "bodies.npz", "appearance.npz", "receipts.json"):
             path = raw / name
             if path.is_file():
                 archive.add(path, arcname=f"raw/{name}")
@@ -163,6 +181,7 @@ def main() -> None:
     parser.add_argument("--sam31-checkpoint", default=os.environ.get("SAM31_CHECKPOINT"))
     parser.add_argument("--sam3-source", default=os.environ.get("SAM3_SOURCE") or None)
     parser.add_argument("--body-dir", default=os.environ.get("SAM3D_BODY_DIR"))
+    parser.add_argument("--dinov3-weights", default=os.environ.get("DINOV3_WEIGHTS"))
     parser.add_argument("--package", action="store_true", help="also write out.tar with the results")
     args = parser.parse_args()
     try:
@@ -171,6 +190,7 @@ def main() -> None:
             sam31_checkpoint=args.sam31_checkpoint,
             sam3_source=args.sam3_source,
             body_dir=args.body_dir,
+            dinov3_weights=args.dinov3_weights,
             package=args.package,
         )
     except Exception as error:
