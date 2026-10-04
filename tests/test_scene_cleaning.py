@@ -101,5 +101,40 @@ class FloorTest(unittest.TestCase):
         np.testing.assert_allclose(depth[5:8], np.linspace(0.9, 1.1, n)[5:8], atol=1e-9)
 
 
+class PicturesTest(unittest.TestCase):
+    def still_figure(self, track: int, frames: int, sway: float, rng: np.random.Generator) -> dict:
+        """A 300 px tall figure whose joints wobble by ``sway`` pixels (detection noise or a living body)."""
+        kp2d = rng.uniform(800, 1100, (1, 70, 2)) + rng.normal(0, sway, (frames, 70, 2))
+        box = np.tile([850.0, 400.0, 1000.0, 700.0], (frames, 1))
+        return {"track": np.full(frames, track), "frame": np.arange(frames), "kp2d": kp2d, "box": box}
+
+    def test_only_figures_that_hold_their_pose_for_seconds_are_candidates(self):
+        rng = np.random.default_rng(3)
+        figures = [
+            self.still_figure(0, 200, sway=1.5, rng=rng),  # a mural: the pose estimate barely jitters
+            self.still_figure(1, 200, sway=15.0, rng=rng),  # someone standing: sways by about 5% of their height
+            self.still_figure(2, 50, sway=1.5, rng=rng),  # someone frozen for two seconds only
+        ]
+        rows = {key: np.concatenate([f[key] for f in figures]) for key in figures[0]}
+        self.assertEqual(build._still_poses(rows, RATE), [0])
+
+    def test_a_still_bystander_is_kept_because_their_pixels_change(self):
+        rng = np.random.default_rng(4)
+        rows = {key: np.concatenate([f[key] for f in (self.still_figure(0, 100, 1.5, rng), self.still_figure(1, 100, 1.5, rng))])
+                for key in ("track", "frame", "kp2d", "box")}
+        rows["box"][100:] += [-400, 0, -400, 0]  # the bystander stands elsewhere in the picture
+        wall = rng.uniform(0, 255, (1080, 1920)).astype(np.float32)
+
+        def frames():
+            for number in range(100):
+                image = wall + rng.normal(0, 1.0, wall.shape)  # sensor noise everywhere
+                image[400:700, 450:600] = rng.uniform(0, 255, (300, 150))  # a living body: its pixels keep changing
+                if 40 <= number < 46:
+                    image[400:700, 850:1000] = 0  # someone walks in front of the mural
+                yield number, image
+
+        self.assertEqual(build._unchanging(frames(), rows, [0, 1]), [0])
+
+
 if __name__ == "__main__":
     unittest.main()

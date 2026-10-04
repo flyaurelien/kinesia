@@ -82,6 +82,7 @@ export type SceneFile = {
     ambiguous: { pieces: number[]; other: number[]; score: number }[];
     leftovers: { track: number; first: number; last: number; rows: number }[];
     off_floor: number;
+    pictures?: number;
   };
 };
 

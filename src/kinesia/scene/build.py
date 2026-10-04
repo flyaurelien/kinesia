@@ -13,6 +13,7 @@ from __future__ import annotations
 import colorsys
 import json
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ import numpy as np
 from .. import masks as mask_ops
 from ..paths import models_root
 from ..tracks import TracksFile, read_tracks
+from ..video import read_frames
 from . import export, filters, quat
 from .body_model import BodyModel
 from .ground import WorldFrame, find_floor, floor_factors, lowest_foot, smooth_scales
@@ -34,6 +36,13 @@ MAX_ASPECT = 2.5  # box width / height: anything wider is a bench, a banner or a
 TELEPORT_SPEED = 15.0  # m/s; a masklet moving faster between sightings has changed person
 SPRINT_HEIGHTS = 7.0  # the same across the picture, in person heights per second (crouched sprint)
 OFF_FLOOR_SHARE = 0.3  # pieces whose feet miss the floor this often are not on it
+# A painted or printed figure never moves. Measured on murals, the 2D joints
+# stay within 0.5-1.8% of the figure's height for the whole clip and its
+# pixels within 0.7-3.3 grey levels of their median. A bystander standing still
+# can hold a pose as well (2%), but their pixels change by 9 levels or more.
+PICTURE_SPREAD = 0.03  # of the figure's height, for 90% of the frames
+PICTURE_CHANGE = 6.0  # grey levels from the median picture, in a typical frame
+PICTURE_SECONDS = 3.0  # judged only over this long: briefly, anyone can stand still
 SHRINK = 0.6  # a box this much smaller than usual around that moment shows only part of its person
 # Views that tell who someone is: the person is this tall, shows most of their
 # box and is not hidden behind someone else.
@@ -102,6 +111,60 @@ def _pieces(rows: dict, points_rc: np.ndarray, rate: float) -> np.ndarray:
         piece[index] = ids
         next_id = int(ids[-1]) + 1 if len(ids) else next_id
     return piece
+
+
+def _still_poses(rows: dict, rate: float) -> list[int]:
+    """Masklets whose pose never moves over at least ``PICTURE_SECONDS``."""
+    still = []
+    kp2d, box = rows["kp2d"].astype(np.float64), rows["box"].astype(np.float64)
+    for track in np.unique(rows["track"]):
+        index = np.flatnonzero(rows["track"] == track)
+        if np.ptp(rows["frame"][index]) < PICTURE_SECONDS * rate:
+            continue
+        height = np.median(box[index, 3] - box[index, 1])
+        offset = np.linalg.norm(kp2d[index] - np.median(kp2d[index], axis=0), axis=2)
+        if np.percentile(np.median(offset, axis=1), 90) < PICTURE_SPREAD * height:
+            still.append(int(track))
+    return still
+
+
+def _unchanging(frames: Iterable[tuple[int, np.ndarray]], rows: dict, tracks: list[int]) -> list[int]:
+    """Of ``tracks``, those whose pixels stay the same: the figure itself never changes.
+
+    Compared in a typical frame (the median over frames), so that people
+    walking in front of a mural now and then do not make it look alive.
+    """
+    regions, crops = {}, {track: [] for track in tracks}
+    for track in tracks:
+        index = np.flatnonzero(rows["track"] == track)
+        x0, y0, x1, y1 = np.median(rows["box"][index], axis=0).round().astype(int)
+        regions[track] = (set(rows["frame"][index].tolist()), max(x0, 0), max(y0, 0), x1, y1)
+    for number, image in frames:
+        for track, (seen, x0, y0, x1, y1) in regions.items():
+            if number in seen:
+                crops[track].append(image[y0:y1, x0:x1].mean(axis=2) if image.ndim == 3 else image[y0:y1, x0:x1])
+    unchanging = []
+    for track, crop in crops.items():
+        if not crop:
+            continue
+        stack = np.stack(crop).astype(np.float32)
+        change = np.median(np.abs(stack - np.median(stack, axis=0)).mean(axis=(1, 2)))
+        if change < PICTURE_CHANGE:
+            unchanging.append(track)
+    return unchanging
+
+
+def _pictures(rows: dict, rate: float, video: Path) -> np.ndarray:
+    """Rows of masklets that are pictures of people (murals, posters), not people.
+
+    Asked for "person", SAM 3.1 also follows painted figures. With a fixed
+    camera they never move: the body model reads the same pose in every
+    frame, and their pixels stay the same. A living body sways, breathes and
+    shifts its weight, even when it holds a pose.
+    """
+    still = _still_poses(rows, rate)
+    pictures = _unchanging(read_frames(video), rows, still) if still and video.is_file() else []
+    return np.isin(rows["track"], pictures)
 
 
 def _partial_views(rows: dict, piece: np.ndarray, rate: float) -> np.ndarray:
@@ -229,6 +292,9 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     log("floor")
     box = rows["box"]
     rows = {key: value[box[:, 2] - box[:, 0] <= MAX_ASPECT * (box[:, 3] - box[:, 1])] for key, value in rows.items()}
+    picture = _pictures(rows, rate, folder / "video.mp4")
+    pictures = len(np.unique(rows["track"][picture]))
+    rows = {key: value[~picture] for key, value in rows.items()}
     points_rc = rows["kp3d"].astype(np.float64) + rows["cam_t"].astype(np.float64)[:, None, :]
     cut = rows["box"][:, 3] >= tracks.height - 2  # feet below the picture: their position is a guess
     plane = find_floor(points_rc[~cut])
@@ -334,13 +400,15 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
             "leftovers": found.leftovers,
             "calibration": found.calibration,
             "off_floor": off_floor,
+            "pictures": pictures,
         },
         "built_seconds": round(time.monotonic() - started, 1),
     }
     export.write_json(out / "scene.json", scene)
     log(
         f"scene: {len(motions)} people from {scene['identity']['pieces']} pieces of masklets "
-        f"({len(found.cuts)} cut at a change of person, {off_floor} off the floor) in {scene['built_seconds']} s"
+        f"({len(found.cuts)} cut at a change of person, {off_floor} off the floor, {pictures} pictures of people) "
+        f"in {scene['built_seconds']} s"
     )
     return scene
 
