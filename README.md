@@ -1,10 +1,12 @@
 <h1 align="center">Kinesia</h1>
 
-<p align="center"><b>Multi-person 3D motion capture from a single, ordinary video.</b></p>
+<p align="center"><b>Multi-person 3D motion capture from a single, ordinary video.</b><br>
+Drop a clip in the browser: everyone in it comes back as an animated 3D body, on one shared floor.</p>
 
 <p align="center">
   <a href="https://github.com/flyaurelien/kinesia/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/flyaurelien/kinesia/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: CC0-1.0" src="https://img.shields.io/badge/license-CC0--1.0-lightgrey.svg"></a>
+  <a href="#benchmark-3dpw"><img alt="3DPW: jitter halved" src="https://img.shields.io/badge/3DPW-jitter%20%E2%88%9249%25-2b7bba.svg"></a>
 </p>
 
 <p align="center">
@@ -18,10 +20,94 @@ sides. Source video by Khanh Hoang Minh on
 <a href="https://www.pexels.com/video/a-group-of-people-playing-basketball-at-night-19570048/">Pexels</a>.
 </sub></p>
 
-Kinesia follows every person in a video (a match, a training session, a dance),
+Kinesia follows every person in a video (a match, a dance, someone cooking),
 reconstructs each of them as a 3D body on every frame, and plays them back
 together in one animated scene you can orbit, follow, view from above or see
-through the original camera.
+through the original camera. It turns Meta's per-image models
+([SAM 3.1](https://github.com/facebookresearch/sam3),
+[SAM 3D Body](https://github.com/facebookresearch/sam-3d-body),
+[DINOv3](https://github.com/facebookresearch/dinov3)) into a video system:
+one identity per person for the whole clip, motion that is smooth and
+physically plausible, and a web app to explore it.
+
+- **Drop a video, get a 3D scene**: a local web app runs the analysis step by
+  step and opens the viewer when it is ready.
+- **Everyone, all the time**: people are tracked through crossings and
+  occlusions, and recognised by their appearance when they come back.
+- **Motion you can trust**: jitter halved on the 3DPW benchmark, feet planted
+  on the floor, jumps that follow gravity.
+- **Measurements**: per-person distance, speed, jumps and joint angles,
+  exported as CSV or JSON.
+
+## Examples
+
+<table>
+<tr>
+<td width="50%"><img src="docs/dance-solo.webp" width="100%" alt="A dancer on a basketball court at night (left) and her 3D body orbiting (right)."></td>
+<td width="50%"><img src="docs/dance-group.webp" width="100%" alt="Five dancers on a court at night (left) and their five 3D bodies in their own colours (right)."></td>
+</tr>
+<tr>
+<td><sub><b>Street dance, solo.</b> Fast turns and kicks; the two painted figures on the wall are recognised as pictures and left out.</sub></td>
+<td><sub><b>Street dance, five dancers.</b> Each keeps one identity for the whole clip.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/football.webp" width="100%" alt="An amateur football game with about fifteen players in bibs (left) and the players as 3D bodies (right)."></td>
+<td><img src="docs/cooking.webp" width="100%" alt="A cook mixing a batter behind a kitchen counter (left) and his full 3D body, legs included (right)."></td>
+</tr>
+<tr>
+<td><sub><b>Amateur football, about fifteen players.</b> Players crossing, hiding each other and running out of the picture.</sub></td>
+<td><sub><b>Cooking.</b> The counter hides the legs: the body model predicts them, and the floor is placed under them.</sub></td>
+</tr>
+</table>
+
+<sub>Source videos: street dance by Mixkit
+(<a href="https://mixkit.co/free-stock-video/a-young-woman-wearing-urban-trendy-clothes-dances-on-the-51323/">solo</a>,
+<a href="https://mixkit.co/free-stock-video/a-group-of-trendy-urban-young-people-dancing-on-a-51294/">group</a>,
+<a href="https://mixkit.co/license/#videoFree">Mixkit license</a>); football by Usman AbdulrasheedGambo and cooking by Gustavo Fring on Pexels
+(<a href="https://www.pexels.com/video/31370180/">football</a>,
+<a href="https://www.pexels.com/video/8779935/">cooking</a>,
+<a href="https://www.pexels.com/license/">Pexels license</a>).</sub>
+
+## Benchmark: 3DPW
+
+[3DPW](https://virtualhumans.mpi-inf.mpg.de/3DPW/) (von Marcard et al., ECCV
+2018) is the standard benchmark for 3D human pose in real-world video: people
+filmed outdoors with a phone, with ground-truth 3D joints from body-worn
+sensors. On the whole **test set** (24 sequences, 34,585 person-frames, 97% of
+the frames where a subject is visible), Kinesia is compared with the model it
+builds on, SAM 3D Body run on each frame independently:
+
+| Method | MPJPE ↓ (mm) | PA-MPJPE ↓ (mm) | Accel. error ↓ (mm/frame²) |
+| --- | ---: | ---: | ---: |
+| SAM 3D Body, frame by frame | 60.4 | 40.9 | 13.3 |
+| **Kinesia** (tracking, identities, temporal model) | **60.3** | **40.7** | **6.8** (−49%) |
+
+Kinesia halves the jitter (acceleration error) while keeping, and slightly
+improving, per-frame accuracy: the smoothing removes noise without lagging
+behind the motion. It is better on the acceleration error in all 24 sequences.
+
+<details>
+<summary>Protocol</summary>
+
+- Both methods are scored on the same frames and the same 12 joints that the
+  SMPL skeleton of the ground truth and the MHR skeleton of SAM 3D Body share
+  (shoulders, elbows, wrists, hips, knees, ankles), each pose centred between
+  its hips. Joint sets differ from the 14-joint protocol of most papers, so
+  these numbers compare the two rows above, not other leaderboards.
+- MPJPE: mean joint error in the camera's orientation. PA-MPJPE: the same
+  after the best rotation, scale and shift. Accel. error: error of the joints'
+  acceleration (Kanazawa et al., CVPR 2019), the usual measure of jitter.
+- Each ground-truth subject is matched to a detection by its 2D joints, and
+  that detection to the scene person drawn over it.
+- 3DPW is filmed with a moving phone, so the analyses use `--moving-camera`:
+  the floor, foot-contact and gravity steps, which assume a still camera, are
+  off. What is scored is tracking, identities and the temporal model of the
+  pose. Reproduce with `scripts/benchmark_3dpw.py` (see its header).
+- SAM 3.1 tracking memory grows with the number of people and the length of
+  the clip: 10 of the 24 sequences, long and full of passers-by, needed an
+  80 GB or 141 GB GPU instead of a 40 GB one.
+
+</details>
 
 ## What is hard here, and what Kinesia does about it
 
@@ -44,6 +130,7 @@ screen given back their own identity; no two people are ever merged.
 
 The viewer shows when each person is on screen (presence lanes), and gives
 distance, speed, jumps and joint angles per person, with CSV and JSON export.
+
 
 ## How it works
 
@@ -96,7 +183,7 @@ appearance, 3D scene) and opens the viewer when it is ready.
 Everything is also available from the command line:
 
 ```bash
-uv run --no-sync kinesia new input/match.mp4 --name "Sunday match"
+uv run --no-sync kinesia new input/match.mp4 --name "Sunday match"          # add --moving-camera for a moving camera
 uv run --no-sync kinesia process <run-id>                           # GPU stages, then the 3D scene
 uv run --no-sync kinesia cancel <run-id>                            # stop it; the GPU is freed
 uv run --no-sync kinesia scene <run-id>                             # rebuild the 3D scene
@@ -127,7 +214,10 @@ saved with the analysis.
 
 - **The camera must be fixed** (tripod, stand, or rested on something): one
   camera frame serves the whole clip. A panning, zooming or hand-held camera is
-  not supported: even a few degrees of panning slide everyone sideways in 3D.
+  not supported for the full pipeline: even a few degrees of panning slide
+  everyone sideways in 3D. For such clips, `kinesia new --moving-camera`
+  keeps tracking, identities and pose smoothing and skips the floor, foot
+  and gravity steps (this is how the 3DPW benchmark is run).
 - Works best when people are seen **whole** and at least ~50 pixels tall.
   SAM 3.1 is prompted with `person`, which finds the most people: on two test
   clips it found 90% and 97% of everyone that any prompt found, against 86%
@@ -156,12 +246,14 @@ saved with the analysis.
 
 ```bash
 PYTHONPATH=src uv run --no-sync python -m unittest discover -s tests   # backend, on the source tree
+uv run --no-sync python scripts/benchmark_3dpw.py <3DPW>/sequenceFiles/test <run-id>...   # 3DPW scores
 cd web-viewer && npx tsc --noEmit && npm test && npm run build
 ```
 
 ```text
 kinesia/
-  scripts/          install_gpu.sh (GPU packages), install_models.py (model weights)
+  scripts/          install_gpu.sh (GPU packages), install_models.py (model weights),
+                    benchmark_3dpw.py (3DPW scores)
   src/kinesia/
     pipeline.py     the steps of an analysis and the runner that carries them out
     inference/      the GPU stages: SAM 3.1 tracking, lens, SAM 3D Body, appearance
@@ -219,5 +311,7 @@ Kinesia's own code is dedicated to the **public domain** under
 [CC0 1.0 Universal](LICENSE). The vendored `vendor/sam-3d-body-main` keeps Meta's
 SAM License (included in that directory). Model weights are downloaded from their
 original gated sources and remain subject to their own license terms.
-`docs/demo.webp` is made from a video on Pexels (credited above), used under the
-[Pexels license](https://www.pexels.com/license/).
+The animations in `docs/` are made from videos on Pexels and Mixkit (credited
+above), used under the [Pexels license](https://www.pexels.com/license/) and the
+[Mixkit license](https://mixkit.co/license/#videoFree). 3DPW is not
+redistributed; it is downloaded from its authors under their research license.
