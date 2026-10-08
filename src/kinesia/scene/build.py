@@ -282,6 +282,7 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     out.mkdir(exist_ok=True)
     request = json.loads((folder / "request.json").read_text())
     rate = float(request["video"]["fps"])
+    fixed_camera = request.get("camera", "fixed") != "moving"
     tracks = read_tracks(raw / "tracks.jsonl.gz")
     with np.load(raw / "bodies.npz") as data:
         rows = {key: data[key] for key in data.files}
@@ -300,6 +301,8 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     plane = find_floor(points_rc[~cut])
     lowest = lowest_foot(points_rc, -plane.normal)
     depth, reachable = floor_factors(lowest, plane)
+    if not fixed_camera:  # a moving camera has no one floor: keep SAM 3D Body's own distance and size
+        depth, reachable = np.ones_like(depth), np.ones_like(reachable)
     piece = _pieces(rows, points_rc, rate)
     keep = _keep_on_floor(rows, piece, depth, reachable, cut)
     off_floor = len(np.unique(piece[~keep & (piece >= 0)]))
@@ -332,7 +335,7 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
             depth=depth[index],
             image_height=tracks.height,
         )
-        motions.append(animate(person, model, rate, world.rotation, world.origin, world.camera_position))
+        motions.append(animate(person, model, rate, world.rotation, world.origin, world.camera_position, fixed_camera))
         people.append(index)
 
     colours = palette(len(motions))

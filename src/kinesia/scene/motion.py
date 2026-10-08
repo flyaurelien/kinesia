@@ -153,7 +153,12 @@ def animate(
     world_rotation: np.ndarray,
     world_origin: np.ndarray,
     camera_position: np.ndarray,
+    fixed_camera: bool = True,
 ) -> PersonMotion:
+    """One person's motion. ``fixed_camera=False`` (a filming camera that moves)
+    skips what assumes a still camera: feet held on the floor, contact and
+    flight physics, and the leg bending that keeps planted feet still (the
+    scene build also leaves out the shared floor's depth correction)."""
     shape, scales = _identity(person)
     rest = model.rest_vertices(shape)
     params = person.model_params.astype(np.float64).copy()
@@ -204,7 +209,10 @@ def animate(
         body = trajectory.Body.from_keypoints(keypoints, first)
         airborne = ~planted.any(axis=1) & ((body.soles[..., 2] + first[None, :, 2]).min(axis=0) > CONTACT_HEIGHT)
         flight = trajectory.flights(first[:, 2] + body.mass[:, 2], airborne, rate)
-        final = trajectory.estimate(pelvis_t, camera_position, trusted, rate, body, planted, flight)
+        if fixed_camera:
+            final = trajectory.estimate(pelvis_t, camera_position, trusted, rate, body, planted, flight)
+        else:  # the "world" turns with the camera: contacts and gravity mean nothing in it
+            final = first
         shift = final - first
         pelvis[:, :3] = final
         states[:, :, :3] += shift[:, None, :]
@@ -213,8 +221,9 @@ def animate(
         # What creep is left is the legs' own: bend them so planted feet hold still.
         feet = np.stack([keypoints[:, list(LEFT_FOOT)], keypoints[:, list(RIGHT_FOOT)]])
         planted = _contacts(list(feet), rate)
-        moves = footlock.shifts(feet, planted, rate)
-        lq = footlock.bend_legs(model.joint_names, model.parents, states, lq, moves)
+        if fixed_camera:
+            moves = footlock.shifts(feet, planted, rate)
+            lq = footlock.bend_legs(model.joint_names, model.parents, states, lq, moves)
         states = _world_joints(model, pelvis, lt, lq, joint_scales)
         keypoints = model.keypoints(states, rest)
 
