@@ -20,6 +20,13 @@ IDF1 over all sequences, and HOTA (TrackEval) averaged per sequence. Not
 everyone in the picture is annotated, so the same metrics are also given
 with the tracks of unannotated people left out, as TRACE (CVPR 2023) does.
 
+Where people are: PCK_abs (the official script's absolute mode), the pelvis
+position error split into depth and lateral parts, and PCOD (SMAP's ordinal
+depth between people). How they move, as motion capture is judged: MPJPE and
+PA-MPJPE in mm, joint-angle and limb-length errors, limb-length drift,
+velocity and acceleration errors, and foot sliding while the true foot is
+still. Under occlusion: 3DPCK on the joints MuPoTS labels hidden or visible.
+
 Joints come from the body mesh, as for the published SMPL-based methods: the
 MHR mesh is carried onto the SMPL topology by Meta's barycentric map
 (``mhr2smpl_mapping.npz``, from facebookresearch/MHR), then the Human3.6M
@@ -188,7 +195,7 @@ def raw_detections(folder: Path, model: BodyModel, joints: Joints) -> dict:
     out = np.empty((len(rows["frame"]), 17, 3))
     for i in range(len(out)):
         verts = model.reference_vertices(rows["model_params"][i], rows["shape"][i], correctives=True) / 100.0
-        out[i] = joints.from_vertices(verts * np.array([1.0, -1.0, -1.0]))  # MHR axes -> camera axes
+        out[i] = joints.from_vertices(verts * np.array([1.0, -1.0, -1.0])) + rows["cam_t"][i]  # MHR axes -> camera
     uv = np.zeros((len(out), 17, 2))
     kp2d = rows["kp2d"].astype(np.float64)
     for joint, keypoint in MHR_MATCHING.items():
@@ -280,10 +287,69 @@ def to_gt_bone_lengths(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
     return out
 
 
-def pose_errors(annotations: np.ndarray, predictions: list[list[dict]]) -> tuple[np.ndarray, np.ndarray, int, int]:
-    """Per-joint errors (n, 17) of every annotated person ("all" protocol), a
-    flag for those matched to a prediction, and the people counts."""
-    errors, matched = [], []
+def procrustes(pred: np.ndarray, truth: np.ndarray) -> np.ndarray:
+    """``pred`` (J, 3) moved onto ``truth`` by the best similarity transform."""
+    mp, mt = pred.mean(0), truth.mean(0)
+    a, b = pred - mp, truth - mt
+    u, s, vt = np.linalg.svd(a.T @ b)
+    d = np.sign(np.linalg.det(u @ vt))
+    s[-1] *= d
+    u[:, -1] *= d
+    return (s.sum() / (a**2).sum()) * a @ (u @ vt) + mt
+
+
+# Joint angles, each the angle at the middle joint (MuPoTS joint numbers):
+# elbows, knees, shoulders (arm against trunk) and hips (thigh against trunk).
+ANGLES = {
+    "elbow": [(2, 3, 4), (5, 6, 7)],
+    "knee": [(8, 9, 10), (11, 12, 13)],
+    "shoulder": [(8, 2, 3), (11, 5, 6)],
+    "hip": [(1, 8, 9), (1, 11, 12)],
+}
+LIMBS = [(2, 3), (3, 4), (5, 6), (6, 7), (8, 9), (9, 10), (11, 12), (12, 13)]  # upper arms, forearms, thighs, shanks
+ANKLES = [10, 13]
+
+
+def angles(joints: np.ndarray) -> np.ndarray:
+    """(..., 8) joint angles in degrees, in ``ANGLES`` order, left and right."""
+    out = []
+    for triples in ANGLES.values():
+        for a, b, c in triples:
+            u, v = joints[..., a, :] - joints[..., b, :], joints[..., c, :] - joints[..., b, :]
+            cos = np.sum(u * v, axis=-1) / (np.linalg.norm(u, axis=-1) * np.linalg.norm(v, axis=-1)).clip(1e-9)
+            out.append(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
+    return np.stack(out, axis=-1)
+
+
+def limbs(joints: np.ndarray) -> np.ndarray:
+    return np.stack([np.linalg.norm(joints[..., a, :] - joints[..., b, :], axis=-1) for a, b in LIMBS], axis=-1)
+
+
+def pose_errors(annotations: np.ndarray, occlusion: np.ndarray, predictions: list[list[dict]], dt: float = 1 / 30) -> dict:
+    """Every measure of one sequence, people matched as the official script does.
+
+    Per annotated person ("all" protocol): ``errors`` (n, 17), the official
+    relative errors (pelvis-centred, true bone lengths, universal skeleton);
+    ``absolute`` (n, 17), the same without centring on the pelvis: the bones
+    are laid from the predicted pelvis, in camera coordinates (PCK_abs, as the
+    official script's absolute mode does); ``matched``; ``hidden``, MuPoTS's
+    per-joint occlusion labels.
+    Per matched person: ``mpjpe`` and ``pa_mpjpe`` (mm, 14 joints, ``annot3``,
+    pelvis-centred, no rescaling), ``root`` (3,) the pelvis position error in
+    camera axes (mm). Per pair of matched people in a frame: ``order``
+    whether their order in depth is right (PCOD, as SMAP's ``cal_ordinal.m``:
+    the same sign, or both depth gaps under 30 cm) and ``spacing`` the error
+    on the distance between their pelvises (mm). Per matched person and frame,
+    ``angle`` (8,) joint-angle errors (degrees) and ``limb`` (8,) limb-length
+    errors (mm). Over each annotated person's run of matched frames (``dt``
+    seconds apart): ``accel`` (m/s^2) and ``velocity`` (mm/s) errors of the
+    pelvis-centred joints, ``sliding``, how far an ankle moves (mm, per 1/30 s)
+    while the true one stays within 1 cm, and ``drift`` the spread (std, mm)
+    of each predicted limb's length.
+    """
+    out: dict[str, list] = {k: [] for k in ("errors", "absolute", "matched", "hidden", "mpjpe", "pa_mpjpe", "root", "order", "spacing",
+                                            "angle", "limb", "accel", "velocity", "sliding", "drift")}  # fmt: skip
+    runs: dict[int, list] = {}
     annotated = undetected = 0
     for i in range(annotations.shape[0]):
         valid = [k for k in range(annotations.shape[1]) if int(np.asarray(annotations[i, k]["isValidFrame"][0, 0]).squeeze())]
@@ -295,19 +361,69 @@ def pose_errors(annotations: np.ndarray, predictions: list[list[dict]]) -> tuple
         pred_2d = [p["uv"][MATCHING].T for p in preds]
         visible = [~((p[0] == 0) & (p[1] == 0)) for p in pred_2d]
         matching = identity_matching(gt_2d, pred_2d, visible)
+        roots = []
         for k, m in zip(valid, matching):
-            truth = np.asarray(annotations[i, k]["univ_annot3"][0, 0]).T  # (17, 3) mm
-            truth = truth - truth[PELVIS]
+            placed = np.asarray(annotations[i, k]["univ_annot3"][0, 0]).T  # (17, 3) mm, camera coordinates
+            universal = placed - placed[PELVIS]
+            metric = np.asarray(annotations[i, k]["annot3"][0, 0]).T  # (17, 3) mm, camera coordinates
+            out["hidden"].append(np.asarray(occlusion[i, k]).reshape(17).astype(bool))
             if m < 0:
                 undetected += 1
-                errors.append(np.full(17, 1e5))
-                matched.append(False)
+                out["errors"].append(np.full(17, 1e5))
+                out["absolute"].append(np.full(17, 1e5))
+                out["matched"].append(False)
                 continue
             pred = 1000.0 * preds[m]["joints"][H36M_TO_MUPOTS]
-            pred = to_gt_bone_lengths(pred - pred[PELVIS], truth)
-            errors.append(np.linalg.norm(pred - truth, axis=1))
-            matched.append(True)
-    return np.array(errors).reshape(-1, 17), np.array(matched, dtype=bool), annotated, undetected
+            centred = pred - pred[PELVIS]
+            out["errors"].append(np.linalg.norm(to_gt_bone_lengths(centred, universal) - universal, axis=1))
+            truth = metric - metric[PELVIS]
+            out["absolute"].append(np.linalg.norm(pred[PELVIS] + to_gt_bone_lengths(centred, universal) - placed, axis=1))
+            out["mpjpe"].append(np.linalg.norm(centred[:SCORED] - truth[:SCORED], axis=1).mean())
+            out["pa_mpjpe"].append(np.linalg.norm(procrustes(centred[:SCORED], truth[:SCORED]) - truth[:SCORED], axis=1).mean())
+            out["root"].append(pred[PELVIS] - metric[PELVIS])
+            out["angle"].append(np.abs(angles(centred) - angles(truth)))
+            out["limb"].append(np.abs(limbs(centred) - limbs(truth)))
+            out["matched"].append(True)
+            roots.append((pred[PELVIS], metric[PELVIS]))
+            runs.setdefault(k, []).append((i, centred[:SCORED], truth[:SCORED], pred[ANKLES], metric[ANKLES]))
+        for a in range(len(roots)):
+            for b in range(a + 1, len(roots)):
+                (pa, ta), (pb, tb) = roots[a], roots[b]
+                gap, true_gap = pa[2] - pb[2], ta[2] - tb[2]
+                out["order"].append(np.sign(gap) == np.sign(true_gap) or (abs(gap) < 300 and abs(true_gap) < 300))
+                out["spacing"].append(abs(np.linalg.norm(pa - pb) - np.linalg.norm(ta - tb)))
+    per_30 = 1 / (30 * dt)  # displacements over 1/30 s
+    for track in runs.values():
+        frames = np.array([r[0] for r in track])
+        pred, truth = np.array([r[1] for r in track]), np.array([r[2] for r in track])
+        feet, true_feet = np.array([r[3] for r in track]), np.array([r[4] for r in track])
+        out["drift"].append(limbs(pred).std(axis=0))
+        step = np.flatnonzero(np.diff(frames) == 1)
+        if len(step):
+            out["velocity"].extend(np.linalg.norm((pred[step + 1] - pred[step]) - (truth[step + 1] - truth[step]), axis=2).mean(axis=1) / dt)
+            moved = np.linalg.norm(feet[step + 1] - feet[step], axis=2) * per_30
+            still = np.linalg.norm(true_feet[step + 1] - true_feet[step], axis=2) * per_30 < 10.0
+            out["sliding"].extend(moved[still])
+        three = np.flatnonzero((frames[2:] - frames[1:-1] == 1) & (frames[1:-1] - frames[:-2] == 1))
+        if len(three):
+            a = pred[three + 2] - 2 * pred[three + 1] + pred[three]
+            b = truth[three + 2] - 2 * truth[three + 1] + truth[three]
+            out["accel"].extend(np.linalg.norm(a - b, axis=2).mean(axis=1) / dt**2 / 1000.0)
+    result = {k: np.array(v) for k, v in out.items()}
+    for key in ("errors", "absolute", "hidden"):
+        result[key] = result[key].reshape(-1, 17)
+    result["matched"] = result["matched"].astype(bool)
+    result["root"] = result["root"].reshape(-1, 3)
+    for key in ("angle", "limb", "drift"):
+        result[key] = result[key].reshape(-1, 8)
+    result["annotated"], result["undetected"] = annotated, undetected
+    return result
+
+
+def pck_masked(errors: np.ndarray, mask: np.ndarray) -> float:
+    """3DPCK over the joints ``mask`` selects (``mpii_evaluate_multiperson_errors_visibility_mask``)."""
+    e, m = errors[:, :SCORED], mask[:, :SCORED]
+    return 100.0 * float(np.mean(e[m] < PCK_MM)) if m.any() else float("nan")
 
 
 def pck_auc(errors: np.ndarray) -> tuple[float, float]:
@@ -437,6 +553,7 @@ def main() -> int:
     parser.add_argument("runs", nargs="+", help="analysis ids, one per sequence")
     parser.add_argument("--frames", choices=("all", "analysed"), default="all")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--cache", type=Path, help="folder keeping SAM 3D Body's own estimates between runs of this script")
     args = parser.parse_args()
 
     load_local_env()
@@ -450,6 +567,7 @@ def main() -> int:
         meta = json.loads((folder / "run.json").read_text())
         seq = int(re.search(r"ts(\d+)", meta["original_name"].lower()).group(1))
         annotations = loadmat(args.dataset / f"TS{seq}" / "annot.mat")["annotations"]
+        occlusion = loadmat(args.dataset / f"TS{seq}" / "occlusion.mat")["occlusion_labels"]
         frames = annotations.shape[0]
         source = probe(folder / meta["source"])
         step = int(round(source.fps / meta["video"]["fps"]))
@@ -457,16 +575,25 @@ def main() -> int:
         _, people = scene_people(folder, joints)
         ours = per_frame(people, step, frames, scale, args.frames)
         our_boxes = boxes_per_frame(people, step, frames, scale, args.frames)
-        theirs = raw_per_frame(raw_detections(folder, model, joints), step, frames, scale)
+        cached = args.cache / f"{run}.npz" if args.cache else None
+        if cached and cached.is_file():
+            with np.load(cached) as data:
+                raw = {key: data[key] for key in data.files}
+        else:
+            raw = raw_detections(folder, model, joints)
+            if cached:
+                cached.parent.mkdir(parents=True, exist_ok=True)
+                np.savez(cached, **raw)
+        theirs = raw_per_frame(raw, step, frames, scale)
         gt = tracking_gt[f"TS{seq}"]
         keep = np.ones(frames, dtype=bool)
         if args.frames == "analysed":  # only the annotations of analysed frames
             keep = np.arange(frames) % step == 0
             gt = {k: v for k, v in gt.items() if int(re.search(r"(\d+)", k).group(1)) % step == 0}
         for name, predictions in (("sam3d", theirs), ("kinesia", ours)):
-            errors, matched, annotated, undetected = pose_errors(annotations[keep], [p for i, p in enumerate(predictions) if keep[i]])
-            rows[name][seq] = {"errors": errors, "matched": matched, "annotated": annotated, "undetected": undetected,
-                               "people": int(annotations.shape[1])}  # fmt: skip
+            dt = (step if args.frames == "analysed" else 1) / source.fps
+            rows[name][seq] = pose_errors(annotations[keep], occlusion[keep], [p for i, p in enumerate(predictions) if keep[i]], dt)
+            rows[name][seq]["people"] = int(annotations.shape[1])
             tracks[name][seq] = (gt, predictions if name == "sam3d" else our_boxes)
         r, k = rows["sam3d"][seq], rows["kinesia"][seq]
         print(f"TS{seq:<3d} {int(annotations.shape[1])} people  "
@@ -485,6 +612,9 @@ def main() -> int:
 
         annotated = sum(rows[name][s]["annotated"] for s in seqs)
         undetected = sum(rows[name][s]["undetected"] for s in seqs)
+        pooled = {key: np.concatenate([rows[name][s][key] for s in seqs])
+                  for key in ("mpjpe", "pa_mpjpe", "root", "order", "spacing", "angle", "limb", "accel", "velocity", "sliding", "drift")}  # fmt: skip
+        root = pooled["root"]
         table[name] = {
             "3DPCK all": mean("all", 0),
             "3DPCK matched": mean("matched", 0),
@@ -494,6 +624,33 @@ def main() -> int:
             "3DPCK all, 3-person sequences": mean("all", 0, 3),
             "3DPCK matched, 2-person sequences": mean("matched", 0, 2),
             "3DPCK matched, 3-person sequences": mean("matched", 0, 3),
+            # Joints MuPoTS labels as hidden (by the person or someone else) or not,
+            # 3DPCK per sequence then averaged, as for the totals.
+            **{f"3DPCK {kind}, {which} joints": float(np.nanmean([
+                pck_masked(r["errors"][r["matched"]] if kind == "matched" else r["errors"],
+                           (r["hidden"][r["matched"]] if kind == "matched" else r["hidden"]) == (which == "occluded"))
+                for r in (rows[name][s] for s in seqs)]))
+               for kind in ("all", "matched") for which in ("occluded", "visible")},  # fmt: skip
+            # Where people are, not only how they hold themselves (camera coordinates).
+            "PCK_abs all": float(np.mean([pck_auc(rows[name][s]["absolute"])[0] for s in seqs])),
+            "PCK_abs matched": float(np.mean([pck_auc(rows[name][s]["absolute"][rows[name][s]["matched"]])[0] for s in seqs])),
+            "MPJPE (mm)": float(pooled["mpjpe"].mean()),
+            "PA-MPJPE (mm)": float(pooled["pa_mpjpe"].mean()),
+            "root error (mm)": float(np.linalg.norm(root, axis=1).mean()),
+            "root depth error (mm)": float(np.abs(root[:, 2]).mean()),
+            "root lateral error (mm)": float(np.linalg.norm(root[:, :2], axis=1).mean()),
+            "root depth bias (mm)": float(root[:, 2].mean()),
+            "roots within 25 cm (%)": 100.0 * float(np.mean(np.linalg.norm(root, axis=1) < 250)),
+            "PCOD (%)": 100.0 * float(np.nanmean([rows[name][s]["order"].mean() if len(rows[name][s]["order"]) else np.nan for s in seqs])),
+            "person spacing error (mm)": float(pooled["spacing"].mean()),
+            # How the body moves, as motion capture is judged.
+            **{f"{joint} angle error (deg)": float(pooled["angle"][:, 2 * n : 2 * n + 2].mean()) for n, joint in enumerate(ANGLES)},
+            "joint angle error (deg)": float(pooled["angle"].mean()),
+            "limb length error (mm)": float(pooled["limb"].mean()),
+            "limb length drift (mm, std over time)": float(pooled["drift"].mean()),
+            "velocity error (mm/s)": float(pooled["velocity"].mean()),
+            "acceleration error (m/s^2)": float(pooled["accel"].mean()),
+            "foot sliding (mm per 1/30 s)": float(pooled["sliding"].mean()),
             "detection recall": 100.0 * (1 - undetected / max(annotated, 1)),
             "sequences": len(seqs),
             "per sequence": {f"TS{s}": {"all": per_seq[s]["all"][0], "matched": per_seq[s]["matched"][0]} for s in seqs},
