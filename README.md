@@ -6,6 +6,7 @@ Drop a clip in the browser: everyone in it comes back as an animated 3D body, on
 <p align="center">
   <a href="https://github.com/flyaurelien/kinesia/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/flyaurelien/kinesia/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: CC0-1.0" src="https://img.shields.io/badge/license-CC0--1.0-lightgrey.svg"></a>
+  <a href="#benchmark-mupots-3d-fixed-camera-several-people"><img alt="MuPoTS-3D: 3DPCK 93.4" src="https://img.shields.io/badge/MuPoTS--3D-3DPCK%2093.4-2b7bba.svg"></a>
   <a href="#benchmark-3dpw"><img alt="3DPW: jitter halved" src="https://img.shields.io/badge/3DPW-jitter%20%E2%88%9249%25-2b7bba.svg"></a>
 </p>
 
@@ -33,7 +34,11 @@ physically plausible, and a web app to explore it.
 - **Drop a video, get a 3D scene**: a local web app runs the analysis step by
   step and opens the viewer when it is ready.
 - **Everyone, all the time**: people are tracked through crossings and
-  occlusions, and recognised by their appearance when they come back.
+  occlusions, and recognised by their appearance when they come back. On the
+  MuPoTS-3D benchmark, 99.8% of the annotated people are found, with no
+  identity switch.
+- **Accurate 3D pose**: 93.4 3DPCK on MuPoTS-3D (several people, one fixed
+  camera), above the published methods it is compared with (best: 89.0).
 - **Motion you can trust**: jitter halved on the 3DPW benchmark, feet planted
   on the floor, jumps that follow gravity.
 - **Measurements**: per-person distance, speed, jumps and joint angles,
