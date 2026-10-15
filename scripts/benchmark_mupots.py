@@ -601,67 +601,71 @@ def main() -> int:
               f"matched {pck_auc(r['errors'][r['matched']])[0]:5.1f} -> {pck_auc(k['errors'][k['matched']])[0]:5.1f}  "
               f"missed {r['undetected']}/{r['annotated']} -> {k['undetected']}/{k['annotated']}")  # fmt: skip
 
-    table: dict[str, dict] = {}
-    for name in rows:
-        seqs = sorted(rows[name])
-        per_seq = {s: {"all": pck_auc(rows[name][s]["errors"]), "matched": pck_auc(rows[name][s]["errors"][rows[name][s]["matched"]])} for s in seqs}
-
-        def mean(kind, index, subset=None):
-            chosen = [s for s in seqs if subset is None or rows[name][s]["people"] == subset]
-            return float(np.mean([per_seq[s][kind][index] for s in chosen])) if chosen else float("nan")
-
-        annotated = sum(rows[name][s]["annotated"] for s in seqs)
-        undetected = sum(rows[name][s]["undetected"] for s in seqs)
-        pooled = {key: np.concatenate([rows[name][s][key] for s in seqs])
-                  for key in ("mpjpe", "pa_mpjpe", "root", "order", "spacing", "angle", "limb", "accel", "velocity", "sliding", "drift")}  # fmt: skip
-        root = pooled["root"]
-        table[name] = {
-            "3DPCK all": mean("all", 0),
-            "3DPCK matched": mean("matched", 0),
-            "AUC all": mean("all", 1),
-            "AUC matched": mean("matched", 1),
-            "3DPCK all, 2-person sequences": mean("all", 0, 2),
-            "3DPCK all, 3-person sequences": mean("all", 0, 3),
-            "3DPCK matched, 2-person sequences": mean("matched", 0, 2),
-            "3DPCK matched, 3-person sequences": mean("matched", 0, 3),
-            # Joints MuPoTS labels as hidden (by the person or someone else) or not,
-            # 3DPCK per sequence then averaged, as for the totals.
-            **{f"3DPCK {kind}, {which} joints": float(np.nanmean([
-                pck_masked(r["errors"][r["matched"]] if kind == "matched" else r["errors"],
-                           (r["hidden"][r["matched"]] if kind == "matched" else r["hidden"]) == (which == "occluded"))
-                for r in (rows[name][s] for s in seqs)]))
-               for kind in ("all", "matched") for which in ("occluded", "visible")},  # fmt: skip
-            # Where people are, not only how they hold themselves (camera coordinates).
-            "PCK_abs all": float(np.mean([pck_auc(rows[name][s]["absolute"])[0] for s in seqs])),
-            "PCK_abs matched": float(np.mean([pck_auc(rows[name][s]["absolute"][rows[name][s]["matched"]])[0] for s in seqs])),
-            "MPJPE (mm)": float(pooled["mpjpe"].mean()),
-            "PA-MPJPE (mm)": float(pooled["pa_mpjpe"].mean()),
-            "root error (mm)": float(np.linalg.norm(root, axis=1).mean()),
-            "root depth error (mm)": float(np.abs(root[:, 2]).mean()),
-            "root lateral error (mm)": float(np.linalg.norm(root[:, :2], axis=1).mean()),
-            "root depth bias (mm)": float(root[:, 2].mean()),
-            "roots within 25 cm (%)": 100.0 * float(np.mean(np.linalg.norm(root, axis=1) < 250)),
-            "PCOD (%)": 100.0 * float(np.nanmean([rows[name][s]["order"].mean() if len(rows[name][s]["order"]) else np.nan for s in seqs])),
-            "person spacing error (mm)": float(pooled["spacing"].mean()),
-            # How the body moves, as motion capture is judged.
-            **{f"{joint} angle error (deg)": float(pooled["angle"][:, 2 * n : 2 * n + 2].mean()) for n, joint in enumerate(ANGLES)},
-            "joint angle error (deg)": float(pooled["angle"].mean()),
-            "limb length error (mm)": float(pooled["limb"].mean()),
-            "limb length drift (mm, std over time)": float(pooled["drift"].mean()),
-            "velocity error (mm/s)": float(pooled["velocity"].mean()),
-            "acceleration error (m/s^2)": float(pooled["accel"].mean()),
-            "foot sliding (mm per 1/30 s)": float(pooled["sliding"].mean()),
-            "detection recall": 100.0 * (1 - undetected / max(annotated, 1)),
-            "sequences": len(seqs),
-            "per sequence": {f"TS{s}": {"all": per_seq[s]["all"][0], "matched": per_seq[s]["matched"][0]} for s in seqs},
-            "tracking": tracking(tracks[name]),
-            "tracking, annotated people only": tracking(tracks[name], filtered=True),
-        }
+    table: dict[str, dict] = {name: summarise(rows[name], tracks[name]) for name in rows}
     table["frames"] = args.frames
     print(json.dumps({k: ({kk: vv for kk, vv in v.items() if kk != "per sequence"} if isinstance(v, dict) else v) for k, v in table.items()}, indent=1))
     if args.json:
         args.json.write_text(json.dumps(table, indent=1))
     return 0
+
+
+def summarise(rows: dict[int, dict], tracks: dict[int, tuple]) -> dict:
+    """One method's table: ``rows`` the ``pose_errors`` of each sequence (with
+    ``people``), ``tracks`` each sequence's ``(tracking gt, per-frame boxes)``."""
+    seqs = sorted(rows)
+    per_seq = {s: {"all": pck_auc(rows[s]["errors"]), "matched": pck_auc(rows[s]["errors"][rows[s]["matched"]])} for s in seqs}
+
+    def mean(kind, index, subset=None):
+        chosen = [s for s in seqs if subset is None or rows[s]["people"] == subset]
+        return float(np.mean([per_seq[s][kind][index] for s in chosen])) if chosen else float("nan")
+
+    annotated = sum(rows[s]["annotated"] for s in seqs)
+    undetected = sum(rows[s]["undetected"] for s in seqs)
+    pooled = {key: np.concatenate([rows[s][key] for s in seqs])
+              for key in ("mpjpe", "pa_mpjpe", "root", "order", "spacing", "angle", "limb", "accel", "velocity", "sliding", "drift")}  # fmt: skip
+    root = pooled["root"]
+    return {
+        "3DPCK all": mean("all", 0),
+        "3DPCK matched": mean("matched", 0),
+        "AUC all": mean("all", 1),
+        "AUC matched": mean("matched", 1),
+        "3DPCK all, 2-person sequences": mean("all", 0, 2),
+        "3DPCK all, 3-person sequences": mean("all", 0, 3),
+        "3DPCK matched, 2-person sequences": mean("matched", 0, 2),
+        "3DPCK matched, 3-person sequences": mean("matched", 0, 3),
+        # Joints MuPoTS labels as hidden (by the person or someone else) or not,
+        # 3DPCK per sequence then averaged, as for the totals.
+        **{f"3DPCK {kind}, {which} joints": float(np.nanmean([
+            pck_masked(r["errors"][r["matched"]] if kind == "matched" else r["errors"],
+                       (r["hidden"][r["matched"]] if kind == "matched" else r["hidden"]) == (which == "occluded"))
+            for r in (rows[s] for s in seqs)]))
+           for kind in ("all", "matched") for which in ("occluded", "visible")},  # fmt: skip
+        # Where people are, not only how they hold themselves (camera coordinates).
+        "PCK_abs all": float(np.mean([pck_auc(rows[s]["absolute"])[0] for s in seqs])),
+        "PCK_abs matched": float(np.mean([pck_auc(rows[s]["absolute"][rows[s]["matched"]])[0] for s in seqs])),
+        "MPJPE (mm)": float(pooled["mpjpe"].mean()),
+        "PA-MPJPE (mm)": float(pooled["pa_mpjpe"].mean()),
+        "root error (mm)": float(np.linalg.norm(root, axis=1).mean()),
+        "root depth error (mm)": float(np.abs(root[:, 2]).mean()),
+        "root lateral error (mm)": float(np.linalg.norm(root[:, :2], axis=1).mean()),
+        "root depth bias (mm)": float(root[:, 2].mean()),
+        "roots within 25 cm (%)": 100.0 * float(np.mean(np.linalg.norm(root, axis=1) < 250)),
+        "PCOD (%)": 100.0 * float(np.nanmean([rows[s]["order"].mean() if len(rows[s]["order"]) else np.nan for s in seqs])),
+        "person spacing error (mm)": float(pooled["spacing"].mean()),
+        # How the body moves, as motion capture is judged.
+        **{f"{joint} angle error (deg)": float(pooled["angle"][:, 2 * n : 2 * n + 2].mean()) for n, joint in enumerate(ANGLES)},
+        "joint angle error (deg)": float(pooled["angle"].mean()),
+        "limb length error (mm)": float(pooled["limb"].mean()),
+        "limb length drift (mm, std over time)": float(pooled["drift"].mean()),
+        "velocity error (mm/s)": float(pooled["velocity"].mean()),
+        "acceleration error (m/s^2)": float(pooled["accel"].mean()),
+        "foot sliding (mm per 1/30 s)": float(pooled["sliding"].mean()),
+        "detection recall": 100.0 * (1 - undetected / max(annotated, 1)),
+        "sequences": len(seqs),
+        "per sequence": {f"TS{s}": {"all": per_seq[s]["all"][0], "matched": per_seq[s]["matched"][0]} for s in seqs},
+        "tracking": tracking(tracks),
+        "tracking, annotated people only": tracking(tracks, filtered=True),
+    }
 
 
 if __name__ == "__main__":

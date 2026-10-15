@@ -170,12 +170,15 @@ boxes, no training on MuPoTS.
 
 **What is compared.** Kinesia is not a new pose network: it is a video
 pipeline around Meta's per-image models. Two of its rows are scored on the
-same detections, so the difference between them is what the pipeline adds:
+same detections, so the difference between them is what the pipeline adds.
+SAM-Body4D, the closest open-source pipeline built on the same models, is run
+end to end in its own automatic mode⁴:
 
 | Row | People found and followed | 3D body | Identity | Over time |
 | --- | --- | --- | --- | --- |
 | SAM 3D Body, frame by frame | SAM 3.1 in video mode, text prompt `person` | SAM 3D Body (DINOv3 backbone) on each frame alone | SAM 3.1's masklets | nothing |
 | **Kinesia** | the same | the same | masklets cut where they change hands and joined again by appearance (DINOv3 ViT-H+, colours) | see below |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | ViTDet boxes on the first frame where it finds anyone, followed by SAM 3.1; nobody is added later | SAM 3D Body on each masklet, its own MoGe-2 lens | SAM 3.1's masklets | Kalman filter on body pose, one body shape, smoothed body rotation |
 
 In Kinesia, SAM 3.1 detects and segments everyone the prompt `person` finds
 (at least 48 px tall, up to 64 people) and carries each mask through the clip
@@ -208,13 +211,17 @@ measures detection; "Matched" scores only the people found.
 | Moon et al. (RootNet + PoseNet) | 81.8 | 82.5 |
 | Multi-HMR (ViT-L, 896 px) | 85.0 | 89.3 |
 | SAT-HMR | 89.0 | 90.1 |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | 92.9 | 93.8 |
 | SAM 3D Body, frame by frame¹ | 93.6 | 93.7 |
 | **Kinesia** | 93.4 | 93.6 |
 
 Kinesia finds every annotated person in 99.8% of frames. On the 2-person
 sequences it scores 93.3 (All), on the 3-person ones 93.6: crowding does not
 cost it. Every MuPoTS sequence has 2 or 3 people, so a lone person cannot be
-scored here.
+scored here. SAM-Body4D reconstructs the people it follows as well (93.8
+Matched) but finds them in 98.3% of frames: it prompts the tracker once, at
+the start, so someone it loses is not found again (on TS14, a person hidden
+by another for about 300 frames).
 
 ### Under occlusion
 
@@ -226,6 +233,7 @@ else; about a quarter of all joints). 3DPCK, All:
 | Mehta et al. 2018 | 48.7 | 70.0 |
 | XNect (stage II) | 58.8 | 76.0 |
 | Dabral et al. 2019 | 61.0 | 75.6 |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | 87.2 | 94.8 |
 | SAM 3D Body, frame by frame¹ | 89.0 | 94.9 |
 | **Kinesia** | **89.7** | 94.5 |
 
@@ -249,6 +257,7 @@ ground truth as a calibrated camera would give it.
 | DRM (Jin et al. 2022) | not stated | 39.3 / 41.0 | – | – |
 | Cheng et al. 2021 | not stated | – / 48.0 | – | – |
 | Multi-HMR | known (unknown) | – | – | 97.9 (95.1) |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | estimated | 5.0 / 5.0 | 35.8 cm | 99.3 |
 | SAM 3D Body, frame by frame¹ | estimated | 10.9 / 10.9 | 37.4 cm | 99.4 |
 | **Kinesia** | estimated | 7.0 / 7.0 | 36.2 cm | 99.4 |
 | SAM 3D Body, frame by frame¹ | calibrated | 30.3 / 30.4 | 22.2 cm | 99.4 |
@@ -266,28 +275,33 @@ would do worse still (18.5 PCK_abs, 27.1 cm). A known limit.
 
 ### Motion-capture quality
 
-What motion capture is judged on, for the people matched in both rows, on the
+What motion capture is judged on, for the people each row matches, on the
 same frames (estimated focal length). No published method reports these on
-MuPoTS; the comparison is with the frame-by-frame model.
+MuPoTS; the comparison is with the frame-by-frame model and SAM-Body4D.
 
-| | SAM 3D Body, frame by frame | **Kinesia** |
-| --- | ---: | ---: |
-| MPJPE, pelvis-centred, 14 joints (mm) ↓ | 94.0 | 95.2 |
-| PA-MPJPE (mm) ↓ | 62.5 | 63.8 |
-| Joint angle error, mean (°) ↓ | 10.2 | 10.8 |
-| — elbow / knee / shoulder / hip (°) | 15.2 / 10.2 / 7.4 / 8.2 | 15.3 / 11.6 / 7.7 / 8.6 |
-| Limb length error (mm) ↓ | 42.5 | **41.7** |
-| Limb length change over time, std (mm) ↓ | 10.5 | **9.4** |
-| Velocity error (mm/s) ↓ | 537 | **466** |
-| Acceleration error (m/s²) ↓ | 19.7 | **15.0** |
-| Foot sliding while the true foot is still (mm per 1/30 s) ↓ | 19.5 | **3.3** |
-| Error on the distance between two people (mm) ↓ | 166 | 170 |
+| | SAM 3D Body, frame by frame | SAM-Body4D (SAM 3.1)⁴ | **Kinesia** |
+| --- | ---: | ---: | ---: |
+| MPJPE, pelvis-centred, 14 joints (mm) ↓ | 94.0 | 95.3 | 95.2 |
+| PA-MPJPE (mm) ↓ | 62.5 | 63.4 | 63.8 |
+| Joint angle error, mean (°) ↓ | 10.2 | 10.4 | 10.8 |
+| — elbow / knee / shoulder / hip (°) | 15.2 / 10.2 / 7.4 / 8.2 | 15.4 / 10.2 / 7.7 / 8.2 | 15.3 / 11.6 / 7.7 / 8.6 |
+| Limb length error (mm) ↓ | 42.5 | 44.0 | **41.7** |
+| Limb length change over time, std (mm) ↓ | 10.5 | 10.5 | **9.4** |
+| Velocity error (mm/s) ↓ | 537 | 579 | **466** |
+| Acceleration error (m/s²) ↓ | 19.7 | 22.3 | **15.0** |
+| Foot sliding while the true foot is still (mm per 1/30 s) ↓ | 19.5 | 27.7 | **3.3** |
+| Error on the distance between two people (mm) ↓ | 166 | 179 | 170 |
 
 Kinesia gives up about 1 mm of joint position and half a degree of joint
 angle, most of it at the knees, where legs are bent to hold planted feet, and
 gains motion that is closer to the truth: 13% less velocity error, 24% less
-acceleration error and six times less foot sliding. MuPoTS has no
-ground-truth surface, so mesh error (PVE) cannot be measured.
+acceleration error and six times less foot sliding. SAM-Body4D's smoothing
+(a Kalman filter on body pose, one body shape per clip) does not show in these
+measures: its velocity and acceleration errors are 8% and 13% above the
+frame-by-frame model's and its feet slide 40% more; Kinesia has 20% less
+velocity error, a third less acceleration error and eight times less foot
+sliding than SAM-Body4D. MuPoTS has no ground-truth surface, so mesh error
+(PVE) cannot be measured.
 
 ### Tracking
 
@@ -297,19 +311,24 @@ The protocol of T3DP and PHALP and their released ground-truth boxes
 | Method | IDs ↓ | MOTA ↑ | IDF1 ↑ | HOTA ↑ |
 | --- | ---: | ---: | ---: | ---: |
 | T3DP | 38 | 62.1 | 79.1 | 59.2 |
-| PHALP | 22 | 66.2 | 81.4 | 59.4 |
-| **Kinesia** | **0** | 45.0 | 78.4 | **61.6** |
+| PHALP | 22 | **66.2** | 81.4 | 59.4 |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | **0** | 60.1 | **83.1** | **63.5** |
+| **Kinesia** | **0** | 45.0 | 78.4 | 61.6 |
 | *annotated people only³:* | | | | |
 | ByteTrack (as run by TRACE) | 15 | 73.3 | 84.6 | 63.5 |
 | TRACE | 0 | 86.9 | 93.4 | 65.3 |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | 0 | 94.3 | 97.1 | 73.7 |
 | **Kinesia** | **0** | **97.3** | **98.6** | **74.2** |
 
-Kinesia makes no identity switch and has the highest HOTA under the strict
-protocol, but a lower MOTA and IDF1 than PHALP: it also follows the people
-MuPoTS does not annotate (a third person indoors, someone hidden behind a
-subject, passers-by far away), which the protocol counts as false positives
+Kinesia makes no identity switch and has a higher HOTA than T3DP and PHALP
+under the strict protocol, but a lower MOTA and IDF1: it also follows the
+people MuPoTS does not annotate (a third person indoors, someone hidden behind
+a subject, passers-by far away), which the protocol counts as false positives
 (precision 65%). Leaving those people out of the output would raise MOTA
-without making Kinesia any better, so it does not.
+without making Kinesia any better, so it does not. SAM-Body4D, which follows
+only the people it saw at the start (precision 72%), scores higher under the
+strict protocol and lower once unannotated people are left out, where the
+people it lost count against it.
 
 ### Compute time
 
@@ -331,7 +350,9 @@ about 120 ms (ViT-L, 896 px, V100), both per image without tracking; WHAM
 takes 113 ms per frame for its whole pipeline (A100); CoMotion
 176 ms and 4DHumans 2,163 ms per frame with tracking (V100, measured by
 CoMotion); SAM 3D Body alone runs at 0.6 to 1.0 frames per second with its
-own detector (RTX 6000 Ada, measured by Fast SAM 3D Body). Kinesia sits with
+own detector (RTX 6000 Ada, measured by Fast SAM 3D Body). SAM-Body4D, as run
+here (SAM 3.1, no occlusion refiner), took 0.53 s per frame on an H100
+(80 GB), model loading included. Kinesia sits with
 the offline methods: it trades speed for identities, a shared world and
 cleaner motion.
 
@@ -383,10 +404,39 @@ cleaner motion.
   if its box covers an annotated person (IoU ≥ 0.5) in at least half of the
   annotated frames where it appears. TRACE does not publish its exact rule,
   so this half of the table is indicative.
+- ⁴ [SAM-Body4D](https://arxiv.org/abs/2512.08406) (Gao, Miao and Han,
+  2025; [code](https://github.com/gaomingqi/sam-body4d), commit 21af102)
+  publishes no numbers. It is run in its own automatic mode
+  (`scripts/offline_app.py`) on the same videos, every frame: ViTDet looks
+  for people from frame 10 on and stops at the first frame where it finds
+  anyone, their boxes prompt the video segmenter, which follows them through
+  the clip, and SAM 3D Body reconstructs every masklet with SAM-Body4D's
+  smoothing and its own MoGe-2 lens. Its segmenter is SAM 3, whose checkpoint
+  (`facebook/sam3`) is gated and was not available here, so SAM 3.1 (the
+  checkpoint Kinesia uses) stands in for it, prompted with the same boxes
+  (as SAM's two box corners); the standalone SAM 3.1 tracker of this
+  revision also needed its video loader fixed (it does not scale pixels to
+  0–1). The row is SAM-Body4D's method with SAM 3.1, not the published
+  system. Its Diffusion-VAS occlusion refiner is off (`completion.enable:
+  false`, as its authors advise unless occlusions are severe and long). With
+  it, on the two most occluded sequences, 3DPCK All drops from 94.5 to 93.1
+  (TS18) and from 94.5 to 93.0 (TS19), on hidden joints from 92.1 to 87.6,
+  at 5.8 s per frame instead of 0.67 (after a one-line fix to a crash when an
+  occlusion reaches the last frame of one of its 64-frame batches). As published, its code gives every person
+  the body shape and scale of the first person it reconstructs (people are
+  reconstructed one at a time and its per-person table is keyed by their
+  index in the batch, always 0); 3DPCK's bone rescaling hides this, limb
+  lengths do not. Only how its outputs are saved differs: one file of MHR
+  parameters instead of meshes and rendered frames
+  (`scripts/benchmark_mupots_sambody4d.py`), whose rebuilt meshes match its
+  own within 2 mm, scored by the same code. Pose, position and tracking use
+  all frames, motion-capture measures Kinesia's analysed frames. It ran on
+  80 GB H100s.
 - The calibrated rows are separate analyses made with `kinesia new --focal`,
   the focal length fitted per sequence to the ground truth's 2D and 3D joints
   (1,101 to 1,509 px).
-- Reproduce with `scripts/benchmark_mupots.py` (see its header). The GPU
+- Reproduce with `scripts/benchmark_mupots.py`, and SAM-Body4D with
+  `scripts/benchmark_mupots_sambody4d.py` (see their headers). Kinesia's GPU
   stages ran on 40 GB A100s.
 
 </details>
