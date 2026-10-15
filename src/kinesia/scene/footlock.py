@@ -19,6 +19,7 @@ from . import quat
 
 RAMP_SECONDS = 0.15
 MAX_SHIFT = 0.15  # metres: a bigger correction means a mistaken contact, not a creeping foot
+MAX_DRIFT = 0.10  # metres: a foot that wanders this far from its spot was turning or stepping, not planted
 LEGS = (("l_upleg", "l_lowleg", "l_foot"), ("r_upleg", "r_lowleg", "r_foot"))
 
 
@@ -31,7 +32,10 @@ def shifts(feet: np.ndarray, planted: np.ndarray, rate: float) -> np.ndarray:
     """How far each ankle should move (2, N, 3), from the foot keypoints (2, N, K, 3).
 
     During a contact the foot is brought to the mean spot of that contact,
-    sole on the floor; no foot may be below the floor at any time.
+    sole on the floor; no foot may be below the floor at any time. A contact
+    over which the foot wanders further than ``MAX_DRIFT`` from that spot is
+    a pivot or a slow step taken for a contact: pinning it would bend a leg
+    the video shows straight, so it is left as it is.
     """
     count = feet.shape[1]
     ramp = max(1, int(round(RAMP_SECONDS * rate)))
@@ -41,7 +45,10 @@ def shifts(feet: np.ndarray, planted: np.ndarray, rate: float) -> np.ndarray:
         sole = feet[side][..., 2].min(axis=1)
         target, weight = np.zeros((count, 3)), np.zeros(count)
         for a, b in _runs(planted[:, side]):
-            target[a:b, :2] = centre[a:b, :2].mean(axis=0) - centre[a:b, :2]
+            spot = centre[a:b, :2].mean(axis=0)
+            if np.linalg.norm(centre[a:b, :2] - spot, axis=1).max() > MAX_DRIFT:
+                continue
+            target[a:b, :2] = spot - centre[a:b, :2]
             target[a:b, 2] = -sole[a:b]
             weight[a:b] = 1.0
             for k in range(1, ramp + 1):  # fade the correction in before and out after

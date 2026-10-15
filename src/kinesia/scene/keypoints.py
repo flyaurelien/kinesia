@@ -14,6 +14,7 @@ NECK = 69
 LEFT_FOOT = (LEFT_BIG_TOE, LEFT_SMALL_TOE, LEFT_HEEL)
 RIGHT_FOOT = (RIGHT_BIG_TOE, RIGHT_SMALL_TOE, RIGHT_HEEL)
 FEET = LEFT_FOOT + RIGHT_FOOT
+BODY = (*range(RIGHT_HEEL + 1), RIGHT_WRIST, LEFT_WRIST)  # head to feet, without the hands' own points
 
 # Bones drawn by the viewer's skeleton overlay (keypoint index pairs).
 BONES = (

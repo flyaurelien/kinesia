@@ -84,6 +84,16 @@ class PiecesTest(unittest.TestCase):
         self.assertNotEqual(piece[0], piece[30])
 
 
+class WideBoxTest(unittest.TestCase):
+    def test_a_banner_is_left_out_and_a_push_up_is_kept(self):
+        rows = {"box": np.array([[0.0, 0.0, 400.0, 100.0], [0.0, 0.0, 400.0, 100.0], [0.0, 0.0, 100.0, 200.0]]),
+                "kp2d": np.zeros((3, 70, 2))}  # fmt: skip
+        rows["kp2d"][0, :, 0] = np.linspace(150.0, 250.0, 70)  # one upright figure in a wide mask
+        rows["kp2d"][1, :, 0] = np.linspace(10.0, 390.0, 70)  # a body stretched along the floor
+        rows["kp2d"][2, :, 0] = np.linspace(40.0, 60.0, 70)  # upright, in an upright box
+        self.assertEqual(build._not_a_body(rows).tolist(), [True, False, False])
+
+
 class FloorTest(unittest.TestCase):
     def test_someone_off_the_floor_is_left_out_and_gaps_are_filled(self):
         n = 40

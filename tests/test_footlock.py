@@ -66,6 +66,15 @@ class FootLockTest(unittest.TestCase):
         self.assertEqual(moves[0, 0, 0], 0.0)  # far from the contact, nothing moves sideways
         self.assertGreater(abs(moves[0, 4, 0]), 0.0)  # but the correction fades in before it
 
+    def test_a_foot_that_wanders_is_not_pinned(self):
+        frames = 20
+        feet = np.zeros((2, frames, 3, 3))
+        feet[0, :, :, 0] = np.linspace(0.0, 0.6, frames)[:, None]  # a slow step taken for a contact
+        planted = np.zeros((frames, 2), bool)
+        planted[5:15, 0] = True
+        moves = footlock.shifts(feet, planted, 30.0)
+        self.assertTrue(np.allclose(moves[0, :, :2], 0.0))  # left where the video shows it
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,13 +26,14 @@ from . import export, filters, quat
 from .body_model import BodyModel
 from .ground import WorldFrame, find_floor, floor_factors, lowest_foot, smooth_scales
 from .identity import Observations, identify
-from .keypoints import BONES, LEFT_HIP, RIGHT_HIP
+from .keypoints import BODY, BONES, LEFT_HIP, RIGHT_HIP
 from .metrics import SERIES, person_metrics
 from .motion import PersonFrames, animate
 
 SCENE_VERSION = 1
 MIN_PERSON_FRAMES = 8
-MAX_ASPECT = 2.5  # box width / height: anything wider is a bench, a banner or a group
+MAX_ASPECT = 2.5  # box width / height beyond which a box may hold a bench, a banner or a group...
+BODY_WIDTH = 0.85  # ...unless the body found in it spans this much of its width (someone lying, a push-up)
 TELEPORT_SPEED = 15.0  # m/s; a masklet moving faster between sightings has changed person
 SPRINT_HEIGHTS = 7.0  # the same across the picture, in person heights per second (crouched sprint)
 OFF_FLOOR_SHARE = 0.3  # pieces whose feet miss the floor this often are not on it
@@ -167,14 +168,28 @@ def _pictures(rows: dict, rate: float, video: Path) -> np.ndarray:
     return np.isin(rows["track"], pictures)
 
 
+def _not_a_body(rows: dict) -> np.ndarray:
+    """Rows whose box is far wider than the body SAM 3D Body found in it.
+
+    Asked for "person", SAM 3.1 sometimes returns a bench, a banner or several
+    people under one mask: a box much wider than it is tall, the body model's
+    guess filling only a slice of it. Someone lying down or doing push-ups is
+    just as wide, but their body spans the whole box.
+    """
+    box = rows["box"].astype(np.float64)
+    width = box[:, 2] - box[:, 0]
+    body = np.ptp(rows["kp2d"][:, list(BODY), 0].astype(np.float64), axis=1)
+    return (width > MAX_ASPECT * (box[:, 3] - box[:, 1])) & (body < BODY_WIDTH * width)
+
+
 def _partial_views(rows: dict, piece: np.ndarray, rate: float) -> np.ndarray:
     """Rows whose box suddenly shrinks well below its size around that moment.
 
     When someone passes in front, a mask can cover only the head and
     shoulders for a moment; the body model then guesses the rest of the body,
     and its distance with it (one such guess put a player 1.3 m away). Those
-    rows still tell who the person is, but their bodies are left out of the
-    motion, which fills short gaps.
+    rows still tell who the person is and how they hold themselves, but not
+    where they are: the motion takes their position from the frames around.
     """
     box = rows["box"].astype(np.float64)
     diagonal = np.hypot(box[:, 2] - box[:, 0], box[:, 3] - box[:, 1])
@@ -291,8 +306,7 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     model = BodyModel(body_dir or models_root() / "sam-3d-body-dinov3")
 
     log("floor")
-    box = rows["box"]
-    rows = {key: value[box[:, 2] - box[:, 0] <= MAX_ASPECT * (box[:, 3] - box[:, 1])] for key, value in rows.items()}
+    rows = {key: value[~_not_a_body(rows)] for key, value in rows.items()}
     picture = _pictures(rows, rate, folder / "video.mp4")
     pictures = len(np.unique(rows["track"][picture]))
     rows = {key: value[~picture] for key, value in rows.items()}
@@ -315,10 +329,10 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     found = identify(Observations(rows["frame"], rows["track"], piece, position, clear, appearance, colour), rate)
 
     log("motion")
-    partial = _partial_views(rows, found.pieces, rate)  # who they are, yes; their 3D body, no
+    partial = _partial_views(rows, found.pieces, rate)  # their pose, yes; their position, no
     motions, people = [], []
     for who in range(int(found.person.max()) + 1 if len(found.person) else 0):
-        index = np.flatnonzero((found.person == who) & ~partial)
+        index = np.flatnonzero(found.person == who)
         index = index[np.argsort(rows["frame"][index], kind="stable")]
         frames = rows["frame"][index]
         keep = np.concatenate([[True], np.diff(frames) > 0])  # one estimate per frame
@@ -334,6 +348,7 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
             camera=np.tile([0.0, 0.0, 0.0, 1.0], (len(index), 1)),  # fixed camera: one camera frame
             depth=depth[index],
             image_height=tracks.height,
+            placed=~partial[index],
         )
         motions.append(animate(person, model, rate, world.rotation, world.origin, world.camera_position, fixed_camera))
         people.append(index)

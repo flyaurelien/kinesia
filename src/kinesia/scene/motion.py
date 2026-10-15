@@ -55,6 +55,7 @@ class PersonFrames:
     camera: np.ndarray  # (T, 4) camera-to-world rotations
     depth: np.ndarray  # (T,) raw depth-to-floor factors
     image_height: int
+    placed: np.ndarray | None = None  # (T,) False where only the pose is reliable, not the position
 
 
 @dataclass
@@ -80,6 +81,8 @@ def _identity(person: PersonFrames) -> tuple[np.ndarray, np.ndarray]:
     heights = person.boxes[:, 3] - person.boxes[:, 1]
     cut = (person.boxes[:, 1] <= 2) | (person.boxes[:, 3] >= person.image_height - 2)
     score = np.where(cut, 0.0, heights)
+    if person.placed is not None:
+        score = np.where(person.placed, score, 0.0)
     best = score >= np.percentile(score, 50) if np.any(score > 0) else np.ones(len(score), bool)
     return np.median(person.shape[best], axis=0), np.median(person.model_params[best, 136:], axis=0)
 
@@ -178,10 +181,19 @@ def animate(
         full = np.arange(f[0], f[-1] + 1)
         segments.append((int(full[0]), int(full[-1])))
         measured = np.isin(full, f)
+        placed = np.ones(len(f), dtype=bool) if person.placed is None else person.placed[lo:hi]
+        if not placed.any():
+            placed = np.ones(len(f), dtype=bool)
 
-        depth = smooth_scales(person.depth[lo:hi], rate)
+        # Where only part of the person is seen, the pose holds but the
+        # distance is a guess: position and size come from the frames around.
+        depth = person.depth[lo:hi].astype(np.float64).copy()
+        depth[~placed] = np.interp(f[~placed], f[placed], depth[placed])
+        depth = smooth_scales(depth, rate)
         placement = _placement(person.camera[lo:hi], person.cam_t[lo:hi], depth, world_rotation, world_origin)
         pelvis_raw = quat.compose(placement, local[lo:hi, PELVIS])
+        for axis in range(3):
+            pelvis_raw[~placed, axis] = np.interp(f[~placed], f[placed], pelvis_raw[placed, axis])
 
         lt = _fill(f, local[lo:hi, :, :3], full, rotations=False)
         lq = _fill(f, quat.align_hemisphere(local[lo:hi, :, 3:7]), full, rotations=True)
@@ -195,7 +207,7 @@ def animate(
         pelvis_q, _ = filters.despike_quaternions(pelvis_q[:, None], np.deg2rad(35), np.deg2rad(12))
         pelvis_q = filters.smooth_quaternions(pelvis_q[:, 0], rate, **ROOT_TURN_FILTER)
         pelvis_t, spikes = filters.despike(pelvis_t, window=5, factor=5.0, floor=0.4)
-        trusted = measured & ~spikes
+        trusted = measured & ~spikes & np.isin(full, f[placed])
         first = trajectory.solve(pelvis_t, camera_position, trusted, rate)
         pelvis_s = np.exp(filters.smooth(np.log(pelvis_s), rate, min_cutoff=0.5, beta=0.0))
         pelvis = np.concatenate([first, pelvis_q, pelvis_s], axis=1)
