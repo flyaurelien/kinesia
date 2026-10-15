@@ -84,6 +84,17 @@ class PiecesTest(unittest.TestCase):
         self.assertNotEqual(piece[0], piece[30])
 
 
+class RaisedFeetTest(unittest.TestCase):
+    def test_someone_off_the_floor_takes_the_others_depth(self):
+        class Person:
+            def __init__(self, k):
+                self.depth = np.full(10, k)
+
+        people = [(Person(1.42), None), (Person(1.01), None), (Person(1.05), None)]
+        self.assertAlmostEqual(build._scene_depth(people, [0]), 1.03)
+        self.assertEqual(build._scene_depth(people[:1], [0]), 1.0)  # alone: SAM 3D Body's own depth
+
+
 class WideBoxTest(unittest.TestCase):
     def test_a_banner_is_left_out_and_a_push_up_is_kept(self):
         rows = {"box": np.array([[0.0, 0.0, 400.0, 100.0], [0.0, 0.0, 400.0, 100.0], [0.0, 0.0, 100.0, 200.0]]),

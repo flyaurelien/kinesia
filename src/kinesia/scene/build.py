@@ -28,11 +28,12 @@ from .ground import WorldFrame, find_floor, floor_factors, lowest_foot, smooth_s
 from .identity import Observations, identify
 from .keypoints import BODY, BONES, LEFT_HIP, NECK, RIGHT_HIP
 from .metrics import SERIES, person_metrics
-from .motion import PersonFrames, animate
+from .motion import PersonFrames, animate, body_height
 
 SCENE_VERSION = 1
 MIN_PERSON_FRAMES = 8
 MAX_ASPECT = 2.5  # box width / height beyond which a box may hold a bench, a banner or a group...
+HEIGHT_RANGE = (0.9, 2.1)  # metres: people are not taller or shorter than this
 BODY_WIDTH = 0.85  # ...unless the body found in it spans this much of its width (someone lying, a push-up)
 TELEPORT_SPEED = 15.0  # m/s; a masklet moving faster between sightings has changed person
 SPRINT_HEIGHTS = 7.0  # the same across the picture, in person heights per second (crouched sprint)
@@ -180,6 +181,30 @@ def _not_a_body(rows: dict) -> np.ndarray:
     width = box[:, 2] - box[:, 0]
     body = np.ptp(rows["kp2d"][:, list(BODY), 0].astype(np.float64), axis=1)
     return (width > MAX_ASPECT * (box[:, 3] - box[:, 1])) & (body < BODY_WIDTH * width)
+
+
+def _not_on_the_floor(candidates: list, model: BodyModel) -> list[int]:
+    """The people whose feet are not on the floor, though they seem to be.
+
+    The floor correction slides each person along their camera ray until
+    their lowest foot meets the floor, and scales them with it. Someone whose
+    feet rest higher (seated with raised feet on a machine, on a step, on a
+    bed) would be pushed away and blown up: a patient on a leg press came out
+    2.4 m tall. A correction that makes a person taller or shorter than people
+    are is not trusted.
+    """
+    raised = []
+    for n, (person, _) in enumerate(candidates):
+        height = body_height(person, model) * float(np.median(person.depth))
+        if not HEIGHT_RANGE[0] <= height <= HEIGHT_RANGE[1]:
+            raised.append(n)
+    return raised
+
+
+def _scene_depth(candidates: list, raised: list[int]) -> float:
+    """The floor correction of the others, which the lens shares; 1 (SAM 3D Body's own depth) if alone."""
+    others = [float(np.median(person.depth)) for n, (person, _) in enumerate(candidates) if n not in raised]
+    return float(np.median(others)) if others else 1.0
 
 
 def _partial_views(rows: dict, piece: np.ndarray, rate: float) -> np.ndarray:
@@ -332,7 +357,7 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
 
     log("motion")
     partial = _partial_views(rows, found.pieces, rate)  # their pose, yes; their position, no
-    motions, people = [], []
+    candidates = []
     for who in range(int(found.person.max()) + 1 if len(found.person) else 0):
         index = np.flatnonzero(found.person == who)
         index = index[np.argsort(rows["frame"][index], kind="stable")]
@@ -352,6 +377,12 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
             image_height=tracks.height,
             placed=~partial[index],
         )
+        candidates.append((person, index))
+    raised = _not_on_the_floor(candidates, model) if fixed_camera else []
+    motions, people = [], []
+    for n, (person, index) in enumerate(candidates):
+        if n in raised:
+            person.depth = np.full(len(index), _scene_depth(candidates, raised))
         motions.append(animate(person, model, rate, world.rotation, world.origin, world.camera_position, fixed_camera))
         people.append(index)
 

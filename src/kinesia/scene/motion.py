@@ -262,6 +262,12 @@ def animate(
     )
 
 
+def body_height(person: PersonFrames, model: BodyModel) -> float:
+    """The person's standing height (metres) at SAM 3D Body's own scale, before any floor correction."""
+    shape, scales = _identity(person)
+    return _standing_height(model, model.rest_vertices(shape), scales, 0.01)
+
+
 def _standing_height(model: BodyModel, rest: np.ndarray, scales: np.ndarray, world_per_cm: float) -> float:
     """Height of the person's mesh in the neutral pose, in world metres."""
     neutral = np.zeros((1, 204))
