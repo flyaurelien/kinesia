@@ -101,14 +101,19 @@ def run(
 
     tracks = read_tracks(tracks_path)
 
-    # 2. The (fixed) camera's focal length, which the body model needs.
+    # 2. The (fixed) camera's focal length, which the body model needs: the
+    # calibrated one when given, else measured from the picture.
     camera_path = raw / "camera.json"
     if not camera_path.is_file():
         from .lens import estimate_focal
 
         emit("stage", stage="camera", state="running")
-        weights = os.environ.get("MOGE_WEIGHTS")
-        focal, source, samples = estimate_focal(video, frames, width, height, Path(weights) if weights else None)
+        given = request.get("focal")
+        if given:  # in pixels of the uploaded video, which normalization may have resized
+            focal, source, samples = float(given["pixels"]) * width / float(given["width"]), "given", []
+        else:
+            weights = os.environ.get("MOGE_WEIGHTS")
+            focal, source, samples = estimate_focal(video, frames, width, height, Path(weights) if weights else None)
         K = [[focal, 0.0, width / 2.0], [0.0, focal, height / 2.0], [0.0, 0.0, 1.0]]
         camera_path.write_text(json.dumps({"K": K, "source": source, "samples": samples}))
         receipts["camera"] = {"focal": round(focal, 1), "source": source, "samples": samples}

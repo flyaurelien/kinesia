@@ -26,7 +26,7 @@ from . import export, filters, quat
 from .body_model import BodyModel
 from .ground import WorldFrame, find_floor, floor_factors, lowest_foot, smooth_scales
 from .identity import Observations, identify
-from .keypoints import BODY, BONES, LEFT_HIP, RIGHT_HIP
+from .keypoints import BODY, BONES, LEFT_HIP, NECK, RIGHT_HIP
 from .metrics import SERIES, person_metrics
 from .motion import PersonFrames, animate
 
@@ -312,7 +312,9 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
     rows = {key: value[~picture] for key, value in rows.items()}
     points_rc = rows["kp3d"].astype(np.float64) + rows["cam_t"].astype(np.float64)[:, None, :]
     cut = rows["box"][:, 3] >= tracks.height - 2  # feet below the picture: their position is a guess
-    plane = find_floor(points_rc[~cut])
+    trunk = points_rc[:, NECK] - 0.5 * (points_rc[:, LEFT_HIP] + points_rc[:, RIGHT_HIP])
+    up = np.median(trunk / np.linalg.norm(trunk, axis=1, keepdims=True).clip(1e-9), axis=0)
+    plane = find_floor(points_rc[~cut], up=up / np.linalg.norm(up))
     lowest = lowest_foot(points_rc, -plane.normal)
     depth, reachable = floor_factors(lowest, plane)
     if not fixed_camera:  # a moving camera has no one floor: keep SAM 3D Body's own distance and size

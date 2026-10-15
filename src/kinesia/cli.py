@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--name")
     create.add_argument("--max-people", type=int)
     create.add_argument("--moving-camera", action="store_true", help="the camera moves: skip the steps that assume it is still")
+    create.add_argument("--focal", type=float, help="the camera's focal length in pixels of this video, if it is calibrated")
 
     for command in ("process", "cancel", "status", "scene"):
         sub.add_parser(command).add_argument("run_id")
@@ -79,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         request = {"max_people": args.max_people} if args.max_people else {}
         if args.moving_camera:
             request["camera"] = "moving"
+        if args.focal:
+            from .video import probe
+
+            request["focal"] = {"pixels": args.focal, "width": probe(args.video).width}
         print(new_run(args.video, args.name, request))
         return 0
     if args.command == "list":

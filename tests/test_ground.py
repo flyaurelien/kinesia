@@ -4,7 +4,8 @@ import unittest
 
 import numpy as np
 
-from kinesia.scene.ground import Plane, WorldFrame, depth_scales, fit_plane, smooth_scales
+from kinesia.scene.ground import Plane, WorldFrame, depth_scales, find_floor, fit_plane, smooth_scales
+from kinesia.scene.keypoints import FEET
 
 
 class GroundTest(unittest.TestCase):
@@ -31,6 +32,20 @@ class GroundTest(unittest.TestCase):
         k[40:52] = 1.4  # 0.4 s off the floor
         smoothed = smooth_scales(k, 30.0)
         self.assertLess(np.abs(smoothed - 1.0).max(), 0.03)
+
+    def test_feet_along_one_line_take_the_floor_tilt_from_the_trunks(self):
+        # Two people barely moving: the feet of one on the floor 1.5 m below
+        # the camera, the other's raised on a machine, all along one line.
+        rng = np.random.default_rng(1)
+        points = np.zeros((200, 70, 3))
+        depth = rng.uniform(3.0, 4.0, 200)
+        height = np.where(np.arange(200) < 100, 1.5, 1.2)
+        points[:, list(FEET)] = np.column_stack([np.zeros(200), height, depth])[:, None, :]
+        points[:, list(FEET), 0] += rng.normal(0, 0.03, (200, len(FEET)))
+        up = np.array([0.0, -1.0, 0.0])
+        plane = find_floor(points, up=up)
+        self.assertGreater(plane.normal @ up, 0.999)
+        self.assertAlmostEqual(plane.offset, 1.5, delta=0.05)
 
     def test_world_frame_is_z_up_with_the_floor_at_zero(self):
         plane = Plane(np.array([0.0, -1.0, 0.0]), 1.5)

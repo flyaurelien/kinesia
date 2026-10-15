@@ -24,6 +24,7 @@ from . import filters
 from .keypoints import FEET
 
 MIN_SCALE, MAX_SCALE = 0.6, 1.7
+MIN_SPREAD = 0.25  # metres (std) the feet must cover across their main direction for the floor's tilt to be measured
 
 
 @dataclass
@@ -72,11 +73,16 @@ def lowest_foot(points_cam: np.ndarray, down: np.ndarray) -> np.ndarray:
     return feet[np.arange(len(feet)), pick]
 
 
-def find_floor(points_world: np.ndarray, sample: int = 20000, seed: int = 0) -> Plane:
+def find_floor(points_world: np.ndarray, sample: int = 20000, seed: int = 0, up: np.ndarray | None = None) -> Plane:
     """Fit the floor to foot keypoints (N, 70, 3), given in rotation-compensated camera coordinates.
 
     Camera images are close to level, so the first guess of "down" is image
     down (+y); the plane found with it gives a better "down" for a second pass.
+
+    Feet that stay along one line (two people barely moving, one of them
+    seated with raised feet) do not fix the floor's tilt. Then, when ``up`` is
+    given (the direction people's trunks point, on average), the floor is
+    square to it, under the lowest feet.
     """
     rng = np.random.default_rng(seed)
     down = np.array([0.0, 1.0, 0.0])
@@ -85,9 +91,20 @@ def find_floor(points_world: np.ndarray, sample: int = 20000, seed: int = 0) -> 
         lowest = lowest_foot(points_world, down)
         if len(lowest) > sample:
             lowest = lowest[rng.choice(len(lowest), sample, replace=False)]
-        plane, _ = fit_plane(lowest)
+        plane, inliers = fit_plane(lowest)
         down = -plane.normal
     assert plane is not None
+    if up is not None:
+        feet = lowest[inliers]
+        centred = feet - feet.mean(axis=0)
+        flat = centred - np.outer(centred @ plane.normal, plane.normal)
+        _, spread, axes = np.linalg.svd(flat, full_matrices=False)
+        if spread[1] / np.sqrt(len(flat)) < MIN_SPREAD:
+            normal = up / np.linalg.norm(up)
+            offset = -float(np.percentile(feet @ normal, 10))  # the lowest feet stand on it
+            if offset < 0:
+                normal, offset = -normal, -offset
+            plane = Plane(normal, offset)
     return plane
 
 
