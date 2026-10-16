@@ -107,6 +107,37 @@ def keep_shared_conditioning() -> bool:
     return True
 
 
+def scale_video_pixels() -> bool:
+    """Feed the model video frames in [-1, 1], as its image loaders do.
+
+    At the pinned Meta revision the OpenCV video loader, which the predictor
+    uses for every video file, subtracts the 0.5 mean and divides by the 0.5
+    std straight from 0-255 pixels: frames reach the model in [-1, 509]
+    instead of [-1, 1]. The image loaders in the same file divide by 255
+    first. The loader is given the mean and std in pixel units instead, which
+    is the same normalisation. Returns False if already applied, or if the
+    loader already divides by 255.
+    """
+    from sam3.model import io_utils
+
+    original = io_utils.load_video_frames_from_video_file_using_cv2
+    if getattr(original, "_kinesia_scales_pixels", False) or "255" in inspect.getsource(original):
+        return False
+
+    @wraps(original)
+    def load(*args, img_mean=(0.5, 0.5, 0.5), img_std=(0.5, 0.5, 0.5), **kwargs):
+        return original(
+            *args,
+            img_mean=tuple(255.0 * value for value in img_mean),
+            img_std=tuple(255.0 * value for value in img_std),
+            **kwargs,
+        )
+
+    load._kinesia_scales_pixels = True
+    io_utils.load_video_frames_from_video_file_using_cv2 = load
+    return True
+
+
 def build_predictor(checkpoint: str, source: str | None, *, max_objects: int):
     """Load the official multiplex video predictor on the GPU.
 
@@ -135,6 +166,7 @@ def build_predictor(checkpoint: str, source: str | None, *, max_objects: int):
     predictor.bf16_context.__exit__(None, None, None)
     _accept_false_offload_keyword(predictor)
     keep_shared_conditioning()
+    scale_video_pixels()
     return predictor
 
 
