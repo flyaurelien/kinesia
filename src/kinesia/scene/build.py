@@ -33,6 +33,7 @@ from .motion import PersonFrames, animate, body_height
 SCENE_VERSION = 1
 MIN_PERSON_FRAMES = 8
 MAX_ASPECT = 2.5  # box width / height beyond which a box may hold a bench, a banner or a group...
+FIRST_PEOPLE_SECONDS = 0.5  # with "first people": who appears this soon after the first person is kept
 HEIGHT_RANGE = (0.9, 2.1)  # metres: people are not taller or shorter than this
 BODY_WIDTH = 0.85  # ...unless the body found in it spans this much of its width (someone lying, a push-up)
 TELEPORT_SPEED = 15.0  # m/s; a masklet moving faster between sightings has changed person
@@ -181,6 +182,20 @@ def _not_a_body(rows: dict) -> np.ndarray:
     width = box[:, 2] - box[:, 0]
     body = np.ptp(rows["kp2d"][:, list(BODY), 0].astype(np.float64), axis=1)
     return (width > MAX_ASPECT * (box[:, 3] - box[:, 1])) & (body < BODY_WIDTH * width)
+
+
+def _first_people(candidates: list, rate: float) -> list:
+    """Only the people in the picture when it starts (``kinesia new --first-people``).
+
+    A study often films given people, a patient and a therapist, an athlete
+    and a coach; whoever walks in later is not one of them. "When it starts"
+    is when the first person is seen, give or take half a second for the
+    others to be detected.
+    """
+    if not candidates:
+        return candidates
+    start = min(int(person.frames[0]) for person, _ in candidates)
+    return [(person, index) for person, index in candidates if person.frames[0] <= start + FIRST_PEOPLE_SECONDS * rate]
 
 
 def _not_on_the_floor(candidates: list, model: BodyModel) -> list[int]:
@@ -378,6 +393,8 @@ def build_scene(folder: Path, body_dir: Path | None = None, log=print) -> dict:
             placed=~partial[index],
         )
         candidates.append((person, index))
+    if request.get("people") == "first":
+        candidates = _first_people(candidates, rate)
     raised = _not_on_the_floor(candidates, model) if fixed_camera else []
     motions, people = [], []
     for n, (person, index) in enumerate(candidates):

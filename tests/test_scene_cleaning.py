@@ -84,6 +84,17 @@ class PiecesTest(unittest.TestCase):
         self.assertNotEqual(piece[0], piece[30])
 
 
+class FirstPeopleTest(unittest.TestCase):
+    def test_who_walks_in_later_is_left_out(self):
+        class Person:
+            def __init__(self, first):
+                self.frames = np.arange(first, first + 50)
+
+        people = [(Person(first), first) for first in (12, 20, 26, 90)]  # 25 fps: 0.32 s, 0.56 s, 3.1 s after the first
+        kept = [index for _, index in build._first_people(people, 25.0)]
+        self.assertEqual(kept, [12, 20])
+
+
 class RaisedFeetTest(unittest.TestCase):
     def test_someone_off_the_floor_takes_the_others_depth(self):
         class Person:
