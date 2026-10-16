@@ -201,7 +201,8 @@ def raw_detections(folder: Path, model: BodyModel, joints: Joints) -> dict:
     for joint, keypoint in MHR_MATCHING.items():
         uv[:, joint] = kp2d[:, keypoint]
     uv[:, 1] = kp2d[:, [5, 6]].mean(axis=1)
-    return {"frame": rows["frame"], "track": rows["track"], "box": rows["box"].astype(np.float64), "joints": out, "uv": uv}
+    return {"frame": rows["frame"], "track": rows["track"], "box": rows["box"].astype(np.float64), "joints": out, "uv": uv,
+            "outline": kp2d[:, BODY_KEYPOINTS]}  # fmt: skip
 
 
 def per_frame(people: list[dict], step: int, frames: int, scale: float, mode: str) -> list[list[dict]]:
@@ -216,7 +217,7 @@ def per_frame(people: list[dict], step: int, frames: int, scale: float, mode: st
         for f, i in index.items():
             source = f * step
             if source < frames:
-                out[source].append({"id": pid, "joints": person["joints"][i], "uv": person["uv"][i] * scale})
+                out[source].append({"id": pid, "joints": person["joints"][i], "uv": person["uv"][i] * scale, "body_box": body_box(person["uv"][i] * scale)})
             if mode != "all" or step == 1 or f + 1 not in index:
                 continue
             j = index[f + 1]
@@ -225,7 +226,7 @@ def per_frame(people: list[dict], step: int, frames: int, scale: float, mode: st
                     break
                 a = k / step
                 lerp = lambda key: (1 - a) * person[key][i] + a * person[key][j]  # noqa: E731
-                out[source + k].append({"id": pid, "joints": lerp("joints"), "uv": lerp("uv") * scale})
+                out[source + k].append({"id": pid, "joints": lerp("joints"), "uv": lerp("uv") * scale, "body_box": body_box(lerp("uv") * scale)})
     return out
 
 
@@ -250,7 +251,8 @@ def raw_per_frame(raw: dict, step: int, frames: int, scale: float) -> list[list[
     out: list[list[dict]] = [[] for _ in range(frames)]
     for i, f in enumerate(raw["frame"]):
         if f * step < frames:
-            out[f * step].append({"id": int(raw["track"][i]), "joints": raw["joints"][i], "uv": raw["uv"][i] * scale, "box": raw["box"][i] * scale})
+            out[f * step].append({"id": int(raw["track"][i]), "joints": raw["joints"][i], "uv": raw["uv"][i] * scale, "box": raw["box"][i] * scale,
+                                  "body_box": body_box(raw["outline"][i] * scale)})  # fmt: skip
     return out
 
 
@@ -308,6 +310,20 @@ ANGLES = {
 }
 LIMBS = [(2, 3), (3, 4), (5, 6), (6, 7), (8, 9), (9, 10), (11, 12), (12, 13)]  # upper arms, forearms, thighs, shanks
 ANKLES = [10, 13]
+BODY_KEYPOINTS = [*range(21), 41, 62]  # MHR70: head to feet, and the wrists
+
+
+def body_box(points: np.ndarray) -> np.ndarray:
+    """``[x0, y0, x1, y1]`` around a body's 2D keypoints, 10% wider on each side:
+    how MuPoTS-3D's tracking boxes are drawn around its joints, hidden ones
+    included."""
+    lo, hi = points.min(axis=0), points.max(axis=0)
+    pad = 0.1 * (hi - lo)
+    return np.concatenate([lo - pad, hi + pad])
+
+
+def with_boxes(predictions: list[list[dict]], key: str) -> list[list[dict]]:
+    return [[{**p, "box": p[key]} for p in frame] for frame in predictions]
 
 
 def angles(joints: np.ndarray) -> np.ndarray:
@@ -552,6 +568,8 @@ def main() -> int:
     parser.add_argument("regressor", type=Path, help="SPIN's data/J_regressor_h36m.npy")
     parser.add_argument("runs", nargs="+", help="analysis ids, one per sequence")
     parser.add_argument("--frames", choices=("all", "analysed"), default="all")
+    parser.add_argument("--boxes", choices=("body", "mask"), default="body",
+                        help="tracking boxes: around each body's 2D keypoints, as MuPoTS draws its own (default), or around its mask")
     parser.add_argument("--json", type=Path)
     parser.add_argument("--cache", type=Path, help="folder keeping SAM 3D Body's own estimates between runs of this script")
     args = parser.parse_args()
@@ -576,10 +594,13 @@ def main() -> int:
         ours = per_frame(people, step, frames, scale, args.frames)
         our_boxes = boxes_per_frame(people, step, frames, scale, args.frames)
         cached = args.cache / f"{run}.npz" if args.cache else None
+        raw = None
         if cached and cached.is_file():
             with np.load(cached) as data:
                 raw = {key: data[key] for key in data.files}
-        else:
+            if "outline" not in raw:  # kept by an older version of this script
+                raw = None
+        if raw is None:
             raw = raw_detections(folder, model, joints)
             if cached:
                 cached.parent.mkdir(parents=True, exist_ok=True)
@@ -594,7 +615,10 @@ def main() -> int:
             dt = (step if args.frames == "analysed" else 1) / source.fps
             rows[name][seq] = pose_errors(annotations[keep], occlusion[keep], [p for i, p in enumerate(predictions) if keep[i]], dt)
             rows[name][seq]["people"] = int(annotations.shape[1])
-            tracks[name][seq] = (gt, predictions if name == "sam3d" else our_boxes)
+            if args.boxes == "body":
+                tracks[name][seq] = (gt, with_boxes(predictions, "body_box"))
+            else:
+                tracks[name][seq] = (gt, predictions if name == "sam3d" else our_boxes)
         r, k = rows["sam3d"][seq], rows["kinesia"][seq]
         print(f"TS{seq:<3d} {int(annotations.shape[1])} people  "
               f"3DPCK all {pck_auc(r['errors'])[0]:5.1f} -> {pck_auc(k['errors'])[0]:5.1f}  "

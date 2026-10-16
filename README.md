@@ -113,7 +113,10 @@ a boxing clip framed above the knees, no floor could be found and the
 analysis stopped. When the camera is calibrated, `kinesia new --focal
 <pixels>` uses its focal length instead of estimating it from the picture,
 which matters for where people are, not for how they move (see
-[the benchmark](#benchmark-mupots-3d-fixed-camera-several-people)).
+[the benchmark](#benchmark-mupots-3d-fixed-camera-several-people)). By
+default Kinesia follows everyone; `--first-people` follows only the people
+already in the picture when it starts (a patient and a therapist, an athlete
+and a coach), and leaves out whoever walks in later.
 
 ## Benchmark: 3DPW
 
@@ -306,29 +309,36 @@ sliding than SAM-Body4D. MuPoTS has no ground-truth surface, so mesh error
 ### Tracking
 
 The protocol of T3DP and PHALP and their released ground-truth boxes
-(IDs = identity switches):
+(IDs = identity switches). Those boxes are drawn around each person's joints,
+hidden ones included, 10% wider on each side; the rows run here are scored
+with boxes drawn the same way around each method's own body keypoints⁵.
 
 | Method | IDs ↓ | MOTA ↑ | IDF1 ↑ | HOTA ↑ |
 | --- | ---: | ---: | ---: | ---: |
 | T3DP | 38 | 62.1 | 79.1 | 59.2 |
 | PHALP | 22 | **66.2** | 81.4 | 59.4 |
-| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | **0** | 60.1 | **83.1** | **63.5** |
-| **Kinesia** | **0** | 45.0 | 78.4 | 61.6 |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | **0** | 60.3 | 83.2 | 65.3 |
+| **Kinesia**, everyone | **0** | 47.6 | 79.2 | 67.8 |
+| **Kinesia**, `--first-people` | **0** | 60.6 | **83.5** | **70.5** |
 | *annotated people only³:* | | | | |
 | ByteTrack (as run by TRACE) | 15 | 73.3 | 84.6 | 63.5 |
 | TRACE | 0 | 86.9 | 93.4 | 65.3 |
-| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | 0 | 94.3 | 97.1 | 73.7 |
-| **Kinesia** | **0** | **97.3** | **98.6** | **74.2** |
+| SAM-Body4D (SAM 3.1 instead of SAM 3)⁴ | 0 | 98.3 | 99.2 | 75.9 |
+| **Kinesia** | **0** | **99.8** | **99.9** | **81.6** |
 
-Kinesia makes no identity switch and has a higher HOTA than T3DP and PHALP
-under the strict protocol, but a lower MOTA and IDF1: it also follows the
-people MuPoTS does not annotate (a third person indoors, someone hidden behind
-a subject, passers-by far away), which the protocol counts as false positives
-(precision 65%). Leaving those people out of the output would raise MOTA
-without making Kinesia any better, so it does not. SAM-Body4D, which follows
-only the people it saw at the start (precision 72%), scores higher under the
-strict protocol and lower once unannotated people are left out, where the
-people it lost count against it.
+Kinesia and SAM-Body4D follow people equally well once they have them (no
+identity switch for either, association accuracy AssA 82.6 and 76.8), and
+Kinesia places them better (DetA 56.3 against 56.2 while following more
+people, 80.9 against 75.1 on the annotated ones). What separates them is who
+they follow. By default Kinesia follows everyone it sees, including the
+people MuPoTS does not annotate (a third person indoors, someone hidden
+behind a subject, passers-by far away), which the strict protocol counts as
+false positives (precision 66%). SAM-Body4D follows only the people it finds
+on its first frame, which this protocol rewards (precision 72%) but which
+loses whoever walks in later (recall 98.3% against 99.8%). With the same
+choice, `--first-people`, Kinesia matches or beats SAM-Body4D on every
+measure. Leaving real people out of the default output would raise MOTA
+without making Kinesia any better, so it does not.
 
 ### Compute time
 
@@ -394,8 +404,8 @@ cleaner motion.
   ankle's travel while the true ankle moves less than 1 cm.
 - Tracking uses py-motmetrics with IoU matching for IDs, MOTA and IDF1 over
   all sequences, and TrackEval's HOTA averaged per sequence, as in PHALP's
-  evaluation code. Kinesia's boxes are those of its video overlay: SAM 3.1's
-  mask box of each person on every frame Kinesia shows them in.
+  evaluation code. Kinesia's boxes come from its 3D bodies, on every frame
+  it shows each person in (see ⁵).
 - ¹ SAM 3D Body alone has no frames between Kinesia's analysed ones, so its
   rows are scored on the analysed frames only (scored the same way, Kinesia
   gets 93.5 / 93.6). Motion-capture measures use the analysed frames for both.
@@ -435,6 +445,13 @@ cleaner motion.
 - The calibrated rows are separate analyses made with `kinesia new --focal`,
   the focal length fitted per sequence to the ground truth's 2D and 3D joints
   (1,101 to 1,509 px).
+- ⁵ Tracking boxes: MuPoTS's ground-truth boxes span each person's 2D
+  joints, hidden ones included, 10% wider on each side. Kinesia, SAM 3D Body
+  and SAM-Body4D are scored with boxes drawn the same way around their own
+  body keypoints (Kinesia: its 3D bodies seen through its camera); the
+  literature rows used their own detector boxes. With mask boxes instead,
+  which cover only what is visible, Kinesia scores 45.0 MOTA, 78.4 IDF1 and
+  61.6 HOTA, SAM-Body4D 60.1, 83.1 and 63.5 (`--boxes mask`).
 - Reproduce with `scripts/benchmark_mupots.py`, and SAM-Body4D with
   `scripts/benchmark_mupots_sambody4d.py` (see their headers). Kinesia's GPU
   stages ran on 40 GB A100s.
@@ -516,7 +533,8 @@ Everything is also available from the command line:
 
 ```bash
 uv run --no-sync kinesia new input/match.mp4 --name "Sunday match"          # add --moving-camera for a moving camera,
-                                                                    # --focal <pixels> for a calibrated one
+                                                                    # --focal <pixels> for a calibrated one,
+                                                                    # --first-people to leave out who walks in later
 uv run --no-sync kinesia process <run-id>                           # GPU stages, then the 3D scene
 uv run --no-sync kinesia cancel <run-id>                            # stop it; the GPU is freed
 uv run --no-sync kinesia scene <run-id>                             # rebuild the 3D scene

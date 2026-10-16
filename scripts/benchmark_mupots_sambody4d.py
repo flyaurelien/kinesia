@@ -239,7 +239,7 @@ def use_sam31(source: Path, checkpoint: Path) -> None:
 def predictions(folder: Path, model, joints, frames: int) -> list[list[dict]]:
     """Per-frame ``[{id, joints, uv, box}]`` as ``benchmark_mupots`` builds them
     (the videos are the frames at their own size: pixels are MuPoTS's)."""
-    from benchmark_mupots import MHR_MATCHING
+    from benchmark_mupots import BODY_KEYPOINTS, MHR_MATCHING, body_box
 
     with np.load(folder / "bodies.npz") as data:
         rows = {key: data[key] for key in data.files}
@@ -260,7 +260,8 @@ def predictions(folder: Path, model, joints, frames: int) -> list[list[dict]]:
     out: list[list[dict]] = [[] for _ in range(frames)]
     for i, f in enumerate(rows["frame"]):
         if f < frames:
-            out[f].append({"id": int(rows["track"][i]), "joints": out3d[i], "uv": uv[i], "box": rows["box"][i].astype(np.float64)})
+            out[f].append({"id": int(rows["track"][i]), "joints": out3d[i], "uv": uv[i], "box": rows["box"][i].astype(np.float64),
+                           "body_box": body_box(kp2d[i, BODY_KEYPOINTS])})  # fmt: skip
     return out
 
 
@@ -268,7 +269,7 @@ def score(args) -> int:
     from scipy.io import loadmat
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from benchmark_mupots import Joints, pck_auc, pose_errors, summarise, unpickle_numpy
+    from benchmark_mupots import Joints, pck_auc, pose_errors, summarise, unpickle_numpy, with_boxes
 
     from kinesia.settings import load_local_env, model_files
     from kinesia.scene.body_model import BodyModel
@@ -297,7 +298,7 @@ def score(args) -> int:
         keep = np.arange(frames) % step == 0
         rows[seq] = pose_errors(annotations[keep], occlusion[keep], [p for i, p in enumerate(preds) if keep[i]], step / fps)
         rows[seq]["people"] = int(annotations.shape[1])
-        tracks[seq] = (gt, preds)
+        tracks[seq] = (gt, with_boxes(preds, "body_box") if args.boxes == "body" else preds)
         seconds += meta["seconds"]["total"]
         frames_done += frames
         r = rows[seq]
@@ -330,6 +331,7 @@ def main() -> int:
     s.add_argument("--frames", choices=("all", "analysed"), default="all",
                    help="analysed: only the frames Kinesia analyses, as benchmark_mupots.py --frames analysed")
     s.add_argument("--json", type=Path)
+    s.add_argument("--boxes", choices=("body", "mask"), default="body", help="tracking boxes: around the body's 2D keypoints (default) or its mask")
     args = parser.parse_args()
     if args.command == "run":
         args.out.mkdir(parents=True, exist_ok=True)
